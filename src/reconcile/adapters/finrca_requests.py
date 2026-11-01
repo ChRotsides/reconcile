@@ -16,8 +16,9 @@ Two outputs go to two separate directories:
 
 The evaluator directory must not equal, lie inside or contain the inference or
 snapshot directory (the snapshot directory is what inference code can read).
-The key file must lie outside both directories. The same inputs and key give
-byte-identical files. Only train, validation and test can be requested; the
+The key file must lie outside both directories and the snapshot directory.
+The same inputs and key give byte-identical files.
+Only train, validation and test can be requested; the
 sealed `challenge_test` split is refused before any file is touched.
 """
 
@@ -113,8 +114,8 @@ def prepare_finrca_requests(
     snap_dir = snapshot_dir.resolve()
     if _inside(evaluator_dir, snap_dir) or _inside(snap_dir, evaluator_dir):
         raise ValueError("evaluator directory must not overlap the snapshot directory")
-    if _inside(key_path, inference_dir) or _inside(key_path, evaluator_dir):
-        raise ValueError("key file must be outside both output directories")
+    if any(_inside(key_path, d) for d in (inference_dir, evaluator_dir, snap_dir)):
+        raise ValueError("key file must be outside the output and snapshot directories")
     for d in (inference_dir, evaluator_dir):
         if (d / REQUESTS_FILE).exists() or (d / LINKS_FILE).exists():
             raise FileExistsError(f"{d} already holds prepared requests or links")

@@ -256,7 +256,7 @@ def test_key_inside_an_output_directory_is_refused(env: dict[str, Path]) -> None
         inside = env[where] / "sub" / "key"
         inside.parent.mkdir(parents=True)
         inside.write_text(env["key"].read_text())
-        with pytest.raises(ValueError, match="outside both"):
+        with pytest.raises(ValueError, match="key file must be outside"):
             run(env, key_path=inside)
 
 
@@ -348,3 +348,13 @@ def test_inference_dir_must_not_hold_links(env: dict[str, Path]) -> None:
         with pytest.raises(ValueError, match="separate"):
             run(env, inference_dir=inference)
     assert not (env["ev"] / "links.jsonl").exists()
+
+
+def test_key_inside_the_snapshot_directory_is_refused(env: dict[str, Path]) -> None:
+    for name in ("key.bin", "sub/key.bin"):
+        inside = env["snap"] / name
+        inside.parent.mkdir(parents=True, exist_ok=True)
+        inside.write_text(env["key"].read_text())
+        with pytest.raises(ValueError, match="key file must be outside"):
+            run(env, key_path=inside)
+    assert not env["inf"].exists() and not env["ev"].exists()
