@@ -37,9 +37,13 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from reconcile.adapters.finrca import _Tokens, create_key_file, prepare_finrca_snapshot
-from reconcile.adapters.finrca_requests import prepare_finrca_requests
-from reconcile.diagnosis.policy import POLICY_VERSION
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import cohort as C  # noqa: E402  (shared cohort, groups and label conflicts)
+
+from reconcile.adapters.finrca import create_key_file, prepare_finrca_snapshot  # noqa: E402
+from reconcile.adapters.finrca_requests import prepare_finrca_requests  # noqa: E402
+from reconcile.diagnosis.policy import POLICY_VERSION  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_UPSTREAM = Path(
@@ -50,46 +54,8 @@ CUTOFF = date(2026, 6, 30)
 SPLITS = ("train", "validation")  # the only splits this script ever names
 IMAGE = "reconcile-inference:dev"
 SCRIPT = REPO / "deploy/inference/run_inference.sh"
-
-# ------------------------------------------------------------------ cohort
-
-FAMILY_KEYS = {
-    "F06_INVOICE_PAID_TWICE": "F06",
-    "F12_ERP_PAYMENT_MISSING_FROM_BANK": "F12",
-    "F14_BANK_ERP_AMOUNT_MISMATCH": "F14",
-}
-# Ten payment-related legitimate variants (docs/data-audit.md section 2) and the
-# category the investigator uses for each. Pending, clearing and so on map to
-# the investigator's own category names; no_exception is handled separately.
-VARIANT_CATEGORY = {
-    "legitimate_pending_settlement": "legitimate_pending_settlement",
-    "legitimate_weekend_clearing": "legitimate_weekend_clearing",
-    "legitimate_check_clearing": "legitimate_check_clearing",
-    "legitimate_due_date_payment": "legitimate_due_date_payment",
-    "legitimate_split_payment": "legitimate_split_payment",
-    "legitimate_batch_payment": "legitimate_batch_payment",
-    "legitimate_payment_reversal": "legitimate_payment_reversal",
-    "legitimate_net_fee_accounting": "legitimate_net_fee_accounting",
-    "legitimate_accounted_bank_fee": "legitimate_accounted_bank_fee",
-    "legitimate_fx_settlement": None,  # correct outcome is an abstention
-}
-# docs/evidence-contract.md section 8: the 4 split cases whose records refute
-# the label, and the F06 case whose duplicate debit posts after the cutoff.
-CONTRADICTED = {"RCA_001631", "RCA_001791", "RCA_002223", "RCA_002127"}
-NOT_GRADABLE = {"RCA_000588"}
-
-FAILURE_CATEGORIES = {"F06", "F12", "F14"}
-# Categories the investigator may emit that mean "no failure".
-NO_FAILURE_CATEGORIES = {"no_exception"}
-
-
-def is_no_failure(category: str) -> bool:
-    return category in NO_FAILURE_CATEGORIES or category.startswith("legitimate")
-
-
-def is_failure(category: str) -> bool:
-    return not is_no_failure(category)
-
+is_failure = C.is_failure
+is_no_failure = C.is_no_failure
 
 # ------------------------------------------------------------ orchestration
 
@@ -339,6 +305,14 @@ class View:
         for c in packet["calculations"]:
             cited = {self._key(o["evidence_id"]) for o in c["operands"]}
             self.calcs.append((c["calculation_id"], cited))
+        self.findings = [
+            (
+                f["check_id"],
+                f["state"],
+                {self._key(i) for i in f["evidence_ids"]},
+            )
+            for f in packet["diagnosis"]["findings"]
+        ]
         self.day_counts = [
             (
                 d["calculation_id"],
@@ -368,6 +342,13 @@ class View:
             for s in self.searches
         )
 
+    def finding_over(self, check_id: str, *keys: tuple[str, str]) -> bool:
+        """A supported finding `check_id` that cites every record in `keys`."""
+        return any(
+            c == check_id and state == "supported" and set(keys) <= cited
+            for c, state, cited in self.findings
+        )
+
     def calc_over(self, *keys: tuple[str, str]) -> bool:
         return any(set(keys) <= cited for _, cited in self.calcs)
 
@@ -386,9 +367,11 @@ def bank_ids(rows: list[dict]) -> list[str]:
     return [r["bank_transaction_id"] for r in rows]
 
 
-def required(category: str, entity: tuple[str, str], s: Snap, v: View):
-    """Contract requirements for `category` on this primary entity: a list of
-    (name, satisfied). An empty list means the category has no contract here."""
+def _category_requirements(
+    category: str, entity: tuple[str, str], s: Snap, v: View
+) -> list[tuple[str, bool]]:
+    """The per-category requirements of docs/evidence-contract.md sections 4
+    and 5 on this primary entity (without the all-clear prerequisites)."""
     table, rid = entity
     out: list[tuple[str, bool]] = []
 
@@ -596,97 +579,124 @@ def required(category: str, entity: tuple[str, str], s: Snap, v: View):
     return out
 
 
+# Finding names the investigator gives the two all-clear prerequisites
+# (docs/evidence-contract.md section 5, "All-clear prerequisites").
+APPROVAL_FINDING = "final_approval_before_payment"
+JOURNAL_FINDING = "payment_journal_matches_payment"
+TERMINAL_ACTIONS = ("approved", "auto_approved")
+
+
+def guarded_payments(
+    category: str, entity: tuple[str, str], s: Snap
+) -> list[dict] | None:
+    """The payments whose prerequisites an all-clear `category` packet must
+    show: the primary payment, the payment a fee row resolves to, or each
+    effective payment allocated to the primary invoice. None when `category`
+    is not an all-clear."""
+    if not is_no_failure(category):
+        return None
+    table, rid = entity
+    if table == "payments":
+        pay = s.payment(rid)
+        return [pay] if pay else []
+    if table == "bank_transactions":
+        row = s.one(
+            "SELECT * FROM bank_transactions WHERE bank_transaction_id = ?", rid
+        )
+        pays = s.q(
+            "SELECT * FROM payments WHERE reference_number = ?",
+            (row["payment_reference"] or "") if row else "",
+        )
+        return pays if len(pays) == 1 else []
+    pays = [s.payment(a["payment_id"]) for a in s.allocs_of_invoice(rid)]
+    return [p for p in pays if p and effective(p)]
+
+
+def guard_requirements(pays: list[dict], s: Snap, v: View) -> list[tuple[str, bool]]:
+    """Contract 0.3 prerequisites of every all-clear, per payment: the
+    allocations that name the invoices, a terminal approval event of each such
+    invoice and the supported approval finding that cites it, the payment
+    journals, the calculation payment minus journals, and the supported journal
+    finding. Which approval event the investigator selects is not checked."""
+    names = (
+        "guard_allocations",
+        "approval_event",
+        "approval_finding",
+        "payment_journal",
+        "payment_journal_calculation",
+        "payment_journal_finding",
+    )
+    ok = dict.fromkeys(names, bool(pays))
+    for p in pays:
+        pid = p["payment_id"]
+        pkey = ("payments", pid)
+        allocs = s.allocs_of_payment(pid)
+        ok["guard_allocations"] &= bool(allocs) and v.cites(
+            "payment_allocations", alloc_ids(allocs)
+        )
+        for inv in sorted({a["invoice_id"] for a in allocs}):
+            finals = s.q(
+                "SELECT approval_event_id FROM approval_events WHERE invoice_id = ?"
+                " AND action IN (?, ?) AND new_status = 'approved'",
+                inv,
+                *TERMINAL_ACTIONS,
+            )
+            cited = [
+                ("approval_events", e["approval_event_id"])
+                for e in finals
+                if ("approval_events", e["approval_event_id"]) in v.records
+            ]
+            ok["approval_event"] &= bool(cited)
+            ok["approval_finding"] &= any(
+                v.finding_over(APPROVAL_FINDING, pkey, c) for c in cited
+            )
+        jkeys = [("gl_entries", j) for j in s.balanced_journals(pid, "payment")]
+        ok["payment_journal"] &= bool(jkeys) and v.cites(
+            "gl_entries", [k[1] for k in jkeys]
+        )
+        ok["payment_journal_calculation"] &= bool(jkeys) and v.calc_over(pkey, *jkeys)
+        ok["payment_journal_finding"] &= bool(jkeys) and v.finding_over(
+            JOURNAL_FINDING, pkey, *jkeys
+        )
+    return list(ok.items())
+
+
+def required(
+    category: str, entity: tuple[str, str], s: Snap, v: View
+) -> list[tuple[str, bool]]:
+    """Contract requirements for `category` on this primary entity: a list of
+    (name, satisfied). An empty list means the category has no contract here.
+    Every all-clear category also needs the contract 0.3 prerequisites."""
+    base = _category_requirements(category, entity, s, v)
+    pays = guarded_payments(category, entity, s)
+    if not base or pays is None:
+        return base
+    return [*base, *guard_requirements(pays, s, v)]
+
+
+def completeness(packet: dict, entity: tuple[str, str], snap: Snap) -> dict:
+    """Evidence completeness of an answered packet: every contract requirement
+    of its category holds and every absence search it states reproduces on the
+    snapshot (a false absence claim makes the packet incomplete)."""
+    reqs = required(packet["diagnosis"]["category"], entity, snap, View(packet))
+    mismatch = searches_reproduce(packet, snap)
+    missing = [n for n, ok in reqs if not ok]
+    if mismatch:
+        missing.append("searches_reproduce")
+    return {
+        "contract_defined": bool(reqs),
+        "complete": bool(reqs) and not missing,
+        "missing": missing,
+        "searches_mismatch": mismatch,
+    }
+
+
 # ------------------------------------------------------------------ joining
 
 
 def read_jsonl(path: Path) -> list[dict]:
     with path.open(encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
-
-
-def group_of(failure_type: str, variant: str, case_id: str) -> str:
-    """cohort | fx | contradicted | not_gradable | oos_failure | oos_legit"""
-    in_cohort = failure_type in FAMILY_KEYS or (
-        failure_type == "NO_FAILURE" and variant in VARIANT_CATEGORY
-    )
-    if not in_cohort:
-        return "oos_legit" if failure_type == "NO_FAILURE" else "oos_failure"
-    if case_id in CONTRADICTED:
-        return "contradicted"
-    if case_id in NOT_GRADABLE:
-        return "not_gradable"
-    return "fx" if variant == "legitimate_fx_settlement" else "cohort"
-
-
-# Failure families whose defect the investigator checks, derived from the
-# "Checked" list of SCOPE_LIMITATION (src/reconcile/diagnosis/policy.py):
-# F05 allocation to an invoice, F06 duplicates and invoice totals, F08 approval
-# completion, F09 payment journal equal to the payment, F12 and F14 settlement,
-# bank match and amounts, F15 payment-bank match. F10 (accounting period) is
-# listed there as not checked, so a shared F10 record hides no wrong answer.
-CHECKED_FAMILIES = (
-    "F05_PAYMENT_WITHOUT_VALID_INVOICE",
-    "F06_INVOICE_PAID_TWICE",
-    "F08_APPROVAL_WORKFLOW_FAILURE",
-    "F09_GL_POSTING_MISMATCH",
-    "F12_ERP_PAYMENT_MISSING_FROM_BANK",
-    "F14_BANK_ERP_AMOUNT_MISMATCH",
-    "F15_INCORRECT_PAYMENT_BANK_MATCH",
-)
-
-
-def label_conflicts(labels: dict[str, dict], snap: Snap, key: Path) -> dict[str, list]:
-    """Legitimate-labelled case -> cases of a checked failure family sharing a
-    payment or invoice with it. A case names the payments and invoices of its primary
-    entity, affected entities and evidence IDs; its records are those plus, for
-    each payment, the invoices it is allocated to and, for each invoice, its
-    allocating payments (snapshot allocations, by token). Two cases share a
-    record when one names it and the other names or reaches it, so a record
-    that both only reach through allocations does not count. Such a legitimate
-    case cannot be right on both labels: the same record is called clean and
-    injected-failed."""
-    tokens = _Tokens(bytes.fromhex(key.read_text().strip()))
-    raw_of: dict[str, str] = {}
-
-    def tok(raw: str) -> str:
-        t = tokens.token("payment" if raw.startswith("PAY_") else "invoice", raw)
-        raw_of[t] = raw
-        return t
-
-    def named(lab: dict) -> set[str]:
-        ids = {lab["primary_entity"]["id"], *lab["evidence_ids"]}
-        ids |= {e["id"] for e in lab["affected_entities"]}
-        return {tok(i) for i in ids if i.startswith(("PAY_", "INV_"))}
-
-    def records(named_set: set[str]) -> set[str]:
-        out = set(named_set)
-        for t in named_set:
-            for a in snap.q(
-                "SELECT payment_id, invoice_id FROM payment_allocations"
-                " WHERE payment_id = ? OR invoice_id = ?",
-                t,
-                t,
-            ):
-                out |= {a["payment_id"], a["invoice_id"]}
-        return out
-
-    names = {c: named(lab) for c, lab in labels.items()}
-    recs = {c: records(n) for c, n in names.items()}
-    found: dict[str, list] = {}
-    for c, lab in labels.items():
-        if lab["failure_type"] != "NO_FAILURE":
-            continue
-        for d, dl in sorted(labels.items()):
-            shared = (names[c] & recs[d]) | (recs[c] & names[d])
-            if dl["failure_type"] in CHECKED_FAMILIES and shared:
-                found.setdefault(c, []).append(
-                    {
-                        "failure_case": d,
-                        "failure_type": dl["failure_type"],
-                        "shared": sorted(raw_of.get(t, t) for t in shared),
-                    }
-                )
-    return found
 
 
 def classify(row: dict) -> None:
@@ -791,7 +801,11 @@ def fx_abstention_cites(packet: dict) -> bool:
 
 
 def load_split(
-    root: Path, split: str, labels_by_case: dict, snap: Snap, conflicts: dict
+    root: Path,
+    split: str,
+    labels_by_case: dict,
+    snap: Snap,
+    conflicts: C.Conflicts,
 ) -> list[dict]:
     links = {
         r["request_id"]: r["case_id"]
@@ -812,9 +826,9 @@ def load_split(
         lab = labels_by_case[case_id]
         d = p["diagnosis"]
         ent = requests[rid]["primary_entity"]
-        group = group_of(lab["failure_type"], lab["scenario_variant"], case_id)
-        if group == "cohort" and case_id in conflicts:
-            group = "label_conflict"
+        group = C.group_of(
+            lab["failure_type"], lab["scenario_variant"], case_id, conflicts.conflicts
+        )
         row = {
             "split": split,
             "case_id": case_id,
@@ -824,22 +838,19 @@ def load_split(
             "disposition": d["disposition"],
             "category": d["category"],
             "reason": d["reason"],
-            "label_conflict_with": conflicts.get(case_id, []),
+            "label_conflict_with": conflicts.conflicts.get(case_id, []),
+            "review_candidate_with": conflicts.review.get(case_id, []),
             "entity_table": ent["table"],
-            "expected_category": FAMILY_KEYS.get(lab["failure_type"])
-            or VARIANT_CATEGORY.get(lab["scenario_variant"]),
+            "expected_category": C.expected_category(
+                lab["failure_type"], lab["scenario_variant"]
+            ),
         }
         classify(row)
         row["searches_mismatch"] = searches_reproduce(p, snap)
         if group == "fx" and d["disposition"] == "abstained":
             row["fx_cites_ok"] = fx_abstention_cites(p)
         if d["disposition"] == "answered":
-            reqs = required(
-                d["category"], (ent["table"], ent["record_id"]), snap, View(p)
-            )
-            row["contract_defined"] = bool(reqs)
-            row["complete"] = bool(reqs) and all(ok for _, ok in reqs)
-            row["missing"] = [n for n, ok in reqs if not ok]
+            row |= completeness(p, (ent["table"], ent["record_id"]), snap)
         rows.append(row)
     return rows
 
@@ -851,9 +862,13 @@ def frac(n: int, d: int) -> dict:
     return {"n": n, "d": d, "rate": (round(n / d, 4) if d else None)}
 
 
-def cohort_metrics(rows: list[dict], groups: tuple[str, ...] = ("cohort",)) -> dict:
+def cohort_metrics(
+    rows: list[dict],
+    groups: tuple[str, ...] = C.COHORT_VIEWS["without_label_conflicts"],
+) -> dict:
     """Metrics over the gradable in-scope cohort (default: without the label
-    conflicts; pass ("cohort", "label_conflict") for the view with them)."""
+    conflicts; pass C.COHORT_VIEWS["with_label_conflicts"] for the view with
+    them). The baseline reports the same two views from the same module."""
     c = [r for r in rows if r["group"] in groups]
     answered = [r for r in c if r["disposition"] == "answered"]
     correct = [r for r in answered if r["outcome"] == "correct"]
@@ -963,8 +978,14 @@ def all_metrics(rows: list[dict]) -> dict:
         "dispositions_all": dict(Counter(r["disposition"] for r in rows)),
         "cohort": cohort_metrics(rows),
         "cohort_with_label_conflicts": cohort_metrics(
-            rows, ("cohort", "label_conflict")
+            rows, C.COHORT_VIEWS["with_label_conflicts"]
         ),
+        "review_candidates": [
+            {k: r.get(k) for k in ("split", "case_id", "group", "variant", "outcome")}
+            | {"review_candidate_with": r["review_candidate_with"]}
+            for r in sorted(rows, key=lambda r: r["case_id"])
+            if r["review_candidate_with"]
+        ],
         "label_conflicts": [
             {
                 k: r.get(k)
@@ -993,8 +1014,8 @@ def all_metrics(rows: list[dict]) -> dict:
             for r in sorted(rows, key=lambda r: r["case_id"])
             if r["label_conflict_with"] and r["group"] != "label_conflict"
         ],
-        "cohort_per_label": per_label(rows, ("cohort", "label_conflict", "fx")),
-        "cohort_confusion": confusion(rows, ("cohort", "label_conflict", "fx")),
+        "cohort_per_label": per_label(rows, (*C.COHORT_GROUPS, "fx")),
+        "cohort_confusion": confusion(rows, (*C.COHORT_GROUPS, "fx")),
         "fx_slice": {
             "cases": len(fx),
             "correct_abstention_unsupported_fx": frac(
@@ -1175,6 +1196,15 @@ def render(m: dict) -> str:
                     for x in r["label_conflict_with"]
                 )
             )
+        for r in a["review_candidates"]:
+            lines.append(
+                f"  review candidate, not excluded {r['case_id']} ({r['group']},"
+                f" {r['variant']}, {r['outcome']}) <- "
+                + ", ".join(
+                    f"{x['failure_case']} {x['failure_type'][:3]} {x['shared']}"
+                    for x in r["review_candidate_with"]
+                )
+            )
         line("FX correct abstentions", pct(fx["correct_abstention_unsupported_fx"]))
         line(
             "FX abstentions citing both",
@@ -1245,7 +1275,9 @@ def evaluate(tag: str, upstream: Path = DEFAULT_UPSTREAM) -> None:
         for split in SPLITS
     }
     all_labels = {c: lab for ls in labels_by_split.values() for c, lab in ls.items()}
-    conflicts = label_conflicts(all_labels, snap, REPO / "data/private" / tag / "key")
+    conflicts = C.label_conflicts(
+        all_labels, snap.con, REPO / "data/private" / tag / "key"
+    )
     for split in SPLITS:
         rows += load_split(root, split, labels_by_split[split], snap, conflicts)
     rows.sort(key=lambda r: (r["split"], r["case_id"]))

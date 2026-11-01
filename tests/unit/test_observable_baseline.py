@@ -21,14 +21,33 @@ def _load(name: str):  # type: ignore[no-untyped-def]
         sys.path.remove(str(DIR))
 
 
-def test_business_days_matches_weekday_count() -> None:
+def test_business_days_is_the_investigators_calendar() -> None:
+    """One definition, (start, end], from reconcile.domain.calendar; the
+    baseline only returns 0 where the shared function raises (end < start)."""
+    from reconcile.domain.calendar import business_days as shared
+
     f = _load("features")
+    assert f.shared_business_days is shared
     mon = date(2026, 6, 29)
     assert f.business_days(mon, mon) == 0
     assert f.business_days(mon, date(2026, 7, 6)) == 5  # Mon to next Mon
     assert f.business_days(date(2026, 6, 26), date(2026, 6, 29)) == 1  # Fri to Mon
-    assert f.business_days(date(2026, 6, 27), date(2026, 6, 29)) == 0  # Sat to Mon
+    assert f.business_days(date(2026, 6, 27), date(2026, 6, 29)) == 1  # Sat to Mon
+    # the review's boundary case: Saturday payment, Tuesday cutoff
+    assert f.business_days(date(2026, 6, 27), date(2026, 6, 30)) == 2
     assert f.business_days(mon, date(2026, 6, 1)) == 0  # reversed
+    for start, end in [(date(2026, 6, 5), date(2026, 6, 10)), (mon, date(2026, 7, 6))]:
+        assert f.business_days(start, end) == shared(start, end)
+
+
+def test_baseline_defines_no_calendar_of_its_own() -> None:
+    import ast
+
+    tree = ast.parse((DIR / "features.py").read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "business_days":
+            body = ast.unparse(node)
+            assert "weekday" not in body and "timedelta" not in body
 
 
 def test_feature_groups_cover_the_declared_residuals() -> None:

@@ -15,9 +15,11 @@ import math
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
+
+from reconcile.domain.calendar import business_days as shared_business_days
 
 # Clearing limits in business days (docs/evidence-contract.md section 6, P1).
 CLEARING_LIMITS = {"ACH": 3, "wire": 1, "check": 10, "virtual_card": 2}
@@ -38,13 +40,11 @@ RESIDUAL_GROUPS: dict[str, tuple[str, ...]] = {
 
 
 def business_days(start: date, end: date) -> int:
-    """Weekdays in the half-open interval [start, end); 0 if end <= start."""
-    if end <= start:
-        return 0
-    n = (end - start).days
-    full, rest = divmod(n, 7)
-    extra = sum(1 for k in range(rest) if (start + timedelta(days=k)).weekday() < 5)
-    return full * 5 + extra
+    """Weekdays in (start, end] by the investigator's calendar
+    (`reconcile.domain.calendar`); 0 when `end` precedes `start`, where the
+    shared function raises (a debit dated before its payment is a feature, not
+    an error, here)."""
+    return shared_business_days(start, end) if end >= start else 0
 
 
 def _d(text: str) -> date:

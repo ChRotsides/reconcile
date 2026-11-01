@@ -52,10 +52,12 @@ Run manifest (`m2-dev-1`): code commit `c4479a2352d24d536177f3f781a0b231ee3f8dd0
   - Net-fee: payment, unique posted debit, every balanced `bank_fee` journal of that debit.
   - Accounted bank fee: fee row, the resolved payment, balanced `bank_fee` journal(s).
   - `no_exception`: payment, unique posted debit, every allocation, a calculation, a day count, every allocated invoice, every effective allocation to those invoices, and equal-twin payments when any exist.
+  - **Every all-clear category** (any `legitimate_*` and `no_exception`; added in the run 4 re-evaluation, section 10 "Run 4") also needs, for each payment the packet rests on (the primary payment, the payment a fee row resolves to, or each effective payment allocated to the primary invoice): the payment's allocations cited, a terminal approval event (`approved` or `auto_approved`, `new_status` `approved`) of each allocated invoice cited together with a supported `final_approval_before_payment` finding that cites the payment and that event, every balanced payment journal cited, the calculation `payment_minus_payment_journals` over the payment and those journals, and a supported `payment_journal_matches_payment` finding. Which approval event the investigator selects is not checked.
+  - **Absence claims.** Every search in an answered packet must reproduce on the snapshot; a mismatch makes the packet incomplete (item `searches_reproduce`). Before the run 4 re-evaluation, mismatches were reported on their own line and did not enter `complete`.
   The checks are my reading of the contract text (for example "every allocation", and a day count for clearing variants). Where the contract is not explicit I chose the stricter reading.
 - Primary outcome = correct and evidence-complete / gradable cohort cases (abstentions and out-of-scope count as non-successes).
 - Extra check: every absence search in every answered packet was re-run on the snapshot; the stated count reproduced in all of them.
-- Negative control: for each answered, complete packet, deleting evidence items one at a time makes the check fail for at least one item, in 100% of packets (13 categories tested). So 100% completeness is not a vacuous check.
+- Negative control (first version): for each answered, complete packet, deleting evidence items one at a time makes the check fail for at least one item, in 100% of packets (13 categories tested). That control passes if only one requirement is enforced, and it did not exercise the contract 0.3 prerequisites; it is replaced by one control per requirement class in `tests/unit/test_dev_run_completeness.py` (section 10, "Run 4").
 
 ## 4. Headline results (gradable cohort, 503 cases)
 
@@ -295,3 +297,29 @@ No other cohort case is flagged. Flagged but outside the scored cohort (14, repo
 | False alarms, cohort legitimate | 0/206, 0/70, 0/276 | 0/210, 0/71, 0/281 |
 
 The "with" view reproduces the run 3 table above exactly. Without the 5, the only cohort abstention left is the FX case RCA_000568. All five conflicts are cases the guard abstained on, so the exclusion removes every cohort regression of run 3 against run 2 (answered 502 to 497 is the five abstentions); this does not show the guard is right on genuine legitimate cases, since none in the cohort tests that. The out-of-scope all-clear risk is unchanged (0/859).
+
+### Run 4, review fixes (re-evaluation of `m2-dev-4`, packets unchanged, after the M2 review round 1)
+
+`evaluate m2-dev-4` re-run with the evaluator changed as follows. No new inference run: the packets are those of run 3 (policy `evidence-contract-0.3`), so these figures measure the stricter evaluator on old packets, not any investigator fix.
+
+1. **Completeness enforces contract 0.3** (review finding 9). `required` in `evaluation/dev_run.py` now adds, for every all-clear category, the guard items listed in section 3 (`guard_allocations`, `approval_event`, `approval_finding`, `payment_journal`, `payment_journal_calculation`, `payment_journal_finding`), and `complete` also requires that every stated search reproduces (`searches_reproduce`). Negative controls (`tests/unit/test_dev_run_completeness.py`, 87 tests): for each of the all-clear fixtures (every answered `legitimate_*` and `no_exception` scenario in `fixtures/public`) the unmodified packet is complete, and deleting any one of the approval event, the approval finding, the payment journal, the journal calculation, the journal finding or the allocations makes it incomplete; for pending settlement, F12 (A1, A2, A3) and F14 (no-fee-journal search, two fixtures) deleting each required absence search makes it incomplete and deleting any other search does not; a count-0 search that does not reproduce makes an otherwise complete packet incomplete. With the guard requirements switched off, 65 of the 87 tests fail; with search reproduction switched off, the false-absence tests fail.
+2. **Shared cohort module** (finding 11): `evaluation/cohort.py` holds the group, label-conflict and category-mapping code. `dev_run.py` and the baseline both import it; section 3 and `docs/baseline-observable.md` describe the two views.
+3. **Label-conflict rule tightened** (finding 12): see below.
+
+**Rule, run 4.** A cohort case labelled `NO_FAILURE` is a label conflict when a record that is where a checked failure case's defect is lies in the legitimate case's own records. The defect records are the failure case's primary entity and the payments and invoices named in its upstream `evidence_ids`. The legitimate case's own records are the payments and invoices it names (primary entity, affected entities, evidence IDs) plus, for each payment, its allocated invoices and, for each invoice, its allocating payments. Any other overlap with a checked failure case (a record the failure case lists only as an affected entity, or reaches only through allocations, or that both only reach through allocations) is a **review candidate**: reported (`review_candidates` in `metrics.json`, `review_candidate_with` per case), never excluded.
+
+**Result on `m2-dev-4`.** The same five cases qualify (RCA_001679/000857, RCA_001759/000874, RCA_002175/000889, RCA_002212/000832 on F09; RCA_002182/000722 on F08): in each the failure case's defect record is the primary payment (F09) or a named evidence invoice (F08) and lies in the legitimate case's records. Review candidates found: 0. The previous rule and the tightened rule flag exactly the same cases in train and validation, in the scored cohort (5) and outside it (14); on this data every shared record was already a defect record, so the tightening changes nothing here. It matters only for the pattern the review described (an affected-entity-only overlap), which a unit test covers (`tests/unit/test_cohort.py`). One limit remains: a legitimate case whose own payment is allocated to an invoice that the failure case lists in its `evidence_ids` is still a conflict, because evidence IDs are taken as the defect's location.
+
+**Cohort metrics, both views (run 4 evaluator on run 3 packets).** Train / validation / both. Cohort counts are unchanged.
+
+| Metric | Without the 5 (scored) | With the 5 |
+|---|---|---|
+| Cohort cases | 376 / 122 / 498 | 380 / 123 / 503 |
+| Exact-category precision | 362/375, 119/122, 481/497 = 0.968 | same |
+| Evidence-complete among answered | 370/375, 121/122, 491/497 = 0.988 | same, 491/497 |
+| Correct and complete / cases | 357/376, 118/122, 475/498 = 0.954 | 357/380, 118/123, 475/503 = 0.944 |
+| Search counts reproduce, among answered | 497/497 | 497/497 |
+
+(Run 3 evaluator: 100% evidence-complete, correct and complete 481/498 and 481/503.) **What the stricter evaluator found:** 6 answered cohort packets (and 15 answered packets in all, counting the 9 that are outside the scored views) are incomplete, all for the same item, `guard_allocations`: they are `legitimate_due_date_payment` packets whose effective payment is also allocated to a second invoice. The guard checks that invoice's approval, but the packet cites only the allocation of the primary invoice, so the packet does not show where the second invoice came from. This is an investigator evidence gap, not an evaluator artefact; it is for the investigator fix and for the next run to confirm. Every other answered packet passes all the new items, so the approval and journal findings are present everywhere.
+
+Reproduce: `uv run python evaluation/dev_run.py evaluate m2-dev-4`.

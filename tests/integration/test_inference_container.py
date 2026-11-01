@@ -110,9 +110,17 @@ def _first_invoice(fixture: Path) -> str:
 
 
 def test_absence_check(inputs: dict[str, Path], tmp_path: Path) -> None:
+    # Make the host files whose absence is asserted exist, so the assertion
+    # shows the container cannot see them (a path that was never created on the
+    # host would be absent anyway). Neither lies inside a mounted directory.
+    links = inputs["root"] / "links" / "links.jsonl"
+    links.parent.mkdir(exist_ok=True)
+    links.write_text('{"request_id": "req_a", "case_id": "RCA_000000"}\n')
+    assert inputs["key"].is_file() and links.is_file()
+    assert links.parent not in (inputs["snapshot"], inputs["requests"])
     host_paths = [
         inputs["key"],
-        inputs["root"] / "links" / "links.jsonl",
+        links,
         ROOT / "data" / "upstream" / "FinRCA-AI-Bench",
         ROOT
         / "data"

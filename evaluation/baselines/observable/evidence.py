@@ -1,25 +1,44 @@
-"""Deterministic evidence retrieval for the baseline (PLAN.md M2: "give both
-baselines deterministic evidence retrieval and report templates").
+"""Relaxed record-availability check for the baseline (PLAN.md M2 "deterministic
+evidence retrieval"). It is an UPPER BOUND on what a packet-producing baseline
+could show, not a check of the contract and not a packet check.
 
-For the category the classifier predicted, retrieve from the snapshot the
-records and absence counts that `docs/evidence-contract.md` requires for that
-category and check that each requirement is met. This is the same list of
-requirements the evaluator applies to the investigator's packets
-(`evaluation/dev_run.py` `required`, lines 389-599), re-implemented here
-against the snapshot state instead of against cited packet items.
+For the category the classifier predicted, it asks whether the snapshot holds
+the records and absence counts that the category's main branch in
+`docs/evidence-contract.md` needs: a non-empty retrieval of each required
+record kind and, for the absence searches, the demanded count. Nothing is
+assembled, cited or rendered; the baseline emits no packet.
 
-What this does and does not show. A requirement is met when the required
-records exist (non-empty retrieval) and, for absence searches, the count the
-contract demands holds. So a wrong category usually fails its own retrieval
-(a bank row exists, so "F12" cannot cite a count-0 reference search), and a
-right category passes when the snapshot supports it. It does not check claim
-text, calculations or citation ids: the baseline emits no packet. It is
-therefore a retrieval-completeness check, weaker than the packet check applied
-to the investigator in two ways (no calculation or day-count item is
-cited, and no claim is rendered); in two ways it is the same (same record
-lists, same absence counts). The dev_run check also requires the packet's
-absence-search counts to reproduce; that holds here by construction because
-the counts are computed from the snapshot.
+What it does NOT check (the investigator's packets are checked for all of
+these by `evaluation/dev_run.py` `required`):
+
+- the all-clear prerequisites of contract 0.3: completed final approval of each
+  allocated invoice on or before the payment date, the payment journal in the
+  payment's currency, and payment minus journals within one quantum;
+- full allocation of an invoice (split, due-date) or its total against the
+  allocations; a split leg's debit equal to its payment; "paid on the due date";
+- for weekend and check clearing: the payment method, the clearing lag against
+  the limit, the debit amount equal to the payment, and a debit not before the
+  payment;
+- `no_exception` has no branch here, so it always counts as incomplete (the
+  classifier cannot predict it anyway);
+- for F14: the size of the shortfall, an unbalanced or mixed-currency fee
+  journal (it is treated as "no balanced journal"), a debit in another currency;
+- for F06: that the committed debits, not only the allocations, exceed the
+  invoice total (a committed debit must exist and the allocations must exceed
+  the total);
+- for batch and reversal: allocation sums, over-allocation, credit not before
+  the debit, and the reversed payment's invoices not being paid;
+- citation ids, calculations, day-count items, claim text, and whether the
+  stated search counts reproduce (they are computed from the snapshot here).
+
+A requirement with an empty retrieval fails, so a wrong category usually fails
+its own check (a bank row exists, so "F12" cannot have a count-0 reference
+search); a right category passes whenever the snapshot has the records. Read
+"evidence-complete" for the baseline as "records available", never as "contract
+satisfied". It is deliberately not strengthened to the contract: that would be
+a second implementation of the investigator's rules (and the guard), and the
+baseline would still not emit a packet to check. Rejected alternative recorded
+in docs/baseline-observable.md.
 """
 
 from datetime import date

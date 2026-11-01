@@ -8,15 +8,17 @@ only (`features.py`), and opens labels only to train (train split) and to score
 (validation split). Never names test or challenge_test. See
 docs/baseline-observable.md.
 
-Cohort, category mapping and metric definitions are replicated from
-`evaluation/dev_run.py` (not imported): FAMILY_KEYS and VARIANT_CATEGORY lines
-56-77, CONTRADICTED and NOT_GRADABLE 78-79, is_no_failure and is_failure
-86-91, group_of 607-618, classify 621-680, all_clear_risk 862-879,
-false-alarm definition in cohort_metrics 778-822.
+Cohort, groups, label conflicts and category mapping come from the shared
+`evaluation/cohort.py`, the same module `evaluation/dev_run.py` uses, so both
+systems are scored on identical cohorts, in two views (with and without the
+label-conflict cases). The metric definitions (outcome kinds, false-alarm and
+precision, all-clear risk) are replicated from `dev_run.py` (`classify`,
+`cohort_metrics`, `all_clear_risk`).
 """
 
 import argparse
 import json
+import sqlite3
 import sys
 import time
 import warnings
@@ -36,7 +38,9 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+import cohort as C  # noqa: E402  (shared with evaluation/dev_run.py)
 import evidence  # noqa: E402
 import features as F  # noqa: E402
 
@@ -55,47 +59,9 @@ POLICY_VERSION = (
     "baseline-observable-0.1"  # recorded in the requests; not an investigator policy
 )
 
-# ---- replicated from evaluation/dev_run.py (lines 56-91)
-FAMILY_KEYS = {
-    "F06_INVOICE_PAID_TWICE": "F06",
-    "F12_ERP_PAYMENT_MISSING_FROM_BANK": "F12",
-    "F14_BANK_ERP_AMOUNT_MISMATCH": "F14",
-}
-VARIANT_CATEGORY = {
-    "legitimate_pending_settlement": "legitimate_pending_settlement",
-    "legitimate_weekend_clearing": "legitimate_weekend_clearing",
-    "legitimate_check_clearing": "legitimate_check_clearing",
-    "legitimate_due_date_payment": "legitimate_due_date_payment",
-    "legitimate_split_payment": "legitimate_split_payment",
-    "legitimate_batch_payment": "legitimate_batch_payment",
-    "legitimate_payment_reversal": "legitimate_payment_reversal",
-    "legitimate_net_fee_accounting": "legitimate_net_fee_accounting",
-    "legitimate_accounted_bank_fee": "legitimate_accounted_bank_fee",
-    "legitimate_fx_settlement": None,  # the investigator abstains here
-}
-CONTRADICTED = {"RCA_001631", "RCA_001791", "RCA_002223", "RCA_002127"}
-NOT_GRADABLE = {"RCA_000588"}
-
-
-def is_no_failure(category: str) -> bool:
-    return category == "no_exception" or category.startswith("legitimate")
-
-
-def is_failure(category: str) -> bool:
-    return not is_no_failure(category)
-
-
-def group_of(failure_type: str, variant: str, case_id: str) -> str:
-    in_cohort = failure_type in FAMILY_KEYS or (
-        failure_type == "NO_FAILURE" and variant in VARIANT_CATEGORY
-    )
-    if not in_cohort:
-        return "oos_legit" if failure_type == "NO_FAILURE" else "oos_failure"
-    if case_id in CONTRADICTED:
-        return "contradicted"
-    if case_id in NOT_GRADABLE:
-        return "not_gradable"
-    return "fx" if variant == "legitimate_fx_settlement" else "cohort"
+is_no_failure = C.is_no_failure
+is_failure = C.is_failure
+VIEWS = C.COHORT_VIEWS
 
 
 def fine_label(lab: dict[str, Any]) -> str:
@@ -109,7 +75,7 @@ def fine_label(lab: dict[str, Any]) -> str:
 
 def category_of(label: str) -> str:
     """Predicted fine label -> the investigator's category name."""
-    return FAMILY_KEYS.get(label, label)
+    return C.FAMILY_KEYS.get(label, label)
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -238,11 +204,14 @@ def build_rows(
     conf: list[float],
     snap: F.Snapshot,
     labels: dict[str, dict[str, Any]],
+    conflicts: C.Conflicts,
 ) -> list[dict[str, Any]]:
     rows = []
     for case_id, (table, rid), p, c in zip(case_ids, ents, pred, conf, strict=True):
         lab = labels[case_id]
-        group = group_of(lab["failure_type"], lab["scenario_variant"], case_id)
+        group = C.group_of(
+            lab["failure_type"], lab["scenario_variant"], case_id, conflicts.conflicts
+        )
         cat = category_of(p)
         reqs = evidence.retrieve(snap, cat, table, rid)
         row = {
@@ -254,8 +223,11 @@ def build_rows(
             "predicted": p,
             "category": cat,
             "confidence": round(float(c), 4),
-            "expected_category": FAMILY_KEYS.get(lab["failure_type"])
-            or VARIANT_CATEGORY.get(lab["scenario_variant"]),
+            "expected_category": C.expected_category(
+                lab["failure_type"], lab["scenario_variant"]
+            ),
+            "label_conflict_with": conflicts.conflicts.get(case_id, []),
+            "review_candidate_with": conflicts.review.get(case_id, []),
             "contract_defined": bool(reqs),
             "complete": bool(reqs) and all(ok for _, ok in reqs),
             "missing": [n for n, ok in reqs if not ok],
@@ -277,11 +249,13 @@ def frac(n: int, d: int) -> dict[str, Any]:
 
 
 def metrics(
-    rows: list[dict[str, Any]], answered_fn: Any = lambda r: True
+    rows: list[dict[str, Any]],
+    answered_fn: Any = lambda r: True,
+    groups: tuple[str, ...] = VIEWS["without_label_conflicts"],
 ) -> dict[str, Any]:
     """Same definitions as dev_run.cohort_metrics, with `answered_fn` deciding
-    abstention (default: the classifier always answers)."""
-    c = [r for r in rows if r["group"] == "cohort"]
+    abstention (default: the classifier always answers) and `groups` the view."""
+    c = [r for r in rows if r["group"] in groups]
     ans = [r for r in c if answered_fn(r)]
     cor = [r for r in ans if r["correct"]]
     comp = [r for r in cor if r["complete"]]
@@ -319,7 +293,7 @@ def metrics(
             sum(
                 fa(r)
                 for r in legit_all
-                if r["group"] in ("cohort", "fx", "contradicted", "oos_legit")
+                if r["group"] in (*C.COHORT_GROUPS, "fx", "contradicted", "oos_legit")
             ),
             len(legit_all),
         ),
@@ -342,11 +316,16 @@ def metrics(
             for f in sorted({r["failure_type"] for r in oos})
         },
         "wrong_by_kind": dict(
-            Counter(
-                r["kind"] for r in ans if not r["correct"] and r["group"] == "cohort"
-            )
+            Counter(r["kind"] for r in ans if not r["correct"] and r["group"] in groups)
         ),
     }
+
+
+def both_views(
+    rows: list[dict[str, Any]], answered_fn: Any = lambda r: True
+) -> dict[str, Any]:
+    """The metrics in both cohort views, from the shared definitions."""
+    return {name: metrics(rows, answered_fn, g) for name, g in VIEWS.items()}
 
 
 def fx_slice(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -360,7 +339,7 @@ def fx_slice(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def per_label(rows: list[dict[str, Any]]) -> dict[str, Any]:
     out = {}
-    cohort = [r for r in rows if r["group"] == "cohort"]
+    cohort = [r for r in rows if r["group"] in C.COHORT_GROUPS]
     for k in sorted(
         {
             r["failure_type"] if r["failure_type"] != "NO_FAILURE" else r["variant"]
@@ -384,22 +363,41 @@ def per_label(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
-def investigator_validation(tag: str) -> dict[str, Any]:
-    """Recompute the same metrics from the investigator's evaluator-side
-    cases.jsonl (validation rows only)."""
+def investigator_rows(tag: str, conflicts: C.Conflicts) -> list[dict[str, Any]]:
+    """Validation rows of the investigator's evaluator-side cases.jsonl, with
+    the group recomputed by the shared `cohort.group_of` and the same conflict
+    set as the baseline's. Stops if the file was made with a different set."""
     rows = [
         r
         for r in read_jsonl(REPO / "artifacts/dev-runs" / tag / "cases.jsonl")
         if r["split"] == "validation"
     ]
+    recorded = {r["case_id"] for r in rows if r["group"] == "label_conflict"}
+    ours = {
+        r["case_id"]
+        for r in rows
+        if r["group"] in C.COHORT_GROUPS and r["case_id"] in conflicts.conflicts
+    }
+    if recorded != ours:
+        sys.exit(
+            f"{tag}/cases.jsonl flags label conflicts {sorted(recorded)}, the shared"
+            f" rule flags {sorted(ours)}: re-run `dev_run.py evaluate {tag}`"
+        )
     for r in rows:
+        r["group"] = C.group_of(
+            r["failure_type"], r["variant"], r["case_id"], conflicts.conflicts
+        )
         ans = r["disposition"] == "answered"
         r["answered"] = ans
         r["category"] = r["category"] or ""
         r["correct"] = ans and r["category"] == r["expected_category"]
         r["complete"] = bool(r.get("complete")) and ans
         r["kind"] = r.get("kind")
-    return metrics(rows, lambda r: r["answered"])
+    return rows
+
+
+def investigator_validation(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return both_views(rows, lambda r: r["answered"])
 
 
 # ------------------------------------------------------------------ main
@@ -440,15 +438,25 @@ def main() -> None:
     ytr = np.array([fine_label(r) for r in ltr])
     yva = np.array([fine_label(r) for r in lva])
     lab_va = {r["case_id"]: r for r in lva}
+    con = sqlite3.connect(
+        (snap_dir / "snapshot.sqlite").resolve().as_uri() + "?mode=ro", uri=True
+    )
+    conflicts = C.label_conflicts(
+        {r["case_id"]: r for r in (*ltr, *lva)},
+        con,
+        REPO / "data/private" / args.tag / "key",
+    )
+    con.close()
     case_va = [r["case_id"] for r in lva]
     ent_va = data["validation"][1]
 
     def score_rows(model_pred: list[str], conf: list[float]) -> list[dict[str, Any]]:
-        return build_rows(case_va, ent_va, model_pred, conf, snap, lab_va)
+        return build_rows(case_va, ent_va, model_pred, conf, snap, lab_va, conflicts)
 
     def cohort_acc(pred: np.ndarray) -> tuple[int, int]:
         rows = score_rows(list(pred), [1.0] * len(pred))
-        m = metrics(rows)
+        # model selection keeps the pre-conflict definition: all in-scope cases
+        m = metrics(rows, groups=C.COHORT_GROUPS)
         return m["answer_precision_exact"]["n"], m["answer_precision_exact"]["d"]
 
     # 3. model selection on validation: exact cohort accuracy, first best wins
@@ -476,7 +484,7 @@ def main() -> None:
     pred = [classes[i] for i in proba.argmax(1)]
     conf = list(proba.max(1))
     rows = score_rows(pred, conf)
-    primary = metrics(rows)
+    primary = both_views(rows)
 
     # 4. optional abstention threshold chosen on TRAIN by grouped cross-validation
     cv_pred_proba = cross_val_predict(
@@ -489,7 +497,10 @@ def main() -> None:
     cohort_tr = [
         (fine_label(r), p, c)
         for r, p, c in zip(ltr, cvp, cvc, strict=True)
-        if group_of(r["failure_type"], r["scenario_variant"], r["case_id"]) == "cohort"
+        if C.group_of(
+            r["failure_type"], r["scenario_variant"], r["case_id"], conflicts.conflicts
+        )
+        in C.COHORT_GROUPS
     ]
     thr_grid = [round(0.5 + 0.05 * k, 2) for k in range(10)]
     chosen = None
@@ -512,7 +523,7 @@ def main() -> None:
         if chosen is None and kept and prec >= args.cv_precision_target:
             chosen = th
     threshold = chosen if chosen is not None else thr_grid[-1]
-    with_abstention = metrics(rows, lambda r: r["confidence"] >= threshold)
+    with_abstention = both_views(rows, lambda r: r["confidence"] >= threshold)
 
     # 5. reliance: permutation importance on validation, single and by family
     pi = permutation_importance(
@@ -578,7 +589,7 @@ def main() -> None:
     rows_nores = score_rows(pr_nores, list(pw.max(1)))
     ablation["without all five residual groups"] = {
         "cohort_correct": cohort_acc(np.array(pr_nores))[0],
-        "metrics": metrics(rows_nores),
+        "metrics": both_views(rows_nores),
     }
 
     # type-only (R3) and invoice-age-only (R4) baselines
@@ -592,13 +603,19 @@ def main() -> None:
         i
         for i, r in enumerate(ltr)
         if data["train"][1][i][0] == "invoices"
-        and group_of(r["failure_type"], r["scenario_variant"], r["case_id"]) == "cohort"
+        and C.group_of(
+            r["failure_type"], r["scenario_variant"], r["case_id"], conflicts.conflicts
+        )
+        in C.COHORT_GROUPS
     ]
     inv_va = [
         i
         for i, r in enumerate(lva)
         if ent_va[i][0] == "invoices"
-        and group_of(r["failure_type"], r["scenario_variant"], r["case_id"]) == "cohort"
+        and C.group_of(
+            r["failure_type"], r["scenario_variant"], r["case_id"], conflicts.conflicts
+        )
+        in C.COHORT_GROUPS
     ]
     age_model = HistGradientBoostingClassifier(
         max_depth=2, max_iter=50, random_state=SEED
@@ -617,6 +634,13 @@ def main() -> None:
     full_inv = balanced_accuracy_score(
         yv, [pred[i] == "F06_INVOICE_PAID_TWICE" for i in inv_va]
     )
+
+    inv_rows = investigator_rows(args.investigator_run, conflicts)
+    for view, groups in VIEWS.items():  # both systems, identical cohorts
+        ours = {r["case_id"] for r in rows if r["group"] in groups}
+        theirs = {r["case_id"] for r in inv_rows if r["group"] in groups}
+        if ours != theirs:
+            sys.exit(f"cohort view {view!r} differs between baseline and investigator")
 
     out = {
         "tag": args.tag,
@@ -648,8 +672,17 @@ def main() -> None:
         "selected_model_invoice_stratum_balanced_accuracy": round(float(full_inv), 4),
         "investigator_validation": {
             "run": args.investigator_run,
-            **investigator_validation(args.investigator_run),
+            **investigator_validation(inv_rows),
         },
+        "identical_cohorts_checked": True,
+        "label_conflicts": {
+            c: v for c, v in conflicts.conflicts.items() if c in lab_va
+        },
+        "review_candidates": {c: v for c, v in conflicts.review.items() if c in lab_va},
+        "evidence_complete_meaning": (
+            "relaxed record-availability upper bound, not a packet check "
+            "(evidence.py docstring, docs/baseline-observable.md section 2)"
+        ),
         "seconds": round(time.monotonic() - t0, 1),
         "command": (
             "uv run --group eval python evaluation/baselines/observable/run.py "
