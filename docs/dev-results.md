@@ -2,7 +2,7 @@
 
 Status: M2 task "run training/validation end-to-end and inspect error slices". Run tag `m2-dev-1`, code commit `c4479a2` (branch `m2-investigator`), evidence contract `evidence-contract-0.1`.
 
-**Layout.** Sections 1 to 8 are **run 1** (tag `m2-dev-1`, 2026-11-01), kept as recorded. Section 9 onward is **run 2** (tag `m2-dev-3`, 2026-11-01), made after fixing the false all-clears that run 1 found (findings F1 to F3 in section 7). Where run 1 says "no limitation statement" or "clearing variants need no allocation", that describes `evidence-contract-0.1`.
+**Layout.** Sections 1 to 8 are **run 1** (tag `m2-dev-1`, 2026-11-01), kept as recorded. Section 9 is **run 2** (tag `m2-dev-3`, 2026-11-01), made after fixing the false all-clears that run 1 found (findings F1 to F3 in section 7). Section 10 is **run 3** (tag `m2-dev-4`, 2026-11-01), made after adding the approval and payment-journal guard for the F08 and F09 all-clears that remained. Where run 1 says "no limitation statement" or "clearing variants need no allocation", that describes `evidence-contract-0.1`.
 
 ## 1. What this is and is not
 
@@ -201,3 +201,55 @@ All 71 F05 cases now abstain with `payment_without_invoice_allocation` (39 that 
 **Status of the run 1 findings.** F1 (clearing variants without an invoice): fixed. F2 (no limitation statement): fixed. F3 (overlap inconsistently listed): fixed. F4, F5, F6: unchanged.
 
 Reproduce: `uv run python evaluation/dev_run.py run m2-dev-3` (tag must be new), artifacts under `artifacts/dev-runs/m2-dev-3/` (untracked).
+
+## 10. Run 3 (`m2-dev-4`, 2026-11-01): after the approval and payment-journal guard
+
+Run tag `m2-dev-4`, policy `evidence-contract-0.3`, same method as section 2. The run is key-independent in the same sense as before (a fresh key); the `m2-dev-3` tag belongs to run 2. Same caveats as section 1.
+
+**What changed.** Before any answered `legitimate_*` or `no_exception` packet the investigator now confirms two generic prerequisites from allowlisted tables, and abstains with a specific reason if either fails (`docs/evidence-contract.md` section 5): every allocated invoice has a completed final approval (an approving event whose `new_status` is `approved`, at the highest level seen) dated on or before the payment date (`invoice_approval_not_completed`, `payment_before_approval`); and the payment has a balanced payment journal in the payment's currency equal to the payment within one minor unit (`payment_journal_missing`, `_unbalanced`, `_currency_differs`, `_amount_differs`). F08 and F09 are not diagnosed as categories. I read the upstream F08 and F09 generators only to confirm the rules would catch them (F08 removes the highest-level approving event, leaving only intermediate approvals; F09 posts a wrong amount on both journal lines); the rules do not use event names, memo text or sequence patterns.
+
+**Out-of-scope failures given an all-clear (headline risk).**
+
+| Family | Run 1 | Run 2 | Run 3 |
+|---|---:|---:|---:|
+| F05 payment without valid invoice | 39/71 | 0/71 | 0/71 |
+| F08 approval workflow failure | 70/70 | 70/70 | **0/70** |
+| F09 GL posting mismatch | 75/75 | 75/75 | **0/75** |
+| the other nine outside families | 0/564 | 0/564 | 0/564 |
+| **All** | 184/859 = 0.214 | 145/859 = 0.169 | **0/859 = 0.000** |
+
+By split in run 3: train 0/634, validation 0/225. F08 now abstains with `invoice_approval_not_completed` (70), F09 with `payment_journal_amount_differs` (74) or `invoice_approval_not_completed` (1); the 29 F15 cases still answered F14 are a failure called another failure class, not an all-clear.
+
+**Cohort comparison, run 2 to run 3 (gradable cohort, 503 cases).**
+
+| Metric | Run 2 | Run 3 |
+|---|---:|---:|
+| Answered (coverage) | 502/503 = 0.998 | 497/503 = 0.988 |
+| Abstained | 1 | 6 |
+| Exact-category precision | 485/502 = 0.966 | 481/497 = 0.968 |
+| Failure vs no-failure accuracy, answered | 502/502 | 497/497 |
+| Evidence-complete among answered | 502/502 | 497/497 |
+| Correct and complete / cases | 485/503 = 0.964 | 481/503 = 0.956 |
+| False alarms, cohort legitimate | 0/281 | 0/281 |
+| False alarms, all legitimate | 0/526 | 0/526 |
+| Wrong-variant answers | 17 | 16 |
+
+**The guard costs five cohort answers.** Every cohort case whose disposition changed (all five were answered in run 2, abstained in run 3; no case changed the other way):
+
+| Case | Label | Run 2 | Run 3 | Why (from the packet and the upstream records) |
+|---|---|---|---|---|
+| RCA_001679 | split payment | split | abstained `payment_journal_amount_differs` | journal 844.51 USD against payment 814.38 USD (ratio 1.037) |
+| RCA_001759 | split payment | split | abstained `payment_journal_amount_differs` | journal 6849.03 against payment 6604.66 (1.037) |
+| RCA_002175 | split payment | split | abstained `payment_journal_amount_differs` | journal 811.42 against payment 782.47 (1.037) |
+| RCA_002212 | due-date payment | split (a wrong-variant answer) | abstained `payment_journal_amount_differs` | journal 4961.50 against payment 4784.47 (1.037) |
+| RCA_002182 | net-fee accounting | net-fee | abstained `invoice_approval_not_completed` | the invoice's only approval event is `submitted`; no approving event |
+
+All five are genuine prerequisite failures in the records, not false abstentions of the rule: in the upstream labels the payment of each of the four journal cases is also the primary payment of an F09 case (RCA_000832, RCA_000857, RCA_000874, RCA_000889 respectively, matching the 1.037 ratio the F09 generator applies), and the invoice of RCA_002182 is also the invoice of the F08 case RCA_000722 (its approval event was removed). That is, the benchmark's injected failures overlap the records of five "legitimate" cases, and the labels of those five ignore it. The guard is right about the records and wrong against the label; I report them as regressions of the label-based metrics, not as defects. It cannot be told apart from a real defect in a genuine legitimate case without more data.
+
+Also changed outside the cohort: the 2 AP-side legitimate answers that were wrong-variant answers are now abstentions (RCA_002091 `invoice_approval_not_completed`, RCA_001996 `payment_journal_amount_differs`); I did not trace them to F08 or F09 overlaps. Out-of-scope failure families: 145 former all-clears are now abstentions (F08 70, F09 75). Dispositions over the 1,608 requests: answered 739 to 587, abstained 149 to 301, out_of_scope 720 unchanged.
+
+**Leakage residual R1.** Inserted F01 and credit-memo invoices have no approval events. The guard abstains for any all-clear that would rest on such an invoice. In this run no answered packet of a cohort or AP-side legitimate case was lost to a missing-events invoice other than the five above and the two AP-side cases, so R1 did not cost cohort answers; those invoices are F01 and credit-memo records, outside the cohort.
+
+**Remaining all-clears on out-of-scope failures: none.** The guard is a necessary check for those two families, not a diagnosis: a failure of a kind the guard cannot see (for example a wrong accounting period, F10, or a vendor change, F11) would still be answered legitimate if its other records were clean. In this run none of F10, F11 or the other families was answered at all (they are out of scope or abstain for other reasons), so the measured risk is 0/859; that is a development-set measurement on this benchmark only.
+
+Reproduce: `uv run python evaluation/dev_run.py run m2-dev-4`.
