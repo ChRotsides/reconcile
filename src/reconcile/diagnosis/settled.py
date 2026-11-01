@@ -240,7 +240,7 @@ def invoice_balances(
     return out
 
 
-def _alloc_evs(led: Ledger, pid: str, allocs: list[Row], cur: str) -> list[str]:
+def alloc_evs_of(led: Ledger, pid: str, allocs: list[Row], cur: str) -> list[str]:
     return [
         led.record(
             f"alloc:{pid}.{req(a, 'invoice_id')}",
@@ -276,7 +276,7 @@ def require_allocation(
             "an allocation of the payment to an invoice in the payment's currency",
             (finding,),
         )
-    _alloc_evs(led, pid, allocs, cur)
+    alloc_evs_of(led, pid, allocs, cur)
     currencies = [
         reader.rows(
             "SELECT currency FROM invoices WHERE invoice_id = ?",
@@ -295,7 +295,7 @@ def allocated_finding(led: Ledger, pay: Row, allocs: list[Row]) -> Finding:
     pid, cur = req(pay, "payment_id"), req(pay, "payment_currency")
     return _supported(
         "payment_allocated_to_invoice",
-        (f"pay:{pid}", *_alloc_evs(led, pid, allocs, cur)),
+        (f"pay:{pid}", *alloc_evs_of(led, pid, allocs, cur)),
     )
 
 
@@ -309,7 +309,7 @@ def _batch(
 ) -> EvidencePacket:
     pid, cur = req(pay, "payment_id"), req(pay, "payment_currency")
     q = quantum(cur)
-    alloc_evs = _alloc_evs(led, pid, allocs, cur)
+    alloc_evs = alloc_evs_of(led, pid, allocs, cur)
     led.calc("allocated", "sum", [(e, "allocated_amount") for e in alloc_evs])
     gap = led.calc(
         "payment_minus_allocated",
@@ -341,7 +341,7 @@ def _no_exception(
     led: Ledger, reader: Reader, pay: Row, pay_ev: str, d_ev: str, allocs: list[Row]
 ) -> EvidencePacket:
     pid, cur = req(pay, "payment_id"), req(pay, "payment_currency")
-    alloc_evs = _alloc_evs(led, pid, allocs, cur)
+    alloc_evs = alloc_evs_of(led, pid, allocs, cur)
     led.calc("allocated", "sum", [(e, "allocated_amount") for e in alloc_evs])
     findings = [
         _supported("debit_matches_payment", (pay_ev, d_ev), ("delta",)),
@@ -428,7 +428,7 @@ def _reversal(
     allocs = rt.allocations_of_payment(reader, pid, cutoff)
     if not allocs:
         return led.abstain("required_records_missing", "an allocation of the payment")
-    alloc_evs = _alloc_evs(led, pid, allocs, cur)
+    alloc_evs = alloc_evs_of(led, pid, allocs, cur)
     invoices = sorted({req(a, "invoice_id") for a in allocs})
     bals = invoice_balances(led, reader, invoices, cur, cutoff, pid)
     if isinstance(bals, EvidencePacket):

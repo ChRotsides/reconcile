@@ -25,7 +25,7 @@ from datetime import date, datetime
 
 from reconcile.diagnosis.ledger import Ledger, req
 from reconcile.diagnosis.policy import quantum
-from reconcile.diagnosis.settled import invoice_balances
+from reconcile.diagnosis.settled import alloc_evs_of, invoice_balances
 from reconcile.domain.contracts import (
     Disposition,
     EvidencePacket,
@@ -148,16 +148,27 @@ def _approval(
 
 
 def _totals(
-    led: Ledger, reader: Reader, pid: str, invoices: list[str], cutoff: date
+    led: Ledger,
+    reader: Reader,
+    pid: str,
+    invoices: list[str],
+    allocs: list[Row],
+    cutoff: date,
 ) -> Finding | EvidencePacket:
     pay_ev = f"pay:{pid}"
     cur = dict(led.items[pay_ev].values)["payment_currency"]
     bals = invoice_balances(led, reader, invoices, cur, cutoff, pid)
     if isinstance(bals, EvidencePacket):
         return bals
+    # Every allocation of the payment is relied on (its invoice is approved and
+    # totalled below), so each is cited whether or not the payment is effective.
     return _supported(
         "invoice_totals_not_exceeded",
-        (pay_ev, *[e for b in bals for e in b.evidence]),
+        (
+            pay_ev,
+            *alloc_evs_of(led, pid, allocs, cur),
+            *[e for b in bals for e in b.evidence],
+        ),
         tuple(b.calc_id for b in bals if b.calc_id),
     )
 
@@ -222,7 +233,7 @@ def guard_payment(
     must already be cited in `led` as `pay:<pid>`."""
     allocs = rt.allocations_of_payment(reader, pid, cutoff)
     invoices = sorted({req(a, "invoice_id") for a in allocs})
-    totals = _totals(led, reader, pid, invoices, cutoff)
+    totals = _totals(led, reader, pid, invoices, allocs, cutoff)
     if isinstance(totals, EvidencePacket):
         return totals
     approval = _approval(led, reader, pid, invoices, cutoff)

@@ -1207,3 +1207,31 @@ def test_accounted_fee_in_another_currency_than_the_payment_abstains(
         "UPDATE gl_entries SET currency = 'USD' WHERE transaction_type = 'bank_fee'",
     )
     assert reason(packet) == ("abstained", "unsupported_fx")
+
+
+def test_guard_cites_every_allocation_and_approval_of_a_multi_invoice_payment(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    """A due-date payment that also covers a second invoice: the guard relies on
+    that invoice's allocation and approval, so the packet must cite both."""
+    p = prepared["due_date_payment"]
+    copy = clone(
+        p,
+        tmp_path,
+        "INSERT INTO invoices SELECT 'inv2', vendor_id, po_id, invoice_date,"
+        " received_date, due_date, currency, '5.00', '0.00', '0.00', '5.00',"
+        " payment_terms, status FROM invoices LIMIT 1",
+        "INSERT INTO payment_allocations SELECT payment_id, 'inv2', '5.00',"
+        " allocation_date FROM payment_allocations LIMIT 1",
+        "INSERT INTO approval_events SELECT 'apr2', 'inv2', approval_level,"
+        " approver_role, action, event_timestamp, previous_status, new_status"
+        " FROM approval_events WHERE new_status = 'approved'",
+    )
+    packet = investigate(copy, p.request("invoices", "INV_1"))
+    assert reason(packet) == ("answered", "legitimate_due_date_payment")
+    cited = {e.record.record_id for e in packet.evidence if e.record}
+    assert {a.split("|")[1] for a in cited if "|" in a} >= {
+        p.token("invoices", "INV_1"),
+        "inv2",
+    }
+    assert "apr2" in cited
