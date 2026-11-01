@@ -220,6 +220,21 @@ def test_missing_evidence_cannot_produce_legitimate() -> None:
     assert ok.category == LEGITIMATE
 
 
+def test_legitimate_subcategories_follow_the_same_rule() -> None:
+    cat = "legitimate_split_payment"
+    unknown = Finding("k2", FindingState.UNKNOWN)
+    with pytest.raises(ValueError, match="legitimate needs"):
+        Diagnosis(Disposition.ANSWERED, cat, (supported(), unknown))
+    with pytest.raises(ValueError, match="legitimate needs"):
+        Diagnosis(
+            Disposition.ANSWERED,
+            cat,
+            (supported(),),
+            missing_information=("bank statement",),
+        )
+    assert Diagnosis(Disposition.ANSWERED, cat, (supported(),)).category == cat
+
+
 def test_non_answered_needs_a_reason_and_no_category() -> None:
     with pytest.raises(ValueError, match="reason"):
         Diagnosis(Disposition.ABSTAINED, None)
