@@ -36,3 +36,6 @@ htmlcov/
 .vscode/
 .idea/
 .DS_Store
+
+# Browser automation logs written by agent tools
+.playwright-mcp/

@@ -236,8 +236,16 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 
 **Gate:** A trustworthy comparison and scoreable evidence contract exist. Investigate unexplained reproduction differences before claiming superiority. If the data cannot support an honest experiment, stop and reassess before building around it. If practitioners do not confirm the three families as worth investigating, revise the families before M1 rather than building for the benchmark alone.
 
+**Gate outcome (2026-11-01): conditional pass, approved by the user, with the direction "repair FinRCA".** Evidence: `DATA_SOURCES.md`, `docs/data-audit.md`, `docs/baseline-reproduction.md`, `docs/export-formats.md`, `docs/practitioner-findings.md`, and three Codex review rounds (14 findings, all fixed).
+- **Why it is conditional:** the gate test isn't fully met. FinRCA leaks class through its inputs (data audit L1–L12), and its published evidence for F12, F14 and pending cases relies on excluded events. The section 3.1 allowlist is a design, not yet tested. No practitioner has been interviewed.
+- **What M0 showed about the baselines:** they reproduce exactly. On the leaky published inputs, the classical-ML baseline already identifies all 49 three-family test cases, with 4 false alarms, but returns no evidence; Rules/SQL evidence is complete for only 13% of its correct answers. The useful comparison is therefore evidence-complete diagnosis from observable inputs.
+- **Carried into M1:** the first three M1 tasks below. One residual signal remains open: `gl_entries` FX-settlement codes. Practitioner interviews continue in parallel and can still revise the families before M2.
+
 ### M1 — Contracts, ingestion and input isolation
 
+- [ ] Implement the `docs/data-audit.md` section 3.1 input transform in the FinRCA adapter: enumerated columns only, opaque remapping with shared reference namespaces, dropped tables and columns, the section 6 cutoff rule, and rows re-sorted. Preparing the same inputs twice must give the same snapshot digest.
+- [ ] Leakage test on the transformed training data: from the allowed fields, a simple classifier must not beat the base rate at recovering inserted rows, row or ID order, or family. Record the results; any residual signal is a finding.
+- [ ] Define our own evidence contract for F06, F12, F14 and the payment-related legitimate cases, using observable inputs only (`docs/evidence-contract.md`). Validate it on train and validation, and record the cases it cannot grade (e.g. RCA_000588).
 - [ ] Initialize the package, lock dependencies, and configure formatting, typing and tests.
 - [ ] Implement versioned domain schemas and strict validation.
 - [ ] Implement the allowlisted FinRCA adapter and neutral request preparation.
@@ -252,7 +260,7 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 
 **Deliverables:** Validated snapshot, schemas, quality report, isolation tests, realistic-shape fixtures and minimal package.
 
-**Gate:** Clean preparation reproduces the snapshot digest; inference cannot read labels; distinct financial transactions survive deduplication; a written mapping shows each shortlisted format can populate the contract, or records which fields it lacks.
+**Gate:** Clean preparation reproduces the snapshot digest; inference cannot read labels; distinct financial transactions survive deduplication; a written mapping shows each shortlisted format can populate the contract, or records which fields it lacks; the leakage test shows no recoverable class or order signal (or each residual is declared); the evidence contract is declared and validated on development data.
 
 ### M2 — Deterministic investigator
 
@@ -464,16 +472,16 @@ These are estimates for one engineer, not delivery promises. Re-estimate after M
 | Milestone | Focused hours | Dependency |
 |---|---:|---|
 | M0: evidence viability and practitioner input | 20–32 | None |
-| M1: contracts/ingestion | 20–30 | M0 |
+| M1: contracts/ingestion, input transform, leakage test, evidence contract | 28–44 | M0 |
 | M2: deterministic investigator | 24–38 | M1 |
 | M3: evaluation | 20–30 | M0–M2 |
 | M4: bounded AI | 16–28 | M3 |
 | M5: usability/packaging | 16–26 | M2; finalize after M4 |
 | M6: failure/recovery checks | 12–20 | M1–M5 |
 | M7: sealed comparison/release | 10–18 | M3–M6 |
-| **Total before contingency** | **138–222** | |
+| **Total before contingency** | **146–236** | |
 
-With approximately 25% contingency, plan for roughly **175–280 focused hours**. Calendar duration depends on availability; finding and scheduling practitioners is a calendar risk beyond focused hours. An early stop or removal of an unnecessary model path reduces expenditure.
+With approximately 25% contingency, plan for roughly **185–295 focused hours**. Re-estimated after M0 (2026-11-01): the FinRCA repair adds about 8–14 hours to M1. This is still an estimate; agent-built M0 hours were not recorded. Calendar duration depends on availability; finding and scheduling practitioners is a calendar risk beyond focused hours. An early stop or removal of an unnecessary model path reduces expenditure.
 
 Deliver small reviewable increments: one contract/import path, one deterministic family, baseline comparison, evaluator isolation, bounded AI experiment, packaging. Keep observed failures and design decisions alongside the corresponding change.
 
