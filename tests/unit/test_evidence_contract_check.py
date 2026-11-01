@@ -300,3 +300,30 @@ def test_f14_partial_fee_journal_is_not_gradable(tmp_path: Path) -> None:
     s = ecc.load_dir(tmp_path / "f14_amount_shortfall")
     res = ecc.check_f14(s, "PAY_1", variant="f14")
     assert (res.status, res.reason) == (NG, "partial_fee_journal")
+
+
+def test_unbalanced_fee_journal_is_not_absent(tmp_path: Path) -> None:
+    # An unbalanced bank_fee journal still makes the fee-journal search count 1.
+    s = edited(tmp_path, "f14_amount_shortfall")
+    gl = tmp_path / "f14_amount_shortfall" / "gl_entries.csv"
+    gl.write_text(
+        gl.read_text()
+        + "J_FEE_1,J_FEE_1_L1,BT_1,bank_fee,2026-06-03,2026-06,650000,10.00,0.00,EUR\n"
+    )
+    s = ecc.load_dir(tmp_path / "f14_amount_shortfall")
+    res = ecc.check_f14(s, "PAY_1", variant="f14")
+    assert (res.status, res.reason) == (NG, "invalid_fee_journal")
+
+
+def test_unbalanced_fee_journal_on_fee_row_not_gradable(tmp_path: Path) -> None:
+    s = edited(
+        tmp_path, "accounted_bank_fee", ("gl_entries.csv", "15.00,EUR\n", "5.00,EUR\n")
+    )
+    assert ecc.check_bank_fee(s, "BT_2").status == NG
+
+
+def test_unbalanced_reversal_journal_not_gradable(tmp_path: Path) -> None:
+    s = edited(
+        tmp_path, "payment_reversal", ("gl_entries.csv", "0.00,600.00", "0.00,500.00")
+    )
+    assert ecc.check_reversal(s, "PAY_1").status == NG

@@ -92,7 +92,7 @@ Required records:
 
 Calculations: business-day age from `payment_date` to the cutoff; compare `age > limit(method)` (strict).
 
-Absence evidence (all three must be empty, each cited as a search record):
+Absence evidence (each cited as a search record; A1 = 0, A2 = 1, A3 = 0):
 
 - A1, reference search: observable `bank_transactions` rows with `payment_reference` = the payment reference and any type except `bank fee`, any status, any direction. Count must be 0. Fee rows are listed but do not count.
 - A2, reference uniqueness: `payments` rows with this `reference_number`. Count must be 1.
@@ -100,7 +100,7 @@ Absence evidence (all three must be empty, each cited as a search record):
 
 Evidence-complete: the payment, allocation(s), payment journal and the three search records are cited, with the age and limit calculation, and `age > limit`.
 
-Not gradable: A2 or A3 not empty; a bank row for the reference exists only after the cutoff (it is indistinguishable from a missing row: audit section 6); no allocation or payment journal observable.
+Not gradable: A2 not equal to 1 (reference shared) or A3 not empty; a bank row for the reference exists only after the cutoff (it is indistinguishable from a missing row: audit section 6); no allocation or payment journal observable.
 
 Contradiction: A1 not empty (a bank row exists); `age <= limit`; payment not effective.
 
@@ -120,7 +120,7 @@ Required records:
 
 Calculations (one currency): `delta = payment_amount - bank_amount`; `explained = sum(amount of balanced bank_fee journals sourced to the bank row)`; `unexplained = |delta - explained|`. Diagnosis "unexplained shortfall" requires `delta > quantum` and `unexplained > fee tolerance` (section 6, P3).
 
-Absence evidence: the search record "observable `gl_entries` with `transaction_type = bank_fee` and `source_transaction_id` = this bank transaction: count 0" (so `explained = 0`).
+Absence evidence: the search record "observable `gl_entries` with `transaction_type = bank_fee` and `source_transaction_id` = this bank transaction: count 0" (so `explained = 0`). The search counts raw GL rows, so a fee-typed journal that is unbalanced or has zero total is not absent: the case is not gradable (`invalid_fee_journal`). The same holds for a malformed `payment_reversal` journal (`invalid_reversal_journal`) and for the fee journal of an accounted bank fee.
 
 Evidence-complete: payment, bank row, the delta calculation and the GL absence search record. The fee size (15 to 35) is not evidence either way (L7).
 
@@ -138,7 +138,7 @@ Each contract has the same shape: required records, calculations, evidence-compl
 
 | Variant (upstream) | Primary entity | Required records | Calculations that must hold | Absence evidence | Not gradable |
 |---|---|---|---|---|---|
-| Pending settlement (`hard_negatives.py:284-312`) | payment | payment (status not final or inside window), allocation, payment journal | `age <= limit(method)` | A1-A3 empty (as F12) | A2/A3 not empty; bank row post-cutoff |
+| Pending settlement (`hard_negatives.py:284-312`) | payment | payment (status not final or inside window), allocation, payment journal | `age <= limit(method)` | A1 = 0, A2 = 1, A3 = 0 (as F12) | A2 not 1 or A3 not empty; bank row post-cutoff |
 | Weekend clearing (`:165-184`) | payment (ACH) | payment, unique posted debit | amounts equal; `bdays(payment_date, posted_date) <= 3` | none | no posted debit; reference shared |
 | Check clearing (`:222-237`) | payment (check) | payment, unique posted debit | amounts equal; `bdays(payment_date, posted_date) <= 10` | none | as above |
 | Due-date payment (`:260-282`) | invoice | invoice, allocations, effective payments, their posted debits | some payment has `payment_date = due_date`; each debit equals its payment amount; allocations do not exceed the total | none | a payment lacks a debit |

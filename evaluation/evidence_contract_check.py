@@ -197,6 +197,15 @@ def journals(rows: list[dict[str, str]], kind: str) -> list[tuple[str, Decimal, 
     return out
 
 
+def invalid_journals(rows: list[dict[str, str]], kind: str) -> set[str]:
+    """Ids of journals of this type that are not balanced and positive.
+
+    An absence search counts raw GL rows, so such a journal is not "absent".
+    """
+    valid = {j[0] for j in journals(rows, kind)}
+    return {g["journal_id"] for g in rows if g["transaction_type"] == kind} - valid
+
+
 @dataclass
 class Result:
     status: str
@@ -347,6 +356,11 @@ def check_f14(s: Snapshot, pid: str, *, variant: str) -> Result:
     ids = {pid, b["bank_transaction_id"]}
     fee_j = journals(s.gl_by_src.get(b["bank_transaction_id"], []), "bank_fee")
     ids.update(j[0] for j in fee_j)
+    bad_fee = invalid_journals(
+        s.gl_by_src.get(b["bank_transaction_id"], []), "bank_fee"
+    )
+    if bad_fee:
+        return ng("invalid_fee_journal", ids | bad_fee)
     if b["currency"] != p["payment_currency"] or any(
         j[2] != p["payment_currency"] for j in fee_j
     ):
@@ -386,6 +400,9 @@ def check_bank_fee(s: Snapshot, bank_id: str) -> Result:
     ids = {bank_id, refs[0]}
     fee_j = journals(s.gl_by_src.get(bank_id, []), "bank_fee")
     ids.update(j[0] for j in fee_j)
+    bad_fee = invalid_journals(s.gl_by_src.get(bank_id, []), "bank_fee")
+    if bad_fee:
+        return ng("invalid_fee_journal", ids | bad_fee)
     if any(j[2] != row["currency"] for j in fee_j):
         return cross_currency(ids)
     if not fee_j:
@@ -539,6 +556,9 @@ def check_reversal(s: Snapshot, pid: str) -> Result:
     ids = {pid, debit[0]["bank_transaction_id"], credit[0]["bank_transaction_id"]}
     rev_j = journals(s.gl_by_src.get(pid, []), "payment_reversal")
     ids.update(j[0] for j in rev_j)
+    bad_rev = invalid_journals(s.gl_by_src.get(pid, []), "payment_reversal")
+    if bad_rev:
+        return ng("invalid_reversal_journal", ids | bad_rev)
     if not rev_j:
         late = pid in s.late_gl_sources
         return ng("journal_post_cutoff" if late else "reversal_journal_missing", ids)
