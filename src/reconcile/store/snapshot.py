@@ -14,14 +14,19 @@ from pathlib import Path
 Row = tuple[str | None, ...]
 # table name -> (column names, rows already in their final order)
 Tables = Mapping[str, tuple[Sequence[str], Sequence[Row]]]
+# table name -> columns to index, one single-column index each
+Indexes = Mapping[str, Sequence[str]]
 
 
-def write_snapshot(path: Path, tables: Tables) -> tuple[str, str]:
+def write_snapshot(
+    path: Path, tables: Tables, indexes: Indexes | None = None
+) -> tuple[str, str]:
     """Write the snapshot atomically and read-only; return (content, file) SHA-256.
 
     The content digest is computed by reading the finished database back, in
     table-name order and row order, so it covers exactly what a reader sees.
-    It does not depend on SQLite's page layout; the file digest does.
+    It does not depend on SQLite's page layout or on the indexes; the file
+    digest does depend on both. Indexes are built after the rows are loaded.
     """
     tmp = path.with_name(path.name + ".tmp")
     tmp.unlink(missing_ok=True)
@@ -32,6 +37,12 @@ def write_snapshot(path: Path, tables: Tables) -> tuple[str, str]:
             con.execute(f'CREATE TABLE "{name}" ({cols})')
             marks = ", ".join("?" for _ in columns)
             con.executemany(f'INSERT INTO "{name}" VALUES ({marks})', rows)
+        for name, index_cols in sorted((indexes or {}).items()):
+            known = set(tables[name][0])
+            for col in index_cols:
+                if col not in known:
+                    raise ValueError(f"cannot index unknown column {name}.{col}")
+                con.execute(f'CREATE INDEX "ix_{name}_{col}" ON "{name}" ("{col}")')
         con.commit()
         content = content_digest(con)
     finally:
