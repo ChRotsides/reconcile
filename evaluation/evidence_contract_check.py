@@ -90,9 +90,9 @@ def bdays(start: date, end: date) -> int:
     return n
 
 
-def read_table(root: Path, name: str) -> list[dict[str, str]]:
+def read_table(full: Path, name: str) -> list[dict[str, str]]:
     keep = ALLOWED[name]
-    with (root / "data/benchmark/full" / f"{name}.csv").open(newline="") as f:
+    with (full / f"{name}.csv").open(newline="") as f:
         return [{c: row[c] for c in keep} for row in csv.DictReader(f)]
 
 
@@ -113,6 +113,12 @@ class Snapshot:
 
 
 def load(root: Path) -> Snapshot:
+    return load_dir(root / "data/benchmark/full")
+
+
+def load_dir(full: Path) -> Snapshot:
+    """Load one directory in the upstream full/ table layout (also the fixtures)."""
+    root = full
     pays = read_table(root, "payments")
     snap = Snapshot(
         {p["payment_id"]: p for p in pays},
@@ -171,10 +177,12 @@ def posted_debits(s: Snapshot, p: dict[str, str]) -> list[dict[str, str]]:
     ]
 
 
-def journals(
-    rows: list[dict[str, str]], kind: str
-) -> list[tuple[str, Decimal, Decimal]]:
-    """Balanced journals of one transaction_type: (id, debit total, credit)."""
+def journals(rows: list[dict[str, str]], kind: str) -> list[tuple[str, Decimal, str]]:
+    """Balanced journals of one transaction_type: (id, amount, currency).
+
+    The currency is the lines' single currency, or "MIXED" when lines differ;
+    callers must compare it with the amount they set it against.
+    """
     by_id: dict[str, list[dict[str, str]]] = defaultdict(list)
     for g in rows:
         if g["transaction_type"] == kind:
@@ -184,7 +192,8 @@ def journals(
         d = sum((money(x["debit"]) for x in lines), Decimal(0))
         c = sum((money(x["credit"]) for x in lines), Decimal(0))
         if d == c and d > 0:
-            out.append((jid, d, c))
+            currencies = {x["currency"] for x in lines}
+            out.append((jid, d, currencies.pop() if len(currencies) == 1 else "MIXED"))
     return out
 
 
@@ -205,6 +214,11 @@ def ng(reason: str, ids: set[str] | None = None) -> Result:
 
 def bad(reason: str, ids: set[str] | None = None) -> Result:
     return Result(C, reason, ids or set())
+
+
+def cross_currency(ids: set[str]) -> Result:
+    """Amounts in different currencies are never compared (contract section 2)."""
+    return ng("cross_currency_unsupported", ids)
 
 
 def single_bank(s: Snapshot, p: dict[str, str]) -> Result | dict[str, str]:
@@ -251,6 +265,9 @@ def check_f06(s: Snapshot, inv_id: str) -> Result:
         allocated += amount
         rows = posted_debits(s, p)
         ids.update(b["bank_transaction_id"] for b in rows)
+        if rows and len(s.pay_by_ref[p["reference_number"]]) != 1:
+            # One debit cannot be attributed to several payments (section 3).
+            return ng("reference_shared_by_payments", ids)
         if rows:
             committed += amount
         else:
@@ -328,24 +345,27 @@ def check_f14(s: Snapshot, pid: str, *, variant: str) -> Result:
             return ng(no_bank_reason(s, p))
         return b
     ids = {pid, b["bank_transaction_id"]}
-    if b["currency"] != p["payment_currency"]:
-        return bad("currency_mismatch", ids)
+    fee_j = journals(s.gl_by_src.get(b["bank_transaction_id"], []), "bank_fee")
+    ids.update(j[0] for j in fee_j)
+    if b["currency"] != p["payment_currency"] or any(
+        j[2] != p["payment_currency"] for j in fee_j
+    ):
+        return cross_currency(ids)
     q = quantum(p["payment_currency"])
     delta = money(p["payment_amount"]) - money(b["amount"])
-    fee_j = journals(s.gl_by_src.get(b["bank_transaction_id"], []), "bank_fee")
     explained = sum((j[1] for j in fee_j), Decimal(0))
-    ids.update(j[0] for j in fee_j)
     if delta < -q:
         return ng("bank_exceeds_erp")
     unexplained = abs(delta - explained) > q
     if variant == "f14":
         if delta <= q:
             return bad("no_amount_difference", ids)
-        return (
-            ok("unexplained_shortfall", ids)
-            if unexplained
-            else bad("difference_explained_by_fee_journal", ids)
-        )
+        if not unexplained:
+            return bad("difference_explained_by_fee_journal", ids)
+        # The F14 absence search needs zero fee journals; a partial one fails it.
+        if fee_j:
+            return ng("partial_fee_journal", ids)
+        return ok("unexplained_shortfall", ids)
     if delta <= q:
         return bad("no_amount_difference", ids)
     if unexplained:
@@ -366,6 +386,8 @@ def check_bank_fee(s: Snapshot, bank_id: str) -> Result:
     ids = {bank_id, refs[0]}
     fee_j = journals(s.gl_by_src.get(bank_id, []), "bank_fee")
     ids.update(j[0] for j in fee_j)
+    if any(j[2] != row["currency"] for j in fee_j):
+        return cross_currency(ids)
     if not fee_j:
         why = (
             "journal_post_cutoff" if bank_id in s.late_gl_sources else "no_fee_journal"
@@ -390,7 +412,7 @@ def check_clearing(s: Snapshot, pid: str, method: str) -> Result:
     if p["payment_method"] != method or not effective(p):
         return bad("method_or_status_mismatch", ids)
     if b["currency"] != p["payment_currency"]:
-        return bad("currency_mismatch", ids)
+        return cross_currency(ids)
     if money(b["amount"]) != money(p["payment_amount"]):
         return bad("amount_differs", ids)
     lag = bdays(
@@ -417,6 +439,8 @@ def check_due_date(s: Snapshot, inv_id: str) -> Result:
         if isinstance(b, Result):
             return ng(b.reason, ids | {p["payment_id"]})
         ids.update({p["payment_id"], b["bank_transaction_id"]})
+        if {p["payment_currency"], b["currency"]} != {inv["currency"]}:
+            return cross_currency(ids)
         if money(b["amount"]) != money(p["payment_amount"]):
             return bad("amount_differs", ids)
         net += money(a["allocated_amount"])
@@ -446,6 +470,8 @@ def check_split(s: Snapshot, inv_id: str) -> Result:
         if isinstance(b, Result):
             return ng(b.reason, ids)
         ids.add(b["bank_transaction_id"])
+        if {p["payment_currency"], b["currency"]} != {inv["currency"]}:
+            return cross_currency(ids)
         if money(b["amount"]) != money(p["payment_amount"]):
             return bad("leg_bank_amount_differs", ids)
         net += money(a["allocated_amount"])
@@ -465,6 +491,14 @@ def check_batch(s: Snapshot, pid: str) -> Result:
     ids = {pid, b["bank_transaction_id"]} | {a["invoice_id"] for a in allocs}
     total = sum((money(a["allocated_amount"]) for a in allocs), Decimal(0))
     q = quantum(p["payment_currency"])
+    currencies = {p["payment_currency"], b["currency"]}
+    currencies.update(
+        s.invoices[a["invoice_id"]]["currency"]
+        for a in allocs
+        if a["invoice_id"] in s.invoices
+    )
+    if len(currencies) != 1:
+        return cross_currency(ids)
     if not effective(p):
         return bad("payment_not_completed_settled", ids)
     if abs(total - money(p["payment_amount"])) > q:
@@ -490,7 +524,13 @@ def check_reversal(s: Snapshot, pid: str) -> Result:
         return ng("payment_missing")
     rows = principal_rows(s, p)
     debit = [b for b in rows if b["direction"] == "debit" and b["status"] == "posted"]
-    credit = [b for b in rows if b["transaction_type"] == REVERSAL_ROW]
+    credit = [
+        b
+        for b in rows
+        if b["transaction_type"] == REVERSAL_ROW
+        and b["direction"] == "credit"
+        and b["status"] == "posted"
+    ]
     if len(s.pay_by_ref.get(p["reference_number"], [])) != 1:
         return ng("reference_shared_by_payments")
     if len(debit) != 1 or len(credit) != 1:
@@ -504,6 +544,10 @@ def check_reversal(s: Snapshot, pid: str) -> Result:
         return ng("journal_post_cutoff" if late else "reversal_journal_missing", ids)
     amt = money(p["payment_amount"])
     q = quantum(p["payment_currency"])
+    if {debit[0]["currency"], credit[0]["currency"], *(j[2] for j in rev_j)} != {
+        p["payment_currency"]
+    }:
+        return cross_currency(ids)
     if p["payment_status"] != "reversed" or p["settlement_status"] != "reversed":
         return bad("payment_not_marked_reversed", ids)
     if money(debit[0]["amount"]) != amt or money(credit[0]["amount"]) != amt:

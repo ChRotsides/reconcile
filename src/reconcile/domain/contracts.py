@@ -422,6 +422,10 @@ class Operand:
         return cls(o["evidence_id"], o["field"], Money.from_str(o["amount"]))
 
 
+# Contractual or descriptive dates may lie after the request cutoff (a due date is
+# known in advance). Every other timestamp is an availability time and must not.
+CONTRACTUAL_DATE_FIELDS = frozenset({"due_date"})
+
 OPERATIONS = ("sum", "difference", "abs_difference")
 
 
@@ -674,6 +678,25 @@ class Recommendation:
         )
 
 
+def _check_operand(calculation_id: str, op: Operand, item: EvidenceItem) -> None:
+    """The operand must be exactly the cited record's value (amount and currency)."""
+    if item.record is None:
+        raise ValueError(
+            f"{calculation_id}: {op.evidence_id} is a search, not a record, "
+            "so it cannot supply a money operand"
+        )
+    cited = dict(item.values).get(op.field)
+    if cited is None:
+        raise ValueError(
+            f"{calculation_id}: {op.evidence_id} has no field {op.field!r}"
+        )
+    if Money.from_str(cited) != op.amount:
+        raise ValueError(
+            f"{calculation_id}: operand {op.amount} does not match "
+            f"{op.evidence_id}.{op.field} = {cited}"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class EvidencePacket:
     """The whole answer: every reference inside it resolves inside it."""
@@ -711,12 +734,16 @@ class EvidencePacket:
             if e.search is not None and e.search.cutoff != self.request.cutoff:
                 raise ValueError(f"{e.evidence_id} searched under another cutoff")
             for k, v in e.timestamps:
+                if k in CONTRACTUAL_DATE_FIELDS:
+                    continue
                 if _timestamp_day(k, v) > self.request.cutoff:
                     raise ValueError(f"{e.evidence_id} {k} is after the cutoff")
+        by_id = {e.evidence_id: e for e in self.evidence}
         for c in self.calculations:
             for op in c.operands:
-                if op.evidence_id not in evidence_ids:
+                if op.evidence_id not in by_id:
                     raise ValueError(f"{c.calculation_id}: unknown {op.evidence_id}")
+                _check_operand(c.calculation_id, op, by_id[op.evidence_id])
         for f in self.diagnosis.findings:
             for i in f.evidence_ids:
                 if i not in evidence_ids:

@@ -14,6 +14,8 @@ Two outputs go to two separate directories:
   code and key as the snapshot.
 * `evaluator_dir/links.jsonl`: `request_id` to `case_id`. Evaluator-side only.
 
+The evaluator directory must not equal, lie inside or contain the inference or
+snapshot directory (the snapshot directory is what inference code can read).
 The key file must lie outside both directories. The same inputs and key give
 byte-identical files. Only train, validation and test can be requested; the
 sealed `challenge_test` split is refused before any file is touched.
@@ -107,6 +109,10 @@ def prepare_finrca_requests(
     key_path = key_path.resolve()
     if _inside(inference_dir, evaluator_dir) or _inside(evaluator_dir, inference_dir):
         raise ValueError("inference and evaluator directories must be separate")
+    # The snapshot directory is mounted for inference: links must never land in it.
+    snap_dir = snapshot_dir.resolve()
+    if _inside(evaluator_dir, snap_dir) or _inside(snap_dir, evaluator_dir):
+        raise ValueError("evaluator directory must not overlap the snapshot directory")
     if _inside(key_path, inference_dir) or _inside(key_path, evaluator_dir):
         raise ValueError("key file must be outside both output directories")
     for d in (inference_dir, evaluator_dir):

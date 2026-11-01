@@ -61,7 +61,7 @@ The ISO-only FinRCA layout cannot express these, so they have no scenario:
 
 ## Column vocabulary
 
-`payment_method` is one of `ACH`, `check`, `virtual_card`, `wire` (the clearing limits are keyed by it). `invoices.status` is one of `approved`, `canceled`, `credit_applied`, `paid`, `received`. `bank_transactions.transaction_type` is one of `ACH debit`, `bank fee`, `card settlement`, `check clearing`, `payment reversal`, `wire debit`, matching the payment method on principal rows. `tests/unit/test_fixtures.py` pins all three. FinRCA has no partly-paid invoice status, so `real_partial_payment` uses `approved` (the invoice is still open); the partial state is visible only through allocations versus the invoice total. `payment_status` / `settlement_status` values `reversed` and `pending` are not pinned and remain unverified against FinRCA.
+`payment_method` is one of `ACH`, `check`, `virtual_card`, `wire` (the clearing limits are keyed by it). `invoices.status` is one of `approved`, `canceled`, `credit_applied`, `paid`, `received`. `bank_transactions.transaction_type` is one of `ACH debit`, `bank fee`, `card settlement`, `check clearing`, `payment reversal`, `wire debit`, matching the payment method on principal rows. `tests/unit/test_fixtures.py` pins all three. FinRCA has no partly-paid invoice status, so `real_partial_payment` uses `approved` (the invoice is still open); the partial state is visible only through allocations versus the invoice total. `payment_status` / `settlement_status`: a reversed payment is `reversed` / `reversed` (47 of 47 reversed payments in the FinRCA `full/payments.csv` have both; the two reversal fixtures use that pair). The `pending` values remain unverified against FinRCA.
 
 ## Other limits
 

@@ -56,7 +56,11 @@ def packet() -> EvidencePacket:
         timestamps=(("payment_date", "2026-05-01"),),
     )
     bank = EvidenceItem(
-        "e2", RecordRef(SNAP, "bank_transactions", "tok2"), None, "payment_ref"
+        "e2",
+        RecordRef(SNAP, "bank_transactions", "tok2"),
+        None,
+        "payment_ref",
+        values=(("amount", "75.00 EUR"),),
     )
     gl = EvidenceItem(
         "e3",
@@ -331,6 +335,55 @@ def test_packet_citations_must_respect_snapshot_and_cutoff() -> None:
     )
     with pytest.raises(ValueError, match="another cutoff"):
         replace(p, evidence=(*p.evidence[:2], s))
+
+
+def test_future_contractual_dates_are_citable_but_availability_dates_are_not() -> None:
+    p = packet()
+    inv = EvidenceItem(
+        "e1",
+        RecordRef(SNAP, "invoices", "t"),
+        None,
+        "r",
+        values=p.evidence[0].values,
+        timestamps=(("due_date", "2026-07-10"),),
+    )
+    replace(p, evidence=(inv, *p.evidence[1:]))  # does not raise
+    for key, day in (
+        ("created_at", "2026-07-10T08:00:00"),
+        ("invoice_date", "2026-07-10"),
+    ):
+        late = replace(inv, timestamps=((key, day),))
+        with pytest.raises(ValueError, match="after the cutoff"):
+            replace(p, evidence=(late, *p.evidence[1:]))
+
+
+def _with_operands(p: EvidencePacket, *ops: Operand) -> EvidencePacket:
+    calc = replace(
+        p.calculations[0], operands=ops, result=ops[0].amount - ops[1].amount
+    )
+    return replace(p, calculations=(calc,))
+
+
+def test_operands_must_match_the_cited_evidence_value() -> None:
+    p = packet()
+    ok = (
+        Operand("e1", "payment_amount", eur("100.00")),
+        Operand("e2", "amount", eur("75.00")),
+    )
+    _with_operands(p, *ok)  # does not raise
+    inflated = Operand("e1", "payment_amount", eur("1000.00"))
+    with pytest.raises(ValueError, match="does not match"):
+        _with_operands(p, inflated, ok[1])
+    usd_bank = replace(p.evidence[1], values=(("amount", "75.00 USD"),))
+    with pytest.raises(ValueError, match="does not match"):
+        replace(
+            _with_operands(p, *ok), evidence=(p.evidence[0], usd_bank, p.evidence[2])
+        )
+    with pytest.raises(ValueError, match="no field"):
+        _with_operands(p, ok[0], Operand("e2", "fee", eur("75.00")))
+    from_search = Operand("e3", "amount", eur("75.00"))
+    with pytest.raises(ValueError, match="record"):
+        _with_operands(p, ok[0], from_search)
 
 
 def test_packet_ids_must_be_unique() -> None:

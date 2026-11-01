@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import shutil
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -324,3 +325,26 @@ def test_unknown_entity_type_is_an_error(env: dict[str, Path]) -> None:
     path.write_text(path.read_text().replace('"type": "invoice"', '"type": "widget"'))
     with pytest.raises(ValueError, match="unknown entity type"):
         run(env)
+
+
+def test_evaluator_dir_must_not_overlap_the_snapshot_dir(env: dict[str, Path]) -> None:
+    outer = env["tmp"] / "outer"
+    snap = outer / "snap"
+    shutil.copytree(env["snap"], snap)
+    # equal to, inside, and containing the snapshot directory
+    for evaluator in (snap, snap / "nested", outer):
+        with pytest.raises(ValueError, match="snapshot directory"):
+            run(env, snapshot_dir=snap, evaluator_dir=evaluator)
+    assert not (snap / "links.jsonl").exists()
+    assert not (snap / "nested").exists()
+    assert not (outer / "links.jsonl").exists()
+    assert not env["inf"].exists()
+
+
+def test_inference_dir_must_not_hold_links(env: dict[str, Path]) -> None:
+    # An inference directory equal to, inside or containing the evaluator
+    # directory would hold links.jsonl.
+    for inference in (env["ev"], env["ev"] / "nested", env["tmp"]):
+        with pytest.raises(ValueError, match="separate"):
+            run(env, inference_dir=inference)
+    assert not (env["ev"] / "links.jsonl").exists()

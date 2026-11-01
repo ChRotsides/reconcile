@@ -60,7 +60,14 @@ Full output: `uv run python evaluation/leakage_check.py --upstream <checkout>` (
 
 Tree on all payment fields: 0.751 (all of it from the allocation field). Tree on own-row fields only: **0.564**. Bank rows carrying an inserted payment's reference: best field `bank_amount_mag` 0.564 (182/198 found, 4713/5963 flagged, precision 0.037), tree 0.542. GL lines sourced to inserted payments: best field `gl_age` 0.546, tree 0.561 (400 inserted of 12484).
 
-Result: the remapped, re-sorted snapshot does not let an observer pick out the 100 inserted payments that have allocations (the F06 duplicates) from their own row, bank row or ledger lines. The other 100 are marked only by the genuine absence of an allocation.
+Subgroup test (inserted payments that have an allocation, 100, against the 6000 organic payments; the 100 without an allocation are dropped; same single-field and tree method, 5-fold CV, null95 0.563):
+
+| Feature set | Tree (CV balanced) | Best single fields (balanced) |
+|---|---|---|
+| All payment fields | 0.579 | `rel.pay_n_alloc` 0.590 (100/100 found, 4920/6000 organic flagged, precision 0.020 vs base rate 0.016; FLAG), `own.pay_age` 0.550, `own.pay_amount_mag` 0.548 (not flagged) |
+| Own row only | 0.485 | `own.pay_age` 0.550, `own.pay_amount_mag` 0.548 (nothing above null95) |
+
+Findings: from the payment's own row (and vendor data) these 100 are not separable. With joined fields the only flag is `rel.pay_n_alloc`, which the inserted payments all have as exactly one allocation while about 18% of organic payments (1080 of 6000) have two or more; precision 0.020 against a 0.016 base rate is a lift of about 1.2, so no usable signal. Bank-row and GL-line features were tested only in the pooled 200-payment runs above (best balanced accuracy 0.564 and 0.561), not re-run on this subgroup. No additional signal detected by these experiments; untested: interactions beyond depth 3, and bank-row and ledger features restricted to the 100-payment subgroup. The other 100 inserted payments are marked only by the genuine absence of an allocation.
 
 **Invoices** (inserted = raw ID above `INV_0428000`): 147 of 8147, base rate 0.018, null95 0.554.
 
