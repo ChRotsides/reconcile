@@ -228,7 +228,7 @@ def _balance(
     return _Balance(calc.calculation_id, cited, status, others)
 
 
-def _balances(
+def invoice_balances(
     led: Ledger, reader: Reader, invoices: list[str], cur: str, cutoff: date, pid: str
 ) -> list[_Balance] | EvidencePacket:
     out: list[_Balance] = []
@@ -301,13 +301,10 @@ def allocated_finding(led: Ledger, pay: Row, allocs: list[Row]) -> Finding:
 
 def _batch(
     led: Ledger,
-    reader: Reader,
     pay: Row,
     pay_ev: str,
     d_ev: str,
     allocs: list[Row],
-    invoices: list[str],
-    cutoff: date,
     alternatives: tuple[str, ...],
 ) -> EvidencePacket:
     pid, cur = req(pay, "payment_id"), req(pay, "payment_currency")
@@ -325,9 +322,6 @@ def _batch(
             "allocations_differ_from_payment",
             "an explanation of allocations that differ from the payment",
         )
-    bals = _balances(led, reader, invoices, cur, cutoff, pid)
-    if isinstance(bals, EvidencePacket):
-        return bals
     findings = (
         _supported(
             "allocations_equal_payment",
@@ -337,11 +331,6 @@ def _batch(
         _supported(
             "bank_matches_payment", (pay_ev, d_ev), ("delta", "business_day_lag")
         ),
-        _supported(
-            "invoices_not_over_allocated",
-            tuple(e for b in bals for e in b.evidence),
-            tuple(b.calc_id for b in bals if b.calc_id),
-        ),
     )
     return led.packet(
         Diagnosis(Disposition.ANSWERED, BATCH, findings, alternatives=alternatives)
@@ -349,28 +338,16 @@ def _batch(
 
 
 def _no_exception(
-    led: Ledger,
-    reader: Reader,
-    pay: Row,
-    pay_ev: str,
-    d_ev: str,
-    allocs: list[Row],
-    invoices: list[str],
-    cutoff: date,
+    led: Ledger, reader: Reader, pay: Row, pay_ev: str, d_ev: str, allocs: list[Row]
 ) -> EvidencePacket:
     pid, cur = req(pay, "payment_id"), req(pay, "payment_currency")
     alloc_evs = _alloc_evs(led, pid, allocs, cur)
     led.calc("allocated", "sum", [(e, "allocated_amount") for e in alloc_evs])
-    bals = _balances(led, reader, invoices, cur, cutoff, pid)
-    if isinstance(bals, EvidencePacket):
-        return bals
     findings = [
         _supported("debit_matches_payment", (pay_ev, d_ev), ("delta",)),
         _supported("cleared_within_limit", (pay_ev, d_ev), ("business_day_lag",)),
         _supported(
-            "invoice_not_over_allocated",
-            (pay_ev, *alloc_evs, *[e for b in bals for e in b.evidence]),
-            ("allocated", *[b.calc_id for b in bals if b.calc_id]),
+            "payment_allocated_to_invoice", (pay_ev, *alloc_evs), ("allocated",)
         ),
     ]
     twins = rt.equal_twins(reader, pay)
@@ -453,7 +430,7 @@ def _reversal(
         return led.abstain("required_records_missing", "an allocation of the payment")
     alloc_evs = _alloc_evs(led, pid, allocs, cur)
     invoices = sorted({req(a, "invoice_id") for a in allocs})
-    bals = _balances(led, reader, invoices, cur, cutoff, pid)
+    bals = invoice_balances(led, reader, invoices, cur, cutoff, pid)
     if isinstance(bals, EvidencePacket):
         return bals
     for b in bals:
@@ -534,9 +511,7 @@ def _matched(
     if method == "ACH" and spans_weekend(paid, posted):
         holds.append(WEEKEND)
     if holds and holds[0] == BATCH:
-        return _batch(
-            led, reader, pay, pay_ev, d_ev, allocs, invoices, cutoff, tuple(holds[1:])
-        )
+        return _batch(led, pay, pay_ev, d_ev, allocs, tuple(holds[1:]))
     if holds:
         check_id = (
             "cleared_within_check_limit"
@@ -548,4 +523,4 @@ def _matched(
             allocated_finding(led, pay, allocs),
         )
         return led.packet(Diagnosis(Disposition.ANSWERED, holds[0], findings))
-    return _no_exception(led, reader, pay, pay_ev, d_ev, allocs, invoices, cutoff)
+    return _no_exception(led, reader, pay, pay_ev, d_ev, allocs)

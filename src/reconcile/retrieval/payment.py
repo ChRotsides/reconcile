@@ -71,12 +71,16 @@ def allocations_of_payment(reader: Reader, token: str, cutoff: date) -> list[Row
 def journals(
     reader: Reader, source: str, gl_type: str, cutoff: date
 ) -> dict[str, list[Row]]:
-    """Observable GL lines of one transaction type sourced to a record, by journal."""
+    """Observable GL journals that have a line of one transaction type sourced to
+    a record, by journal. Each journal is returned complete (every observable
+    line of that journal_id, whatever its source or type), so that a balance
+    claim covers the whole journal and not only the lines found by the filter."""
     lines = reader.rows(
         "SELECT journal_id, posting_date, debit, credit, currency FROM gl_entries"
+        " WHERE posting_date <= ? AND journal_id IN (SELECT journal_id FROM gl_entries"
         " WHERE source_transaction_id = ? AND transaction_type = ?"
-        " AND posting_date <= ? ORDER BY journal_id, journal_line_id",
-        (source, gl_type, cutoff.isoformat()),
+        " AND posting_date <= ?) ORDER BY journal_id, journal_line_id",
+        (cutoff.isoformat(), source, gl_type, cutoff.isoformat()),
     )
     out: dict[str, list[Row]] = {}
     for line in lines:

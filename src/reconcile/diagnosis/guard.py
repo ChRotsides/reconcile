@@ -1,26 +1,31 @@
 """Prerequisites of every all-clear (docs/evidence-contract.md section 5).
 
-Before a payment is called legitimate or "no exception", two generic finance
-rules must hold, both read from allowlisted snapshot tables:
+Before a payment is called legitimate or "no exception", three generic finance
+rules must hold, all read from allowlisted snapshot tables:
 
-1. Approval. Each invoice the payment is allocated to has a completed final
-   approval recorded on or before the payment date. "Completed final approval"
-   is an approval event (`action` approved or auto_approved) whose `new_status`
-   is `approved`, the workflow's terminal state, at the highest
-   `approval_level` the invoice's events reach. An intermediate approval leaves
-   the invoice pending and does not count.
-2. GL posting. The payment has a balanced ERP payment journal in the payment's
+1. Invoice totals. No invoice the payment is allocated to is over-allocated by
+   the effective payments (this is also the duplicate check), in one currency.
+2. Approval. Each invoice the payment is allocated to has an approval that is
+   effective on the payment date: the latest approval-workflow event dated on
+   or before the payment date is a final approval, i.e. `action` approved or
+   auto_approved with `new_status` `approved` (the workflow's terminal state) at
+   the highest `approval_level` reached by that date. A later rejection,
+   cancellation or reopening on or before the payment date revokes it; events
+   after the payment date do not matter. Events with the same timestamp have no
+   order, so the approval is effective only if every one of them is final.
+3. GL posting. The payment has a balanced ERP payment journal in the payment's
    currency whose amount equals the payment amount within one minor unit.
 
-If either cannot be confirmed the case abstains with a specific reason. The
-guard runs last, so every other reason keeps its precedence.
+If any cannot be confirmed the case abstains with a specific reason. The guard
+runs last, so every other reason keeps its precedence.
 """
 
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 
 from reconcile.diagnosis.ledger import Ledger, req
 from reconcile.diagnosis.policy import quantum
+from reconcile.diagnosis.settled import invoice_balances
 from reconcile.domain.contracts import (
     Disposition,
     EvidencePacket,
@@ -31,6 +36,7 @@ from reconcile.retrieval import payment as rt
 from reconcile.retrieval.snapshot import Reader, Row
 
 NOT_COMPLETED = "invoice_approval_not_completed"
+NOT_EFFECTIVE = "invoice_approval_not_effective"
 BEFORE_APPROVAL = "payment_before_approval"
 JOURNAL_MISSING = "payment_journal_missing"
 JOURNAL_UNBALANCED = "payment_journal_unbalanced"
@@ -46,12 +52,26 @@ def _supported(
 
 
 def _events(reader: Reader, invoice: str, cutoff: date) -> list[Row]:
+    # The order only fixes the order of citations; no decision reads it.
     return reader.rows(
         "SELECT approval_event_id, approval_level, approver_role, action,"
         " event_timestamp, previous_status, new_status FROM approval_events"
         " WHERE invoice_id = ? AND substr(event_timestamp, 1, 10) <= ?"
-        " ORDER BY approval_event_id",
+        " ORDER BY event_timestamp, approval_level, action, new_status,"
+        " approval_event_id",
         (invoice, cutoff.isoformat()),
+    )
+
+
+def _stamp(e: Row) -> datetime:
+    return datetime.fromisoformat(req(e, "event_timestamp"))
+
+
+def _is_final(e: Row, top: int) -> bool:
+    return (
+        e["action"] in APPROVED
+        and e["new_status"] == "approved"
+        and int(req(e, "approval_level")) >= top
     )
 
 
@@ -81,40 +101,65 @@ def _approval(
     evidence: list[str] = []
     for inv in invoices:
         events = _events(reader, inv, cutoff)
-        top = max((int(req(e, "approval_level")) for e in events), default=0)
-        final = [
+        upto = [e for e in events if req(e, "event_timestamp")[:10] <= paid]
+        top = max((int(req(e, "approval_level")) for e in upto), default=0)
+        finals = [e for e in upto if _is_final(e, top)]
+        newest = max((_stamp(e) for e in upto), default=None)
+        latest = [e for e in upto if _stamp(e) == newest]
+        if latest and all(_is_final(e, top) for e in latest):
+            evidence.extend(_cite_event(led, e) for e in latest)
+            continue
+        if finals:  # approved once, but the newest event is not a final approval
+            cited = [_cite_event(led, e) for e in (finals[-1], *latest)]
+            return led.abstain(
+                NOT_EFFECTIVE,
+                "an approval that was still effective on the payment date",
+                (_supported(NOT_EFFECTIVE, (pay_ev, *cited)),),
+            )
+        top_all = max((int(req(e, "approval_level")) for e in events), default=0)
+        later = [
             e
             for e in events
-            if e["action"] in APPROVED
-            and e["new_status"] == "approved"
-            and int(req(e, "approval_level")) >= top
+            if req(e, "event_timestamp")[:10] > paid and _is_final(e, top_all)
         ]
-        if not final:
-            cited = [_cite_event(led, e) for e in events]
-            search = led.search(
-                "approval_events",
-                f"invoice_id = '{inv}' AND action IN ('approved', 'auto_approved')"
-                " AND new_status = 'approved'"
-                f" AND substr(event_timestamp, 1, 10) <= '{cutoff.isoformat()}'",
-                0,
-                "final_approval_search",
-            )
-            finding = _supported(NOT_COMPLETED, (pay_ev, *cited, search))
-            return led.abstain(
-                NOT_COMPLETED,
-                "a completed final approval of each invoice the payment settles",
-                (finding,),
-            )
-        ev = _cite_event(led, final[0])
-        evidence.append(ev)
-        if req(final[0], "event_timestamp")[:10] > paid:
-            finding = _supported(BEFORE_APPROVAL, (pay_ev, ev))
+        if later:
+            ev = _cite_event(led, later[0])
             return led.abstain(
                 BEFORE_APPROVAL,
                 "a final approval recorded on or before the payment date",
-                (finding,),
+                (_supported(BEFORE_APPROVAL, (pay_ev, ev)),),
             )
+        cited = [_cite_event(led, e) for e in upto]
+        search = led.search(
+            "approval_events",
+            f"invoice_id = '{inv}' AND action IN ('approved', 'auto_approved')"
+            " AND new_status = 'approved'"
+            f" AND CAST(approval_level AS INTEGER) >= {top}"
+            f" AND substr(event_timestamp, 1, 10) <= '{paid}'",
+            0,
+            "final_approval_search",
+        )
+        return led.abstain(
+            NOT_COMPLETED,
+            "a completed final approval of each invoice the payment settles",
+            (_supported(NOT_COMPLETED, (pay_ev, *cited, search)),),
+        )
     return [_supported("final_approval_before_payment", (pay_ev, *evidence))]
+
+
+def _totals(
+    led: Ledger, reader: Reader, pid: str, invoices: list[str], cutoff: date
+) -> Finding | EvidencePacket:
+    pay_ev = f"pay:{pid}"
+    cur = dict(led.items[pay_ev].values)["payment_currency"]
+    bals = invoice_balances(led, reader, invoices, cur, cutoff, pid)
+    if isinstance(bals, EvidencePacket):
+        return bals
+    return _supported(
+        "invoice_totals_not_exceeded",
+        (pay_ev, *[e for b in bals for e in b.evidence]),
+        tuple(b.calc_id for b in bals if b.calc_id),
+    )
 
 
 def _journal(
@@ -173,17 +218,20 @@ def _journal(
 def guard_payment(
     led: Ledger, reader: Reader, pid: str, cutoff: date
 ) -> list[Finding] | EvidencePacket:
-    """Findings that show both prerequisites, or the abstention. The payment
+    """Findings that show all three prerequisites, or the abstention. The payment
     must already be cited in `led` as `pay:<pid>`."""
     allocs = rt.allocations_of_payment(reader, pid, cutoff)
     invoices = sorted({req(a, "invoice_id") for a in allocs})
+    totals = _totals(led, reader, pid, invoices, cutoff)
+    if isinstance(totals, EvidencePacket):
+        return totals
     approval = _approval(led, reader, pid, invoices, cutoff)
     if isinstance(approval, EvidencePacket):
         return approval
     journal = _journal(led, reader, pid, cutoff)
     if isinstance(journal, EvidencePacket):
         return journal
-    return [*approval, *journal]
+    return [totals, *approval, *journal]
 
 
 def guarded(

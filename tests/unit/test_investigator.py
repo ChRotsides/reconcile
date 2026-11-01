@@ -109,7 +109,9 @@ def clone(p: Prepared, tmp_path: Path, *sql: str) -> Path:
     copy.chmod(0o644)
     con = sqlite3.connect(copy)
     for statement in sql:
-        con.execute(statement)
+        changed = con.execute(statement).rowcount
+        # A mutation that matches nothing would make its test pass vacuously.
+        assert changed != 0, f"mutation changed no row: {statement}"
     con.commit()
     con.close()
     return copy
@@ -680,7 +682,7 @@ def run_clone(p: Prepared, tmp_path: Path) -> EvidencePacket:
 
 def test_policy_is_declared_in_every_packet(prepared: dict[str, Prepared]) -> None:
     prov = dict(run(prepared, "weekend_clearing").provenance)
-    assert prov["policy_version"] == "evidence-contract-0.3"
+    assert prov["policy_version"] == "evidence-contract-0.4"
     assert [
         prov[f"clearing_limit_{m}"] for m in ("ach", "wire", "check", "virtual_card")
     ] == [
@@ -924,3 +926,284 @@ def test_journal_two_minor_units_off_abstains(
         "UPDATE gl_entries SET credit = '800.02' WHERE credit = '800.00'",
     )
     assert reason(packet) == ("abstained", "payment_journal_amount_differs")
+
+
+# --- review round 1: shared invoice-total step, effective approval, journals --
+
+OTHER_PAYMENT = (
+    "INSERT INTO payments (payment_id, vendor_id, bank_account_id, reference_number,"
+    " payment_date, payment_method, payment_currency, payment_amount, payment_status,"
+    " settlement_status, created_at) SELECT 'px', vendor_id, bank_account_id, 'rx',"
+    " payment_date, payment_method, payment_currency, payment_amount, payment_status,"
+    " settlement_status, created_at FROM payments LIMIT 1",
+    "INSERT INTO payment_allocations (payment_id, invoice_id, allocated_amount,"
+    " allocation_date) SELECT 'px', invoice_id, '100000.00', allocation_date"
+    " FROM payment_allocations LIMIT 1",
+)
+
+
+@pytest.mark.parametrize(("name", "table", "raw"), ALL_CLEAR_PRIMARIES)
+def test_overpaid_invoice_is_never_an_all_clear(
+    prepared: dict[str, Prepared], tmp_path: Path, name: str, table: str, raw: str
+) -> None:
+    """Finding 1: every all-clear path applies the invoice-total check."""
+    p = prepared[name]
+    packet = investigate(clone(p, tmp_path, *OTHER_PAYMENT), p.request(table, raw))
+    assert reason(packet) == ("abstained", "invoice_over_allocated")
+
+
+def test_pending_payment_on_an_overpaid_invoice_is_not_an_all_clear(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    p = prepared["pending_settlement"]
+    packet = investigate(
+        clone(
+            p,
+            tmp_path,
+            *OTHER_PAYMENT,
+            "UPDATE payments SET payment_status = 'completed',"
+            " settlement_status = 'settled' WHERE payment_id = 'px'",
+        ),
+        p.request("payments", "PAY_1"),
+    )
+    assert reason(packet) == ("abstained", "invoice_over_allocated")
+
+
+def test_two_check_payments_overpaying_one_invoice_are_not_check_clearing(
+    prepared: dict[str, Prepared],
+) -> None:
+    packet = run(prepared, "real_check_double_payment")
+    assert reason(packet) == ("abstained", "invoice_over_allocated")
+    assert packet.diagnosis.category is None
+
+
+def test_pending_payment_allocated_only_to_another_currency_invoice_abstains(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    packet = primary_packet(
+        prepared,
+        tmp_path,
+        "pending_settlement",
+        "UPDATE invoices SET currency = 'USD'",
+    )
+    assert reason(packet) == ("abstained", "unsupported_fx")
+
+
+# Approval effective at the payment date (guard rule, finding 3).
+APPROVAL = (
+    "INSERT INTO approval_events (approval_event_id, invoice_id, approval_level,"
+    " approver_role, action, event_timestamp, previous_status, new_status)"
+    " SELECT '{id}', invoice_id, {level}, 'manager', '{action}', '{ts}',"
+    " 'x', '{new}' FROM approval_events LIMIT 1"
+)
+
+
+def approval(id_: str, ts: str, action: str, new: str, level: int = 1) -> str:
+    return APPROVAL.format(id=id_, ts=ts, action=action, new=new, level=level)
+
+
+def test_revoked_approval_fixture_abstains(prepared: dict[str, Prepared]) -> None:
+    packet = run(prepared, "real_approval_revoked")
+    assert reason(packet) == ("abstained", "invoice_approval_not_effective")
+    assert packet.diagnosis.findings[0].check_id == "invoice_approval_not_effective"
+
+
+@pytest.mark.parametrize(
+    ("event", "outcome"),
+    [
+        # rejected / cancelled / reopened on or before the payment date: revoked
+        (
+            approval("e1", "2026-06-03T09:00:00", "rejected", "rejected"),
+            ("abstained", "invoice_approval_not_effective"),
+        ),
+        (
+            approval("e1", "2026-06-05T23:00:00", "cancelled", "cancelled"),
+            ("abstained", "invoice_approval_not_effective"),
+        ),
+        (
+            approval("e1", "2026-06-04T09:00:00", "submitted", "submitted", 0),
+            ("abstained", "invoice_approval_not_effective"),
+        ),
+        # revoked only after the payment date: effective at payment
+        (
+            approval("e1", "2026-06-06T09:00:00", "rejected", "rejected"),
+            ("answered", "legitimate_weekend_clearing"),
+        ),
+    ],
+)
+def test_latest_approval_event_at_payment_decides(
+    prepared: dict[str, Prepared], tmp_path: Path, event: str, outcome: Any
+) -> None:
+    packet = primary_packet(prepared, tmp_path, "weekend_clearing", event)
+    assert reason(packet) == outcome
+
+
+def test_reapproval_after_revocation_is_effective(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    packet = primary_packet(
+        prepared,
+        tmp_path,
+        "weekend_clearing",
+        approval("e1", "2026-06-03T09:00:00", "rejected", "rejected"),
+        approval("e2", "2026-06-04T09:00:00", "approved", "approved"),
+    )
+    assert reason(packet) == ("answered", "legitimate_weekend_clearing")
+
+
+@pytest.mark.parametrize("ids", [("a_early", "z_late"), ("z_early", "a_late")])
+def test_approval_choice_ignores_event_ids(
+    prepared: dict[str, Prepared], tmp_path: Path, ids: tuple[str, str]
+) -> None:
+    """Finding 4: one approval before the payment, another after it. The outcome
+    must not depend on which opaque id sorts first."""
+    early, late = ids
+    packet = primary_packet(
+        prepared,
+        tmp_path,
+        "weekend_clearing",
+        "DELETE FROM approval_events WHERE new_status = 'approved'",
+        approval(early, "2026-06-03T09:00:00", "approved", "approved"),
+        approval(late, "2026-06-08T09:00:00", "approved", "approved"),
+    )
+    assert reason(packet) == ("answered", "legitimate_weekend_clearing")
+
+
+@pytest.mark.parametrize("ids", [("a", "b"), ("b", "a")])
+def test_tied_timestamps_with_a_revocation_are_not_an_all_clear(
+    prepared: dict[str, Prepared], tmp_path: Path, ids: tuple[str, str]
+) -> None:
+    ts = "2026-06-04T09:00:00"
+    packet = primary_packet(
+        prepared,
+        tmp_path,
+        "weekend_clearing",
+        approval(ids[0], ts, "approved", "approved"),
+        approval(ids[1], ts, "rejected", "rejected"),
+    )
+    assert reason(packet) == ("abstained", "invoice_approval_not_effective")
+
+
+def replay(packet: EvidencePacket, snapshot: Path) -> list[str]:
+    """Re-run every cited absence search on the snapshot (contract principle 3)."""
+    con = sqlite3.connect(snapshot)
+    bad = []
+    for e in packet.evidence:
+        s = e.search
+        if s is None:
+            continue
+        pred = s.predicate.replace(
+            " AND payment_reference matches no payment",
+            " AND (payment_reference IS NULL OR payment_reference NOT IN"
+            " (SELECT reference_number FROM payments))",
+        )
+        (n,) = con.execute(f"SELECT COUNT(*) FROM {s.table} WHERE {pred}").fetchone()  # noqa: S608
+        if n != s.observed_count:
+            bad.append(f"{e.evidence_id}: stated {s.observed_count}, re-run {n}")
+    con.close()
+    return bad
+
+
+@pytest.mark.parametrize("name", ALL_SCENARIOS)
+def test_every_cited_search_reproduces_its_count(
+    prepared: dict[str, Prepared], name: str
+) -> None:
+    assert replay(run(prepared, name), prepared[name].snapshot) == []
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # terminal approval at level 1, then a pending event at level 2
+        (approval("e1", "2026-06-04T09:00:00", "submitted", "pending_level_2", 2),),
+        # level-1 approval is the only terminal one, level 2 reached before payment
+        (
+            "DELETE FROM approval_events WHERE new_status = 'approved'",
+            approval("e1", "2026-06-02T09:00:00", "approved", "pending_level_2", 1),
+            approval("e2", "2026-06-03T09:00:00", "submitted", "pending_level_3", 2),
+        ),
+        ("DELETE FROM approval_events WHERE new_status = 'approved'",),
+        # only an approval after the payment date
+        (
+            "UPDATE approval_events SET event_timestamp = '2026-06-08T10:00:00'"
+            " WHERE new_status = 'approved'",
+        ),
+    ],
+)
+def test_approval_search_predicate_matches_what_was_tested(
+    prepared: dict[str, Prepared], tmp_path: Path, sql: tuple[str, ...]
+) -> None:
+    p = prepared["weekend_clearing"]
+    copy = clone(p, tmp_path, *sql)
+    packet = investigate(copy, p.request("payments", "PAY_1"))
+    assert packet.diagnosis.disposition is Disposition.ABSTAINED
+    assert replay(packet, copy) == []
+    assert any(
+        e.search and e.search.table == "approval_events" for e in packet.evidence
+    ) == (packet.diagnosis.reason == "invoice_approval_not_completed")
+
+
+def extra_line(
+    source: str, type_: str, debit: str, credit: str, table_type: str
+) -> str:
+    return (
+        "INSERT INTO gl_entries (journal_id, journal_line_id, source_transaction_id,"
+        " transaction_type, posting_date, accounting_period, gl_account, debit,"
+        f" credit, currency) SELECT journal_id, journal_line_id || 'x', '{source}',"
+        f" '{type_}', posting_date, accounting_period, gl_account, '{debit}',"
+        f" '{credit}', currency FROM gl_entries WHERE transaction_type ="
+        f" '{table_type}' LIMIT 1"
+    )
+
+
+def test_payment_journal_with_an_unrelated_line_is_not_balanced(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    """Finding 6: the whole journal is validated, not the payment-sourced lines."""
+    packet = primary_packet(
+        prepared,
+        tmp_path,
+        "weekend_clearing",
+        extra_line("OTHER", "accrual", "50.00", "0.00", "payment"),
+    )
+    assert reason(packet) == ("abstained", "payment_journal_unbalanced")
+
+
+def test_payment_journal_with_an_unrelated_balanced_pair_differs(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    packet = primary_packet(
+        prepared,
+        tmp_path,
+        "weekend_clearing",
+        extra_line("OTHER", "accrual", "50.00", "0.00", "payment"),
+        extra_line("OTHER", "accrual", "0.00", "50.00", "payment"),
+    )
+    assert reason(packet) == ("abstained", "payment_journal_amount_differs")
+
+
+def test_fee_journal_with_an_unrelated_line_is_invalid(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    packet = primary_packet(
+        prepared,
+        tmp_path,
+        "net_fee_accounting",
+        extra_line("OTHER", "accrual", "5.00", "0.00", "bank_fee"),
+    )
+    assert reason(packet) == ("abstained", "fee_journal_invalid")
+
+
+def test_accounted_fee_in_another_currency_than_the_payment_abstains(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    """Finding 7: fee row and fee journal in USD, payment in EUR."""
+    packet = primary_packet(
+        prepared,
+        tmp_path,
+        "accounted_bank_fee",
+        "UPDATE bank_transactions SET currency = 'USD'"
+        " WHERE transaction_type = 'bank fee'",
+        "UPDATE gl_entries SET currency = 'USD' WHERE transaction_type = 'bank_fee'",
+    )
+    assert reason(packet) == ("abstained", "unsupported_fx")

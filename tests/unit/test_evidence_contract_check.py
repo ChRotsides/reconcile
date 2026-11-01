@@ -109,6 +109,8 @@ CHECKS: dict[str, tuple[str, str, str, str]] = {
         G,
         "within_clearing_window",
     ),
+    "real_approval_revoked": ("clearing", "PAY_1", G, "within_clearing_window"),
+    "real_check_double_payment": ("check", "PAY_1", G, "within_clearing_window"),
     "real_partial_payment": ("no_exception", "PAY_1", G, "matched_no_exception"),
     # Documented contract gap: re-payment leaves the invoice paid.
     "real_reversal_then_repayment": ("reversal", "PAY_1", C, "invoice_still_paid"),
@@ -158,9 +160,15 @@ def test_checker_agrees_with_expected_disposition(name: str) -> None:
         # The contract and the expected outcome differ, as documented.
         assert gap["current_contract_outcome"]
         assert (e["disposition"], status) in {("abstained", G), ("abstained", C)}
-    elif name in ("real_approval_missing", "real_gl_payment_journal_mismatch"):
-        # The all-clear prerequisites (approval, payment journal) are investigator
-        # rules the checker does not model; it sees a clean clearing case.
+    elif name in (
+        "real_approval_missing",
+        "real_approval_revoked",
+        "real_check_double_payment",
+        "real_gl_payment_journal_mismatch",
+    ):
+        # The all-clear prerequisites (approval, payment journal, invoice totals)
+        # are investigator rules the checker does not model; it sees a clean
+        # clearing case.
         assert (e["disposition"], status) == ("abstained", G)
     elif name == "fx_settlement":
         # Detection only: the checker finds the mismatch; the answer is an abstention.

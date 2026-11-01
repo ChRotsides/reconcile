@@ -204,6 +204,10 @@ def _no_bank_row(
             "pending_payment_beyond_clearing_limit",
             "the status of a not-yet-final payment past its clearing limit",
         )
+    # Pending settlement is an all-clear too: it needs an invoice in its currency.
+    in_currency = require_allocation(led, reader, pay, cutoff)
+    if isinstance(in_currency, EvidencePacket):
+        return in_currency
     findings = (
         Finding(
             "within_clearing_window",
@@ -332,6 +336,10 @@ def diagnose_bank_row(
             reason, "a fee reference that resolves to exactly one payment"
         )
     pay_ev = led.payment(resolved[0], req(resolved[0], "payment_id"), "fee_payment")
+    if req(resolved[0], "payment_currency") != cur:
+        return led.abstain(
+            "unsupported_fx", "a documented conversion path between currencies"
+        )
     lines = rt.journals(reader, bid, "bank_fee", cutoff)
     evs = [e for j, ls in lines.items() if (e := led.journal(j, ls, "fee_journal"))]
     if not lines:

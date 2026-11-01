@@ -37,6 +37,11 @@
         "table": "payment_allocations"
       },
       {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
+      },
+      {
         "id": "J_FEE_1",
         "role": "bank_fee journal (by journal_id)",
         "table": "gl_entries"
@@ -180,6 +185,11 @@
         "id": "PAY_1|INV_1",
         "role": "allocation of the payment to an invoice in its currency (section 5)",
         "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
       },
       {
         "id": "APR_INV_1_A",
@@ -756,6 +766,11 @@
         "table": "payment_allocations"
       },
       {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
+      },
+      {
         "id": "J_FEE_1",
         "role": "bank_fee journal (by journal_id)",
         "table": "gl_entries"
@@ -913,6 +928,11 @@
         "table": "gl_entries"
       },
       {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
+      },
+      {
         "id": "APR_INV_1_A",
         "role": "completed final approval of an allocated invoice",
         "table": "approval_events"
@@ -936,7 +956,7 @@
         "count": 0,
         "cutoff": "2026-06-30",
         "id": "AP",
-        "predicate": "invoice_id = INV_1 AND action IN ('approved', 'auto_approved') AND new_status = 'approved'",
+        "predicate": "invoice_id = INV_1 AND action IN ('approved', 'auto_approved') AND new_status = 'approved' AND approval_level >= 1 AND event date <= payment date",
         "table": "approval_events"
       }
     ],
@@ -963,6 +983,11 @@
         "table": "payment_allocations"
       },
       {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
+      },
+      {
         "id": "APR_INV_1_S",
         "role": "approval event of the invoice",
         "table": "approval_events"
@@ -970,6 +995,60 @@
       {
         "id": "APR_INV_1_L1",
         "role": "approval event of the invoice",
+        "table": "approval_events"
+      }
+    ],
+    "family": "realistic_shape",
+    "known_contract_gap": null,
+    "must_not": [
+      "legitimate_weekend_clearing",
+      "no_exception"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  },
+  "real_approval_revoked": {
+    "absence_searches": [],
+    "abstention_reason": "invoice_approval_not_effective",
+    "calculations": [],
+    "category": null,
+    "contract_section": "5 (all-clear prerequisites)",
+    "disposition": "abstained",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "unique posted debit",
+        "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation of the payment to an invoice in its currency (section 5)",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
+      },
+      {
+        "id": "APR_INV_1_A",
+        "role": "the last final approval before the revocation",
+        "table": "approval_events"
+      },
+      {
+        "id": "APR_INV_1_R",
+        "role": "latest approval event on or before the payment date (a rejection)",
         "table": "approval_events"
       }
     ],
@@ -1089,6 +1168,60 @@
     },
     "snapshot_rows": {}
   },
+  "real_check_double_payment": {
+    "absence_searches": [],
+    "abstention_reason": "invoice_over_allocated",
+    "calculations": [],
+    "category": null,
+    "contract_section": "5 (all-clear prerequisites)",
+    "disposition": "abstained",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "unique posted debit",
+        "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation of the payment to an invoice in its currency (section 5)",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
+      },
+      {
+        "id": "PAY_2",
+        "role": "second effective payment allocated to the same invoice",
+        "table": "payments"
+      },
+      {
+        "id": "PAY_2|INV_1",
+        "role": "allocation of the second payment",
+        "table": "payment_allocations"
+      }
+    ],
+    "family": "realistic_shape",
+    "known_contract_gap": null,
+    "must_not": [
+      "legitimate_check_clearing",
+      "no_exception"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  },
   "real_free_text_reference": {
     "absence_searches": [
       {
@@ -1200,6 +1333,11 @@
         "id": "PAY_1|INV_1",
         "role": "allocation of the payment to an invoice in its currency (section 5)",
         "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
       },
       {
         "id": "APR_INV_1_A",
@@ -1862,6 +2000,11 @@
         "id": "PAY_1|INV_1",
         "role": "allocation of the payment to an invoice in its currency (section 5)",
         "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
       },
       {
         "id": "APR_INV_1_A",

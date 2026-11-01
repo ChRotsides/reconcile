@@ -29,6 +29,25 @@ def test_business_days_half_open_weekdays_only() -> None:
         business_days(date(2026, 6, 2), date(2026, 6, 1))
 
 
+@pytest.mark.parametrize(
+    ("start", "end", "days"),
+    [
+        (date(2026, 6, 6), date(2026, 6, 8), 1),  # Saturday start, Monday end
+        (date(2026, 6, 7), date(2026, 6, 8), 1),  # Sunday start
+        (date(2026, 6, 6), date(2026, 6, 6), 0),  # Saturday to itself
+        (date(2026, 6, 6), date(2026, 6, 7), 0),  # weekend only
+        (date(2026, 6, 5), date(2026, 6, 6), 0),  # Friday to Saturday end
+        (date(2026, 6, 5), date(2026, 6, 7), 0),  # Friday to Sunday end
+        (date(2026, 6, 5), date(2026, 6, 8), 1),  # Friday to Monday
+        (date(2026, 6, 5), date(2026, 6, 5), 0),  # weekday to itself
+        (date(2026, 6, 27), date(2026, 6, 30), 2),  # Sat to Tue (Mon, Tue)
+    ],
+)
+def test_business_days_boundaries(start: date, end: date, days: int) -> None:
+    """(start, end]: the start day never counts, the end day counts if a weekday."""
+    assert business_days(start, end) == days
+
+
 def test_spans_weekend() -> None:
     assert spans_weekend(date(2026, 6, 5), date(2026, 6, 8))  # Fri to Mon
     assert not spans_weekend(date(2026, 6, 1), date(2026, 6, 5))  # Mon to Fri
