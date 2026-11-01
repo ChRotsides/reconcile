@@ -125,7 +125,7 @@ uv run pytest
 
 Roles:
 
-- **Builders and fixers:** Claude Sonnet subagents. They write files and run checks, but do not commit, do not edit `DECISIONS.local.md`, and touch only the paths their task names.
+- **Builders and fixers:** Claude Sonnet subagents. They write files and run checks, but do not commit, do not edit `DECISIONS.local.md`, and touch only the paths their task names. They may run `ruff format` or `ruff check --fix` only on their own files; repo-wide commands use `--check` only, because other agents may be editing in the same checkout.
 - **Parent (orchestrator):** splits work into tasks, reviews each builder's output against `PLAN.md` and these rules, records decisions, and makes every commit. Only the parent runs git write commands.
 - **Reviewer:** Codex with model `gpt-6-astra` at high reasoning effort, run at the end of each milestone before the gate.
 
