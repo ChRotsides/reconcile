@@ -256,14 +256,23 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 - [ ] Separate inference/evaluator paths and restricted inference mounts.
 - [ ] Add small own fixtures for failures, legitimate cases and insufficient evidence.
 - [ ] Design the input contract against the shortlisted accounting and bank formats as well as FinRCA; avoid fields only FinRCA provides.
-- [ ] Add realistic-shape fixtures: free-text and truncated references, partial and split payments, batched settlements, netted bank fees, reversals and mixed date formats.
+- [ ] Add realistic-shape fixtures: free-text and truncated references, partial and split payments, batched settlements, netted bank fees and reversals. (Mixed date formats moved to M5 by user decision on 2026-11-01: the FinRCA adapter requires ISO dates by design.)
 
 **Deliverables:** Validated snapshot, schemas, quality report, isolation tests, realistic-shape fixtures and minimal package.
 
 **Gate:** Clean preparation reproduces the snapshot digest; inference cannot read labels; distinct financial transactions survive deduplication; a written mapping shows each shortlisted format can populate the contract, or records which fields it lacks; the leakage test shows no recoverable class or order signal (or each residual is declared); the evidence contract is declared and validated on development data.
 
+**Gate outcome (2026-11-01): conditional pass, approved by the user.** Evidence: three Codex review rounds and one mid-milestone review, with every finding verified and every fix checked before commit; reviews are saved under `artifacts/reviews/`.
+- **Met:** a reproducible snapshot digest (real-data integration test); distinct transactions survive deduplication; the written Xero/CAMT.053 mapping with gaps (`docs/input-mapping.md`); leakage residuals declared (`docs/leakage-test.md`: inserted-invoice status outside the three families, FX ledger codes, entity type, invoice age (unexplained), weak allocation count).
+- **Partly:** "inference cannot read labels". Preparation-side leaks are closed (links and key locations, holdout refusal, import-boundary test), but restricted inference mounts aren't built. The evidence contract is validated on development data (533 of 538 gradable); executable checks of fixture expectations exist so far for invoice scenarios only.
+- **Carried into M2:** the first three M2 tasks below; executable fixture-expectation checks for each family as it is implemented.
+- **User decisions:** mixed date formats move to M5; no-exception shapes get an answered "no exception" outcome with evidence; known contract gaps abstain until practitioner input refines them.
+
 ### M2 — Deterministic investigator
 
+- [ ] Run inference with only the prepared snapshot and requests directories mounted read-only (carried from M1; `docs/isolation.md`), and show by an in-container absence check that the key, links, upstream checkout, `evaluation/` and `challenge_test` are unreachable.
+- [ ] Add an answered "no exception" outcome with supporting evidence, for shapes such as distinct identical payments and matched partial payments (user decision, replacing provisional `out_of_scope`); update the evidence contract and fixtures.
+- [ ] Detect the known contract-gap patterns (one bank debit for several payments, reversal then repayment, unmatched reference with a nearby non-equal debit) and abstain with a clear reason, never a wrong answer; refine after practitioner input.
 - [ ] Implement bounded traversal through operational relationships.
 - [ ] Add conservative candidate search with explicit ambiguity for missing references.
 - [ ] Implement duplicate-payment, settlement-window and amount-difference checks.
@@ -315,7 +324,7 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 
 - [ ] Implement section 9's proposed CLI contract.
 - [ ] Render the conclusion, source rows, exact calculations, alternatives, unknowns and run versions in HTML.
-- [ ] Add a generic CSV-bundle mapping example through the same contract, without a live ERP integration.
+- [ ] Add a generic CSV-bundle mapping example through the same contract, without a live ERP integration, including explicit handling of mixed date formats (moved from M1 by user decision on 2026-11-01).
 - [ ] Ship working mappings for the shortlisted accounting export and bank statement format, tested on public sample files or permitted anonymised data.
 - [ ] Hold walkthrough sessions where practitioners use the HTML report on realistic cases; record where they hesitate, distrust a conclusion or need information not shown, and fix the report before release.
 - [ ] Provide a small offline demo and explicit optional live-model mode.
