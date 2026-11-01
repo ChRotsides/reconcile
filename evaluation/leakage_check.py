@@ -603,6 +603,23 @@ def inserted_tests(snap: Snap, tokens: _Tokens, full: Path) -> None:
         "Payments, own row only", own_p, [pay_ins[str(p["payment_id"])] for p in ps]
     )
 
+    # Subgroup: the inserted payments that have an allocation (the F06 duplicates)
+    # against organic payments; inserted payments with no allocation are dropped.
+    keep = [
+        n
+        for n, p in enumerate(ps)
+        if not pay_ins[str(p["payment_id"])] or X[n]["rel.pay_n_alloc"] != "0"
+    ]
+    sub = [pay_ins[str(ps[n]["payment_id"])] for n in keep]
+    binary_task(
+        "Payments, inserted with allocation, all fields", [X[n] for n in keep], sub
+    )
+    binary_task(
+        "Payments, inserted with allocation, own row only",
+        [own_p[n] for n in keep],
+        sub,
+    )
+
     iv = [i for i in snap.t["invoices"] if i["invoice_id"] in inv_ins]
     X = fill([snap.invoice_own(i) | snap.invoice_rel(i) for i in iv])
     binary_task(
