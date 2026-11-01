@@ -5,6 +5,9 @@ data/
 # Run outputs. Reviewed release artifacts are copied out explicitly.
 artifacts/
 
+# Untracked decision log (see AGENTS.md section 3)
+DECISIONS.local.md
+
 # Secrets and local configuration
 .env
 .env.*
