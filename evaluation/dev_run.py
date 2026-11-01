@@ -687,6 +687,66 @@ def _journal_keys(s: Snap, p: dict) -> list[tuple[str, str]]:
     return [("gl_entries", j) for j in s.balanced_journals(p["payment_id"], "payment")]
 
 
+def operands_match(
+    rest: list[tuple[tuple[str, str] | None, str, Decimal]],
+    field: str,
+    expected: dict[tuple[str, str], Decimal],
+) -> bool:
+    """The operands after the first are exactly the expected records, each with
+    the field `field` and the amount the snapshot gives (not the packet's word)."""
+    keys = [k for k, _, _ in rest]
+    return (
+        None not in keys
+        and sorted(k for k in keys if k) == sorted(expected)
+        and all(f == field for _, f, _ in rest)
+        and all(expected[k] == a for k, _, a in rest if k)
+    )
+
+
+def allocation_amounts(s: Snap, allocs: list[dict]) -> dict[tuple[str, str], Decimal]:
+    return {
+        ("payment_allocations", f"{a['payment_id']}|{a['invoice_id']}"): Decimal(
+            a["allocated_amount"]
+        )
+        for a in allocs
+    }
+
+
+def attributable_journal_amounts(s: Snap, p: dict) -> dict[tuple[str, str], Decimal]:
+    """Journal id -> total debit of the journal's lines of type payment sourced to
+    the payment: the figure to compare with the payment (a journal can also carry
+    lines sourced elsewhere)."""
+    pid = p["payment_id"]
+    out: dict[tuple[str, str], Decimal] = {}
+    for j in s.balanced_journals(pid, "payment"):
+        lines = s.q(
+            "SELECT * FROM gl_entries WHERE journal_id = ?"
+            " AND source_transaction_id = ? AND transaction_type = 'payment'",
+            j,
+            pid,
+        )
+        out[("gl_entries", j)] = sum((Decimal(x["debit"]) for x in lines), Decimal(0))
+    return out
+
+
+def journal_attribution_ok(v: View, p: dict) -> bool:
+    """Each journal operand of this payment's journal calculation records, where
+    it records them at all, its source and GL type, and they must be this payment
+    and `payment`. Other journals a packet cites (the other payment of a split,
+    bank-fee and reversal journals) are checked by their own requirements."""
+    calc = v.calc_by_id.get(_journal_calc_id(p))
+    for o in (calc or {"operands": []})["operands"][1:]:
+        e = v.by_id.get(o["evidence_id"])
+        vals = (e["values"] if e else None) or {}
+        src = vals.get("source") or vals.get("source_transaction_id")
+        kind = vals.get("gl_type") or vals.get("transaction_type")
+        if (src is not None and src != p["payment_id"]) or (
+            kind is not None and kind != "payment"
+        ):
+            return False
+    return True
+
+
 def chk_allocations(s: Snap, v: View, p: dict) -> bool:
     allocs = s.allocs_of_payment(p["payment_id"])
     return bool(allocs) and v.cites("payment_allocations", alloc_ids(allocs))
@@ -725,7 +785,9 @@ def _journal_calc_id(p: dict) -> str:
 def chk_journal_calculation(s: Snap, v: View, p: dict) -> bool:
     """The journal comparison is payment amount minus the payment journals'
     amounts (operation `difference`, first operand the payment amount, the others
-    exactly the payment's journals), recomputed, and within one quantum."""
+    exactly the payment's journals), every operand equal to the snapshot (the
+    payment amount, and for each journal the total of its lines of type payment
+    sourced to the payment), the result recomputed, and within one quantum."""
     keys = _journal_keys(s, p)
     got = v.calculation(_journal_calc_id(p), "difference")
     if not keys or got is None:
@@ -736,12 +798,11 @@ def chk_journal_calculation(s: Snap, v: View, p: dict) -> bool:
     if ops[0][2] != Decimal(p["payment_amount"]):
         return False
     rest = ops[1:]
-    if sorted(k for k, _, _ in rest if k) != sorted(keys) or any(
-        f != "amount" for _, f, _ in rest
-    ):
+    if not operands_match(rest, "amount", attributable_journal_amounts(s, p)):
         return False
     return (
-        result == ops[0][2] - sum((a for _, _, a in rest), Decimal(0))
+        journal_attribution_ok(v, p)
+        and result == ops[0][2] - sum((a for _, _, a in rest), Decimal(0))
         and tol == _quantum(p)
         and abs(result) <= tol
     )
@@ -785,14 +846,12 @@ def chk_totals_calculation(s: Snap, v: View, p: dict) -> bool:
             return False
         ops, result, tol = got
         first = ops[0] if ops else None
-        keys = [("payment_allocations", i) for i in alloc_ids(allocs)]
         rest = ops[1:]
         if not (
             first
             and first[:2] == (("invoices", inv), "invoice_total")
             and first[2] == Decimal(row["invoice_total"])
-            and sorted(k for k, _, _ in rest if k) == sorted(keys)
-            and all(f == "allocated_amount" for _, f, _ in rest)
+            and operands_match(rest, "allocated_amount", allocation_amounts(s, allocs))
             and result == first[2] - sum((a for _, _, a in rest), Decimal(0))
             and tol == _quantum(p)
             and result >= -tol
@@ -829,9 +888,9 @@ def chk_payment_allocation_calculation(s: Snap, v: View, p: dict) -> bool:
     the payment's allocations (operation `difference`), recomputed, and not
     below minus one quantum (the payment is not allocated beyond its amount)."""
     pid = p["payment_id"]
-    keys = [("payment_allocations", i) for i in alloc_ids(s.allocs_of_payment(pid))]
+    allocs = s.allocs_of_payment(pid)
     got = v.calculation(_over_alloc_calc_id(p), "difference")
-    if not keys or got is None:
+    if not allocs or got is None:
         return False
     ops, result, tol = got
     rest = ops[1:]
@@ -839,8 +898,7 @@ def chk_payment_allocation_calculation(s: Snap, v: View, p: dict) -> bool:
         ops
         and ops[0][:2] == (("payments", pid), "payment_amount")
         and ops[0][2] == Decimal(p["payment_amount"])
-        and sorted(k for k, _, _ in rest if k) == sorted(keys)
-        and all(f == "allocated_amount" for _, f, _ in rest)
+        and operands_match(rest, "allocated_amount", allocation_amounts(s, allocs))
         and result == ops[0][2] - sum((a for _, _, a in rest), Decimal(0))
         and tol == _quantum(p)
         and result >= -tol

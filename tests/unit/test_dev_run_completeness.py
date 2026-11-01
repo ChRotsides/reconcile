@@ -386,6 +386,98 @@ def test_a_wrong_payment_allocation_calculation_makes_an_all_clear_incomplete(
     assert "payment_allocation_calculation" in result["missing"]
 
 
+def zero_first_allocation(c: Packet) -> None:
+    """The first allocation operand is claimed as 0.00 and the result is
+    recomputed to match, so the packet's own arithmetic is consistent."""
+    cur = c["operands"][1]["amount"].split()[1]
+    c["operands"][1]["amount"] = f"0.00 {cur}"
+    amounts = [Decimal(o["amount"].split()[0]) for o in c["operands"]]
+    c["result"] = f"{amounts[0] - sum(amounts[1:], Decimal(0))} {cur}"
+
+
+@pytest.mark.parametrize(
+    "prefix", ["payment_minus_allocations:", "invoice_open_balance:"]
+)
+@pytest.mark.parametrize("name", ALL_CLEAR)
+def test_a_wrong_allocation_operand_with_a_consistent_result_is_incomplete(
+    packets: dict[str, tuple[Packet, Any]], name: str, prefix: str
+) -> None:
+    """The operand is not the snapshot's allocation amount, but the result was
+    recomputed from it: only a comparison with the snapshot catches this."""
+    packet, snap = packets[name]
+    if not any(c["calculation_id"].startswith(prefix) for c in packet["calculations"]):
+        pytest.skip("no such calculation in this packet")
+    result = check(with_calc(packet, prefix, zero_first_allocation), snap)
+    assert not result["complete"]
+    assert {
+        "payment_minus_allocations:": "payment_allocation_calculation",
+        "invoice_open_balance:": "invoice_totals_calculation",
+    }[prefix] in result["missing"]
+
+
+@pytest.mark.parametrize("name", ALL_CLEAR)
+def test_a_journal_operand_above_the_attributable_total_is_incomplete(
+    packets: dict[str, tuple[Packet, Any]], name: str, tmp_path: Path
+) -> None:
+    """The packet says the payment journal is the payment amount (result 0); the
+    snapshot's payment-attributable total is half of that."""
+    packet, snap = packets[name]
+    halved = mutated(
+        snap,
+        tmp_path,
+        "UPDATE gl_entries SET debit = printf('%.2f', CAST(debit AS REAL) / 2),"
+        " credit = printf('%.2f', CAST(credit AS REAL) / 2)"
+        " WHERE transaction_type = 'payment'",
+    )
+    result = check(packet, halved)
+    assert not result["complete"]
+    assert "payment_journal_calculation" in result["missing"]
+
+
+@pytest.mark.parametrize("name", ALL_CLEAR)
+def test_a_journal_item_attributed_to_another_source_is_incomplete(
+    packets: dict[str, tuple[Packet, Any]], name: str
+) -> None:
+    """Where a journal item records its source and GL type, they must be this
+    payment and `payment`."""
+    packet, snap = packets[name]
+    for field, wrong in (("source", "SOMETHING_ELSE"), ("gl_type", "bank_fee")):
+        p = copy.deepcopy(packet)
+        hit = [
+            e
+            for e in p["evidence"]
+            if e["record"] and e["record"]["table"] == "gl_entries"
+        ]
+        for e in hit:
+            e["values"][field] = wrong
+        result = check(p, snap)
+        assert not result["complete"]
+        assert "payment_journal_calculation" in result["missing"]
+
+
+@pytest.mark.parametrize("name", ALL_CLEAR)
+def test_journals_that_are_not_operands_of_the_payment_calculation_are_not_checked_here(
+    packets: dict[str, tuple[Packet, Any]], name: str
+) -> None:
+    """A split cites the other payment's journal, a fee case a bank-fee journal,
+    a reversal its reversal journal: their attribution is not this check's
+    business, so re-attributing them leaves the packet complete."""
+    packet, snap = packets[name]
+    operands = {
+        o["evidence_id"]
+        for c in packet["calculations"]
+        if c["calculation_id"].startswith("payment_minus_payment_journals:")
+        for o in c["operands"]
+    }
+    p = copy.deepcopy(packet)
+    for e in p["evidence"]:
+        if e["record"] and e["record"]["table"] == "gl_entries":
+            if e["evidence_id"] not in operands:
+                e["values"]["source"] = "SOMETHING_ELSE"
+                e["values"]["gl_type"] = "bank_fee"
+    assert check(p, snap)["complete"]
+
+
 def mutated(snap: Any, tmp_path: Path, *sql: str) -> Any:
     """A copy of the snapshot with hand-written SQL applied, as a Snap."""
     source = Path(snap.con.execute("PRAGMA database_list").fetchone()[2])
