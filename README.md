@@ -16,7 +16,7 @@ The first release is a read-only Python library and CLI with JSON/HTML evidence 
 
 Compare against strong SQL/classical-ML baselines with deterministic evidence retrieval on an independent public benchmark. Measure correct diagnoses with complete evidence, false alarms, abstentions, cost and latency. Keep answer labels inaccessible during inference and publish failure cases.
 
-Evaluation belongs in the project from the beginning. Public synthetic results can establish bounded technical value; measured analyst time savings require a later workflow study.
+Evaluation belongs in the project from the beginning. Public synthetic results can establish bounded technical value. Practitioner reviews and real accounting/bank export formats shape the design from the first milestone, so the tool fits the exceptions and data teams actually have. Measured analyst time savings require a later workflow study.
 
 ## Build documentation
 

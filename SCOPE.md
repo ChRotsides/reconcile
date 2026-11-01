@@ -6,7 +6,7 @@
 
 A finance operations analyst needs to understand an accounts-payable-to-bank exception. A developer needs a reusable investigator that returns a diagnosis with checkable records and calculations.
 
-The initial objective is a reproducible improvement over a strong baseline in correct, evidence-complete investigation. Customer savings and external adoption remain unmeasured.
+The initial objective is a reproducible improvement over a strong baseline in correct, evidence-complete investigation, on exceptions that practitioners confirm are worth investigating and data shapes they actually export. Customer savings and external adoption remain unmeasured; practitioner estimates of current effort and cost are collected from the start and reported as estimates.
 
 ## Included
 
@@ -14,7 +14,8 @@ The initial objective is a reproducible improvement over a strong baseline in co
 |---|---|
 | Cases | Suspected duplicate payments, missing settlements and bank/ERP amount differences, plus relevant legitimate cases |
 | Input | One organization snapshot of structured operational records, an entity identifier and an investigation cutoff |
-| Data | One primary FinRCA adapter and a documented audit of the independent synthetic benchmark |
+| Data | One primary FinRCA adapter and a documented audit of the independent synthetic benchmark; mappings for one accounting export and one bank statement format; realistic-shape fixtures |
+| Practitioner input | Family selection, next-step and report reviews, and effort/cost estimates from at least two practitioners, kept separate from benchmark results |
 | Retrieval | Bounded observable relationships and conservative candidate search |
 | Checks | Exact money, chronology, allocations and settlement policy |
 | Output | Diagnosis or abstention, evidence, calculations, proposed action and missing information |
@@ -39,6 +40,8 @@ PDF/OCR extraction, hosted UI, multi-user tenancy, live banks, ERP write-back, a
 - Results disclose denominators, failed slices, abstention, cost, latency and uncertainty.
 - Interruption, repeated imports, malformed model output and budget exhaustion have tested failure/recovery behavior.
 - The documented demo runs in a clean environment, with fixture/replay results distinguished from live-model results.
+- The shortlisted accounting and bank formats map to the input contract, with missing fields documented.
+- Practitioner findings, including disagreements, are recorded and reported separately from benchmark results; real exports are never committed.
 - README claims match measured outcomes and dataset limitations.
 
 Keep model-assisted functionality only when it adds a useful measured benefit. A negative result may justify a simpler deterministic release or stopping expansion; a larger interface must not conceal it.

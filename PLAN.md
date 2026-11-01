@@ -67,6 +67,26 @@ For sealed evaluation, run inference with only prepared operational inputs mount
 - Track which cases and labels were inspected during reproduction. The original published test set may serve as a reproduction set; it cannot also be called untouched if inspected. Reserve the challenge set before development, or create a separately declared vendor-held-out generated set if that challenge data has already been inspected. Keep this final holdout out of M0 case audits and iterative comparisons.
 - Inspect entities bridging splits; restrict model learning to training data and document the operational snapshot available at inference.
 
+### Practitioner and real-format evidence
+
+FinRCA can establish technical value only. A tool that finance teams rely on also needs evidence that it fits their data, their exceptions and their decisions. Collect this alongside the benchmark from M0, not after release.
+
+| Source | Purpose | Limitation |
+|---|---|---|
+| Practitioners (AP clerks, finance operations leads, controllers) | Confirm which exceptions are frequent and costly, what a correct next step is, and what a report must show to be trusted | Small, non-random sample; self-reported time and cost are estimates, not measurements |
+| Published export formats | Design the input contract against real accounting exports and bank statements, not only FinRCA's layout | Specifications and sample files do not show real-world data quality |
+| Realistic-shape fixtures | Exercise messy references, partial payments, batched settlements, netted fees and reversals | Our own construction; tests robustness, not prevalence |
+| Anonymised practitioner exports, if offered | Check the contract and checks against genuine data | Only with written permission; never a headline benchmark |
+
+Candidate formats, to be prioritised from practitioner input: accounting exports from Xero, QuickBooks Online, NetSuite, Sage or SAP; bank statements as CSV, ISO 20022 CAMT.053, SWIFT MT940 and BAI2.
+
+Handling rules:
+
+- Real exports contain supplier bank details, personal data and commercially sensitive amounts. Store them only in ignored `data/private/`, never in fixtures, tests, issues, logs or model prompts.
+- Use them only under written permission recording the permitted purpose, retention period and deletion.
+- Publish only aggregate, permission-cleared findings. Keep practitioner statements separate from benchmark results and label them as self-reported.
+- Record who was consulted by role and experience, not by name, unless they agree to be credited.
+
 ## 3. Architecture and technology
 
 Implement explicit bounded stages. A general agent framework is not needed for the initial workflow.
@@ -182,11 +202,12 @@ reconcile/
   tests/
     unit/, integration/, leakage/, regression/
   fixtures/public/
-  data/             # ignored upstream/input/label data
+  data/             # ignored upstream/input/label data; private/ for permitted practitioner exports
   artifacts/        # ignored runs; select reviewed release artifacts explicitly
   docs/
     architecture.md, data-audit.md, baseline-reproduction.md
     evaluation-protocol.md, results-card.md, failure-analysis.md
+    practitioner-findings.md, export-formats.md
     decisions/
   .github/workflows/
     ci.yml, benchmark.yml
@@ -206,10 +227,14 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 - [ ] Check splits, repeated-question grouping, temporal assumptions and leakage.
 - [ ] Reproduce published SQL and classical-ML experiments in isolation, retaining exact commands, environment and predictions.
 - [ ] Separate faithful published-task reproduction from the operational comparison. If upstream inputs contain privileged features or oracle evidence, keep that experiment diagnostic and build an observable-input counterpart.
+- [ ] Recruit at least two practitioners from different organisations or roles, and record the permitted use of anything they share.
+- [ ] Ask them which AP-to-bank exceptions are most frequent and costly, how each is investigated today, what the correct next step is, and what evidence they need before acting.
+- [ ] Record their estimates of investigation time per exception type and the typical cost of a missed duplicate or unresolved settlement, labelled as self-reported.
+- [ ] Shortlist one accounting export and one bank statement format to support first, based on what practitioners use; record field lists and sample-file sources.
 
-**Deliverables:** `docs/data-audit.md`, `DATA_SOURCES.md`, `docs/baseline-reproduction.md`, manifest and executable baseline instructions.
+**Deliverables:** `docs/data-audit.md`, `DATA_SOURCES.md`, `docs/baseline-reproduction.md`, `docs/practitioner-findings.md`, `docs/export-formats.md`, manifest and executable baseline instructions.
 
-**Gate:** A trustworthy comparison and scoreable evidence contract exist. Investigate unexplained reproduction differences before claiming superiority. If the data cannot support an honest experiment, stop and reassess before building around it.
+**Gate:** A trustworthy comparison and scoreable evidence contract exist. Investigate unexplained reproduction differences before claiming superiority. If the data cannot support an honest experiment, stop and reassess before building around it. If practitioners do not confirm the three families as worth investigating, revise the families before M1 rather than building for the benchmark alone.
 
 ### M1 — Contracts, ingestion and input isolation
 
@@ -222,10 +247,12 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 - [ ] Implement idempotent imports without removing genuine duplicate-payment records.
 - [ ] Separate inference/evaluator paths and restricted inference mounts.
 - [ ] Add small own fixtures for failures, legitimate cases and insufficient evidence.
+- [ ] Design the input contract against the shortlisted accounting and bank formats as well as FinRCA; avoid fields only FinRCA provides.
+- [ ] Add realistic-shape fixtures: free-text and truncated references, partial and split payments, batched settlements, netted bank fees, reversals and mixed date formats.
 
-**Deliverables:** Validated snapshot, schemas, quality report, isolation tests and minimal package.
+**Deliverables:** Validated snapshot, schemas, quality report, isolation tests, realistic-shape fixtures and minimal package.
 
-**Gate:** Clean preparation reproduces the snapshot digest; inference cannot read labels; distinct financial transactions survive deduplication.
+**Gate:** Clean preparation reproduces the snapshot digest; inference cannot read labels; distinct financial transactions survive deduplication; a written mapping shows each shortlisted format can populate the contract, or records which fields it lacks.
 
 ### M2 — Deterministic investigator
 
@@ -238,8 +265,10 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 - [ ] Implement rules and the strongest applicable classical-ML baseline against the same observable inputs.
 - [ ] Give both baselines deterministic evidence retrieval and report templates.
 - [ ] Run training/validation end-to-end and inspect error slices.
+- [ ] Run the investigator on the realistic-shape fixtures and record where it fails or abstains.
+- [ ] Ask practitioners to review a few evidence packets: is the diagnosis justified, is the next step what they would do, and what is missing?
 
-**Deliverables:** Complete no-model investigation, strong baseline predictions, packet examples and validation error inventory.
+**Deliverables:** Complete no-model investigation, strong baseline predictions, packet examples, validation error inventory and recorded practitioner packet review.
 
 **Gate:** Supported answers and abstentions work without API credentials. A false alarm on a legitimate pending payment is recorded as a failure.
 
@@ -279,13 +308,15 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 - [ ] Implement section 9's proposed CLI contract.
 - [ ] Render the conclusion, source rows, exact calculations, alternatives, unknowns and run versions in HTML.
 - [ ] Add a generic CSV-bundle mapping example through the same contract, without a live ERP integration.
+- [ ] Ship working mappings for the shortlisted accounting export and bank statement format, tested on public sample files or permitted anonymised data.
+- [ ] Hold walkthrough sessions where practitioners use the HTML report on realistic cases; record where they hesitate, distrust a conclusion or need information not shown, and fix the report before release.
 - [ ] Provide a small offline demo and explicit optional live-model mode.
 - [ ] Make reports self-contained, escaped and free of runtime network assets.
 - [ ] Verify a clean virtual-environment install and container execution.
 
 **Deliverables:** Runnable demo, library example, CLI guide, JSON/HTML reports and our own measured clean-install experience.
 
-**Gate:** A developer can reproduce the documented case and follow each conclusion to evidence. Our setup measurement is not represented as an external-user result.
+**Gate:** A developer can reproduce the documented case and follow each conclusion to evidence. Practitioners can follow a report to the underlying records without help. Our setup measurement is not represented as an external-user result.
 
 ### M6 — Failure handling and operational hardening
 
@@ -309,6 +340,7 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 - [ ] Score the declared comparisons, publish failed slices and disclose deviations.
 - [ ] If generation is reproducible, run a fresh-seed synthetic stress set; describe it as same-generator testing, not production validation.
 - [ ] Prepare results card, reproduction bundle, error analysis and concise walkthrough.
+- [ ] Add a separate usefulness section to the results card: practitioner findings, supported export formats and realistic-shape results, each with its limits.
 - [ ] Choose the project code licence, preserve dataset attribution and verify output redistribution terms.
 - [ ] Prepare packaging, release notes and contribution examples for review.
 - [ ] Record independent reproductions and integrations only when they actually occur.
@@ -365,6 +397,20 @@ Score proposed resolutions against verified rules/labels where possible. Do not 
 - Set a total run spending limit before live evaluation; record pricing date, currency and billable usage.
 - Cached replay reproduces artifacts, not fresh model accuracy. A live rerun records new outputs and variability.
 
+### Usefulness evidence
+
+Report separately from benchmark metrics; never combine them into one claim.
+
+| Evidence | Rule |
+|---|---|
+| Baseline effort and cost | Practitioners' estimates of current investigation time per exception and cost of a miss, labelled self-reported, with sample size |
+| Family relevance | Whether practitioners rank the three families among their costly exceptions |
+| Next-step agreement | Share of reviewed packets where practitioners would take the proposed action; disclose reviewer roles and count |
+| Report usability | Issues found in walkthroughs and whether they were fixed |
+| Format coverage | Formats mapped, fields missing and cases that cannot be investigated from each |
+
+Time and money saved may be described as estimates derived from these inputs until the workflow study in section 11 measures them.
+
 ### Go/no-go criteria
 
 Hard gates: no inference access to labels; accepted citations resolve; deterministic calculations are correct on the declared tests.
@@ -417,17 +463,17 @@ These are estimates for one engineer, not delivery promises. Re-estimate after M
 
 | Milestone | Focused hours | Dependency |
 |---|---:|---|
-| M0: evidence viability | 14–22 | None |
-| M1: contracts/ingestion | 16–24 | M0 |
-| M2: deterministic investigator | 22–34 | M1 |
+| M0: evidence viability and practitioner input | 20–32 | None |
+| M1: contracts/ingestion | 20–30 | M0 |
+| M2: deterministic investigator | 24–38 | M1 |
 | M3: evaluation | 20–30 | M0–M2 |
 | M4: bounded AI | 16–28 | M3 |
-| M5: usability/packaging | 12–20 | M2; finalize after M4 |
+| M5: usability/packaging | 16–26 | M2; finalize after M4 |
 | M6: failure/recovery checks | 12–20 | M1–M5 |
 | M7: sealed comparison/release | 10–18 | M3–M6 |
-| **Total before contingency** | **122–196** | |
+| **Total before contingency** | **138–222** | |
 
-With approximately 25% contingency, plan for roughly **150–245 focused hours**. Calendar duration depends on availability. An early stop or removal of an unnecessary model path reduces expenditure.
+With approximately 25% contingency, plan for roughly **175–280 focused hours**. Calendar duration depends on availability; finding and scheduling practitioners is a calendar risk beyond focused hours. An early stop or removal of an unnecessary model path reduces expenditure.
 
 Deliver small reviewable increments: one contract/import path, one deterministic family, baseline comparison, evaluator isolation, bounded AI experiment, packaging. Keep observed failures and design decisions alongside the corresponding change.
 
@@ -460,6 +506,10 @@ Potential distribution routes are benchmark contributions, useful bug/reproducti
 | Retrieval/model costs grow | Budget and cost-per-correct-packet metrics | Bound or remove expensive stage |
 | Outside integration is difficult | Independent adapter/setup observations | Improve contract before adding products |
 | Synthetic results are overstated | Result-card review | Attach dataset, split, denominator and limits to claims |
+| Chosen families are not what practitioners need | M0 practitioner findings | Revise families before M1 |
+| Contract fits FinRCA but not real exports | M1 format mapping, M2 realistic-shape runs | Change the contract before adding features |
+| No practitioners available | M0 recruitment | Proceed on benchmark and published formats; state the gap in the README and results card |
+| Sensitive practitioner data leaks | Data-handling rules and ignored `data/private/` | Delete per agreement; never use real data in fixtures or prompts |
 
 Write short decision records for: local/read-only scope; money representation; observable retrieval relationships; label isolation; abstention; model inclusion; metric choice; dataset/licence handling.
 
@@ -471,6 +521,8 @@ Write short decision records for: local/read-only scope; money representation; o
 - [ ] List observable fields versus evaluator-only fields.
 - [ ] Define one investigation request and expected deterministic evidence packet.
 - [ ] Record exact upstream baseline commands and attempt the smallest faithful reproduction.
+- [ ] Draft the practitioner questions and contact the first candidates.
+- [ ] List candidate accounting and bank export formats with sources for their specifications and sample files.
 
 **First deliverable:** evidence that the task can be scored honestly, plus one inspectable case contract. This determines whether the remaining build deserves the investment.
 
