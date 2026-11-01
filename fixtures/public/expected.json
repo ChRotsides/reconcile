@@ -1,0 +1,1261 @@
+{
+  "accounted_bank_fee": {
+    "absence_searches": [
+      {
+        "count": 1,
+        "cutoff": "2026-06-30",
+        "id": "A2",
+        "predicate": "reference_number = PAY_1.reference_number",
+        "table": "payments"
+      }
+    ],
+    "calculations": [
+      {
+        "name": "journal_minus_fee_row",
+        "unit": "EUR",
+        "value": "0.00"
+      }
+    ],
+    "category": "legitimate_accounted_bank_fee",
+    "contract_section": "5",
+    "disposition": "answered",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "BT_2",
+        "role": "fee row",
+        "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1",
+        "role": "the one payment the fee reference resolves to",
+        "table": "payments"
+      },
+      {
+        "id": "J_FEE_1",
+        "role": "bank_fee journal (by journal_id)",
+        "table": "gl_entries"
+      }
+    ],
+    "family": "legitimate_accounted_bank_fee",
+    "known_contract_gap": null,
+    "primary_entity": {
+      "id": "BT_2",
+      "role": "primary",
+      "table": "bank_transactions"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  },
+  "batch_payment": {
+    "absence_searches": [],
+    "calculations": [
+      {
+        "name": "allocated",
+        "unit": "EUR",
+        "value": "3000.00"
+      },
+      {
+        "name": "allocated_minus_payment",
+        "unit": "EUR",
+        "value": "0.00"
+      },
+      {
+        "name": "bank_minus_payment",
+        "unit": "EUR",
+        "value": "0.00"
+      }
+    ],
+    "category": "legitimate_batch_payment",
+    "contract_section": "5",
+    "disposition": "answered",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "PAY_1|INV_2",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "invoice",
+        "table": "invoices"
+      },
+      {
+        "id": "INV_2",
+        "role": "invoice",
+        "table": "invoices"
+      },
+      {
+        "id": "BT_1",
+        "role": "posted debit",
+        "table": "bank_transactions"
+      }
+    ],
+    "family": "legitimate_batch_payment",
+    "known_contract_gap": null,
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  },
+  "check_clearing": {
+    "absence_searches": [],
+    "calculations": [
+      {
+        "name": "amount_difference",
+        "unit": "EUR",
+        "value": "0.00"
+      },
+      {
+        "name": "business_day_lag",
+        "unit": "business_days",
+        "value": "10"
+      },
+      {
+        "name": "clearing_limit_check",
+        "unit": "business_days",
+        "value": "10"
+      }
+    ],
+    "category": "legitimate_check_clearing",
+    "contract_section": "5",
+    "disposition": "answered",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "unique posted debit",
+        "table": "bank_transactions"
+      }
+    ],
+    "family": "legitimate_check_clearing",
+    "known_contract_gap": null,
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  },
+  "due_date_payment": {
+    "absence_searches": [],
+    "calculations": [
+      {
+        "name": "payment_date_minus_due_date",
+        "unit": "days",
+        "value": "0"
+      },
+      {
+        "name": "allocated",
+        "unit": "EUR",
+        "value": "1500.00"
+      },
+      {
+        "name": "debit_minus_payment",
+        "unit": "EUR",
+        "value": "0.00"
+      }
+    ],
+    "category": "legitimate_due_date_payment",
+    "contract_section": "5",
+    "disposition": "answered",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "INV_1",
+        "role": "invoice",
+        "table": "invoices"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "PAY_1",
+        "role": "effective payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "posted debit",
+        "table": "bank_transactions"
+      }
+    ],
+    "family": "legitimate_due_date_payment",
+    "known_contract_gap": null,
+    "primary_entity": {
+      "id": "INV_1",
+      "role": "primary",
+      "table": "invoices"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  },
+  "f06_double_payment": {
+    "absence_searches": [],
+    "calculations": [
+      {
+        "name": "allocated",
+        "unit": "EUR",
+        "value": "2000.00"
+      },
+      {
+        "name": "committed",
+        "unit": "EUR",
+        "value": "2000.00"
+      },
+      {
+        "name": "committed_overpayment",
+        "unit": "EUR",
+        "value": "1000.00"
+      }
+    ],
+    "category": "F06",
+    "contract_section": "4.1",
+    "disposition": "answered",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "INV_1",
+        "role": "invoice",
+        "table": "invoices"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "PAY_2|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "PAY_1",
+        "role": "allocating payment",
+        "table": "payments"
+      },
+      {
+        "id": "PAY_2",
+        "role": "allocating payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "posted debit",
+        "table": "bank_transactions"
+      },
+      {
+        "id": "BT_2",
+        "role": "posted debit",
+        "table": "bank_transactions"
+      }
+    ],
+    "family": "F06",
+    "known_contract_gap": null,
+    "primary_entity": {
+      "id": "INV_1",
+      "role": "primary",
+      "table": "invoices"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  },
+  "f06_second_debit_post_cutoff": {
+    "absence_searches": [
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "S1",
+        "predicate": "payment_reference = PAY_2.reference_number AND transaction_type <> 'bank fee'",
+        "table": "bank_transactions"
+      }
+    ],
+    "abstention_reason": "commitment_not_proven_at_cutoff",
+    "calculations": [
+      {
+        "name": "allocated",
+        "unit": "EUR",
+        "value": "2000.00"
+      },
+      {
+        "name": "committed",
+        "unit": "EUR",
+        "value": "1000.00"
+      },
+      {
+        "name": "committed_overpayment",
+        "unit": "EUR",
+        "value": "0.00"
+      }
+    ],
+    "category": null,
+    "contract_section": "4.1 (not gradable)",
+    "disposition": "abstained",
+    "dropped_by_cutoff": {
+      "bank_transactions": 1
+    },
+    "evidence": [
+      {
+        "id": "INV_1",
+        "role": "invoice",
+        "table": "invoices"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "PAY_2|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "PAY_1",
+        "role": "allocating payment",
+        "table": "payments"
+      },
+      {
+        "id": "PAY_2",
+        "role": "allocating payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "posted debit",
+        "table": "bank_transactions"
+      }
+    ],
+    "family": "F06",
+    "known_contract_gap": null,
+    "primary_entity": {
+      "id": "INV_1",
+      "role": "primary",
+      "table": "invoices"
+    },
+    "quality_gaps": {
+      "effective_payment_without_bank_row": 1,
+      "payment_without_bank_row": 1
+    },
+    "snapshot_rows": {}
+  },
+  "f12_payment_missing_from_bank": {
+    "absence_searches": [
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "A1",
+        "predicate": "payment_reference = PAY_1.reference_number AND transaction_type <> 'bank fee'",
+        "table": "bank_transactions"
+      },
+      {
+        "count": 1,
+        "cutoff": "2026-06-30",
+        "id": "A2",
+        "predicate": "reference_number = PAY_1.reference_number",
+        "table": "payments"
+      },
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "A3",
+        "predicate": "non-fee debit, payment_reference matches no payment, same currency, same amount, counterparty_token = payment.bank_account_id",
+        "table": "bank_transactions"
+      }
+    ],
+    "calculations": [
+      {
+        "name": "business_day_age",
+        "unit": "business_days",
+        "value": "41"
+      },
+      {
+        "name": "clearing_limit_ach",
+        "unit": "business_days",
+        "value": "3"
+      }
+    ],
+    "category": "F12",
+    "contract_section": "4.2",
+    "disposition": "answered",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "J_PAY_1",
+        "role": "payment journal (by journal_id)",
+        "table": "gl_entries"
+      }
+    ],
+    "family": "F12",
+    "known_contract_gap": null,
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {
+      "effective_payment_without_bank_row": 1,
+      "payment_without_bank_row": 1
+    },
+    "snapshot_rows": {}
+  },
+  "f14_amount_shortfall": {
+    "absence_searches": [
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "G1",
+        "predicate": "transaction_type = 'bank_fee' AND source_transaction_id = BT_1",
+        "table": "gl_entries"
+      }
+    ],
+    "calculations": [
+      {
+        "name": "delta",
+        "unit": "EUR",
+        "value": "25.00"
+      },
+      {
+        "name": "explained",
+        "unit": "EUR",
+        "value": "0.00"
+      },
+      {
+        "name": "unexplained",
+        "unit": "EUR",
+        "value": "25.00"
+      }
+    ],
+    "category": "F14",
+    "contract_section": "4.3",
+    "disposition": "answered",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "unique posted debit",
+        "table": "bank_transactions"
+      }
+    ],
+    "family": "F14",
+    "known_contract_gap": null,
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  },
+  "fx_settlement": {
+    "absence_searches": [],
+    "abstention_reason": "unsupported_fx",
+    "calculations": [],
+    "category": null,
+    "contract_section": "5 (FX and out-of-scope behaviour)",
+    "disposition": "abstained",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment (EUR)",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "posted debit (USD)",
+        "table": "bank_transactions"
+      }
+    ],
+    "family": "legitimate_fx_settlement",
+    "known_contract_gap": null,
+    "must_not": [
+      "cross-currency subtraction",
+      "any answered diagnosis",
+      "stated shortfall"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {
+      "currency_bank_vs_payment": 1
+    },
+    "snapshot_rows": {}
+  },
+  "insufficient_in_window_missing_records": {
+    "absence_searches": [
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "A1",
+        "predicate": "payment_reference = PAY_1.reference_number AND transaction_type <> 'bank fee'",
+        "table": "bank_transactions"
+      },
+      {
+        "count": 1,
+        "cutoff": "2026-06-30",
+        "id": "A2",
+        "predicate": "reference_number = PAY_1.reference_number",
+        "table": "payments"
+      }
+    ],
+    "abstention_reason": "required_records_missing",
+    "calculations": [
+      {
+        "name": "business_day_age",
+        "unit": "business_days",
+        "value": "1"
+      },
+      {
+        "name": "clearing_limit_ach",
+        "unit": "business_days",
+        "value": "3"
+      }
+    ],
+    "category": null,
+    "contract_section": "4.2 and 5 pending (not gradable: allocation and payment journal absent)",
+    "disposition": "abstained",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      }
+    ],
+    "family": "insufficient_evidence",
+    "known_contract_gap": null,
+    "must_not": [
+      "answer F12 (age <= limit)",
+      "answer legitimate_pending_settlement (records missing)"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {
+      "effective_payment_without_bank_row": 1,
+      "payment_without_allocation": 1,
+      "payment_without_bank_row": 1
+    },
+    "snapshot_rows": {}
+  },
+  "insufficient_primary_entity_missing": {
+    "absence_searches": [],
+    "abstention_reason": "primary_entity_not_in_snapshot",
+    "calculations": [],
+    "category": null,
+    "contract_section": "2 principle 1; 4.1 (post-cutoff rows do not exist)",
+    "disposition": "abstained",
+    "dropped_by_cutoff": {
+      "bank_transactions": 1
+    },
+    "evidence": [],
+    "family": "insufficient_evidence",
+    "known_contract_gap": null,
+    "must_not": [
+      "cite BT_1",
+      "answer F12 for PAY_1 from the missing row"
+    ],
+    "primary_entity": {
+      "id": "BT_1",
+      "role": "primary; posted 2026-07-01, absent from the snapshot",
+      "table": "bank_transactions"
+    },
+    "quality_gaps": {
+      "effective_payment_without_bank_row": 1,
+      "payment_without_bank_row": 1
+    },
+    "snapshot_rows": {}
+  },
+  "insufficient_shared_reference": {
+    "absence_searches": [
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "A1",
+        "predicate": "payment_reference = PAY_1.reference_number AND transaction_type <> 'bank fee'",
+        "table": "bank_transactions"
+      },
+      {
+        "count": 2,
+        "cutoff": "2026-06-30",
+        "id": "A2",
+        "predicate": "reference_number = PAY_1.reference_number",
+        "table": "payments"
+      }
+    ],
+    "abstention_reason": "ambiguous_reference",
+    "calculations": [
+      {
+        "name": "business_day_age",
+        "unit": "business_days",
+        "value": "41"
+      },
+      {
+        "name": "clearing_limit_ach",
+        "unit": "business_days",
+        "value": "3"
+      }
+    ],
+    "category": null,
+    "contract_section": "4.2 (not gradable: A2 not empty)",
+    "disposition": "abstained",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "PAY_2",
+        "role": "other payment with the same reference",
+        "table": "payments"
+      }
+    ],
+    "family": "insufficient_evidence",
+    "known_contract_gap": null,
+    "must_not": [
+      "answer F12"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {
+      "effective_payment_without_bank_row": 2,
+      "payment_shares_reference": 2,
+      "payment_without_bank_row": 2
+    },
+    "snapshot_rows": {}
+  },
+  "net_fee_accounting": {
+    "absence_searches": [],
+    "calculations": [
+      {
+        "name": "delta",
+        "unit": "EUR",
+        "value": "20.00"
+      },
+      {
+        "name": "explained",
+        "unit": "EUR",
+        "value": "20.00"
+      },
+      {
+        "name": "unexplained",
+        "unit": "EUR",
+        "value": "0.00"
+      }
+    ],
+    "category": "legitimate_net_fee_accounting",
+    "contract_section": "5",
+    "disposition": "answered",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "unique posted debit",
+        "table": "bank_transactions"
+      },
+      {
+        "id": "J_FEE_1",
+        "role": "bank_fee journal (by journal_id)",
+        "table": "gl_entries"
+      }
+    ],
+    "family": "legitimate_net_fee_accounting",
+    "known_contract_gap": null,
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  },
+  "payment_reversal": {
+    "absence_searches": [],
+    "calculations": [
+      {
+        "name": "debit_minus_credit",
+        "unit": "EUR",
+        "value": "0.00"
+      },
+      {
+        "name": "credit_minus_journal",
+        "unit": "EUR",
+        "value": "0.00"
+      },
+      {
+        "name": "journal_minus_payment",
+        "unit": "EUR",
+        "value": "0.00"
+      }
+    ],
+    "category": "legitimate_payment_reversal",
+    "contract_section": "5",
+    "disposition": "answered",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "reversed payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "posted debit",
+        "table": "bank_transactions"
+      },
+      {
+        "id": "BT_2",
+        "role": "posted reversal credit",
+        "table": "bank_transactions"
+      },
+      {
+        "id": "J_REV_1",
+        "role": "reversal journal (by journal_id)",
+        "table": "gl_entries"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice, not paid",
+        "table": "invoices"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      }
+    ],
+    "family": "legitimate_payment_reversal",
+    "known_contract_gap": null,
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  },
+  "pending_settlement": {
+    "absence_searches": [
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "A1",
+        "predicate": "payment_reference = PAY_1.reference_number AND transaction_type <> 'bank fee'",
+        "table": "bank_transactions"
+      },
+      {
+        "count": 1,
+        "cutoff": "2026-06-30",
+        "id": "A2",
+        "predicate": "reference_number = PAY_1.reference_number",
+        "table": "payments"
+      },
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "A3",
+        "predicate": "non-fee debit, payment_reference matches no payment, same currency, same amount, counterparty_token = payment.bank_account_id",
+        "table": "bank_transactions"
+      }
+    ],
+    "calculations": [
+      {
+        "name": "business_day_age",
+        "unit": "business_days",
+        "value": "1"
+      },
+      {
+        "name": "clearing_limit_ach",
+        "unit": "business_days",
+        "value": "3"
+      }
+    ],
+    "category": "legitimate_pending_settlement",
+    "contract_section": "5",
+    "disposition": "answered",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "J_PAY_1",
+        "role": "payment journal (by journal_id)",
+        "table": "gl_entries"
+      }
+    ],
+    "family": "legitimate_pending_settlement",
+    "known_contract_gap": null,
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {
+      "payment_without_bank_row": 1
+    },
+    "snapshot_rows": {}
+  },
+  "real_bank_batch_debit": {
+    "absence_searches": [],
+    "abstention_reason": "bank_batch_grouping_unmodelled",
+    "calculations": [
+      {
+        "name": "sum_of_payments",
+        "unit": "EUR",
+        "value": "1500.00"
+      },
+      {
+        "name": "bank_debit",
+        "unit": "EUR",
+        "value": "1500.00"
+      }
+    ],
+    "category": null,
+    "contract_section": "docs/input-mapping.md G2 (batch grouping absent from the contract)",
+    "disposition": "abstained",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "PAY_2",
+        "role": "member of the batch",
+        "table": "payments"
+      },
+      {
+        "id": "PAY_3",
+        "role": "member of the batch",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "debit whose reference matches no payment",
+        "table": "bank_transactions"
+      }
+    ],
+    "family": "realistic_shape",
+    "known_contract_gap": {
+      "current_contract_outcome": "answered F12 for each of PAY_1, PAY_2, PAY_3 (A1 finds no row for any reference; A2 is 1; A3 finds no single-payment amount match). All three are false positives: the debit exists.",
+      "gap": "G2",
+      "target": "abstain, or a future batch rule; do not change the contract here",
+      "why": "The contract has no bank-batch concept; the debit carries a reference that no payment has, and its amount equals the sum of three payments, not any one."
+    },
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {
+      "bank_payment_reference_unmatched": 1,
+      "effective_payment_without_bank_row": 3,
+      "payment_without_bank_row": 3
+    },
+    "snapshot_rows": {}
+  },
+  "real_identical_distinct_payments": {
+    "absence_searches": [],
+    "calculations": [
+      {
+        "name": "committed_overpayment_inv_1",
+        "unit": "EUR",
+        "value": "0.00"
+      }
+    ],
+    "category": null,
+    "contract_section": "2 principle 4; PLAN.md section 4 (distinct payments stay distinct)",
+    "disposition": "out_of_scope",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "PAY_2",
+        "role": "equal twin, distinct payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "posted debit",
+        "table": "bank_transactions"
+      }
+    ],
+    "family": "realistic_shape",
+    "known_contract_gap": null,
+    "must_not": [
+      "report F06 or duplicate",
+      "merge PAY_1 and PAY_2"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {
+      "bank_transactions": 2,
+      "payment_allocations": 2,
+      "payments": 2
+    }
+  },
+  "real_netted_fee_no_journal": {
+    "absence_searches": [
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "G1",
+        "predicate": "transaction_type = 'bank_fee' AND source_transaction_id = BT_1",
+        "table": "gl_entries"
+      }
+    ],
+    "calculations": [
+      {
+        "name": "delta",
+        "unit": "EUR",
+        "value": "12.50"
+      },
+      {
+        "name": "explained",
+        "unit": "EUR",
+        "value": "0.00"
+      },
+      {
+        "name": "unexplained",
+        "unit": "EUR",
+        "value": "12.50"
+      }
+    ],
+    "category": "F14",
+    "contract_section": "4.3 (F14; the netted fee is unobservable, only the unexplained shortfall is graded)",
+    "disposition": "answered",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "unique posted debit",
+        "table": "bank_transactions"
+      }
+    ],
+    "family": "realistic_shape",
+    "known_contract_gap": null,
+    "must_not": [
+      "call it a bank error or a fee as a fact",
+      "use J_FEE_2 (sourced to BT_2) to explain BT_1"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  },
+  "real_partial_payment": {
+    "absence_searches": [],
+    "calculations": [
+      {
+        "name": "allocated",
+        "unit": "EUR",
+        "value": "400.00"
+      },
+      {
+        "name": "invoice_open_balance",
+        "unit": "EUR",
+        "value": "600.00"
+      },
+      {
+        "name": "delta",
+        "unit": "EUR",
+        "value": "0.00"
+      }
+    ],
+    "category": null,
+    "contract_section": "4.1 (instalments; no partial-payment variant is defined)",
+    "disposition": "out_of_scope",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "INV_1",
+        "role": "invoice",
+        "table": "invoices"
+      },
+      {
+        "id": "BT_1",
+        "role": "posted debit",
+        "table": "bank_transactions"
+      }
+    ],
+    "family": "realistic_shape",
+    "known_contract_gap": null,
+    "must_not": [
+      "report F06 (allocated does not exceed the total)",
+      "report F14 (debit equals payment)",
+      "report an unpaid balance as missing settlement"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  },
+  "real_reversal_then_repayment": {
+    "absence_searches": [],
+    "calculations": [
+      {
+        "name": "debit_minus_credit",
+        "unit": "EUR",
+        "value": "0.00"
+      },
+      {
+        "name": "credit_minus_journal",
+        "unit": "EUR",
+        "value": "0.00"
+      },
+      {
+        "name": "journal_minus_payment",
+        "unit": "EUR",
+        "value": "0.00"
+      }
+    ],
+    "category": "legitimate_payment_reversal",
+    "contract_section": "5 (payment reversal); PLAN.md section 4 (distinguish reversals from duplicates)",
+    "disposition": "answered",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "reversed payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "posted debit",
+        "table": "bank_transactions"
+      },
+      {
+        "id": "BT_2",
+        "role": "posted reversal credit",
+        "table": "bank_transactions"
+      },
+      {
+        "id": "J_REV_1",
+        "role": "reversal journal (by journal_id)",
+        "table": "gl_entries"
+      },
+      {
+        "id": "PAY_2",
+        "role": "re-payment",
+        "table": "payments"
+      },
+      {
+        "id": "INV_1",
+        "role": "invoice",
+        "table": "invoices"
+      }
+    ],
+    "family": "realistic_shape",
+    "known_contract_gap": {
+      "current_contract_outcome": "the reversal contract requires the allocated invoices not to be `paid`; here INV_1 is paid by PAY_2, so that condition fails and the contract does not confirm the reversal.",
+      "gap": "reversal re-payment",
+      "target": "answer the reversal as legitimate; do not change the contract here",
+      "why": "The contract assumes a reversal leaves the invoice open; re-payment after a reversal is the normal next step."
+    },
+    "must_not": [
+      "report F06 (the reversed payment is not effective; effective allocations equal the invoice total)"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  },
+  "split_payment": {
+    "absence_searches": [],
+    "calculations": [
+      {
+        "name": "allocated",
+        "unit": "EUR",
+        "value": "2000.00"
+      },
+      {
+        "name": "allocated_minus_invoice_total",
+        "unit": "EUR",
+        "value": "0.00"
+      }
+    ],
+    "category": "legitimate_split_payment",
+    "contract_section": "5",
+    "disposition": "answered",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "INV_1",
+        "role": "invoice",
+        "table": "invoices"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "PAY_2|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "PAY_1",
+        "role": "effective payment",
+        "table": "payments"
+      },
+      {
+        "id": "PAY_2",
+        "role": "effective payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "posted debit",
+        "table": "bank_transactions"
+      },
+      {
+        "id": "BT_2",
+        "role": "posted debit",
+        "table": "bank_transactions"
+      }
+    ],
+    "family": "legitimate_split_payment",
+    "known_contract_gap": null,
+    "primary_entity": {
+      "id": "INV_1",
+      "role": "primary",
+      "table": "invoices"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  },
+  "weekend_clearing": {
+    "absence_searches": [],
+    "calculations": [
+      {
+        "name": "amount_difference",
+        "unit": "EUR",
+        "value": "0.00"
+      },
+      {
+        "name": "business_day_lag",
+        "unit": "business_days",
+        "value": "3"
+      },
+      {
+        "name": "clearing_limit_ach",
+        "unit": "business_days",
+        "value": "3"
+      }
+    ],
+    "category": "legitimate_weekend_clearing",
+    "contract_section": "5",
+    "disposition": "answered",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "unique posted debit",
+        "table": "bank_transactions"
+      }
+    ],
+    "family": "legitimate_weekend_clearing",
+    "known_contract_gap": null,
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  }
+}

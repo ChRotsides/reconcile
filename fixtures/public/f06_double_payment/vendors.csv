@@ -1,0 +1,2 @@
+vendor_id,bank_account_token,vendor_type,country,currency,payment_terms,default_payment_method,vendor_status,created_at,updated_at
+V_1,BA_V1,supplier,DE,EUR,net30,ACH,active,2026-01-05T08:00:00,2026-01-05T08:00:00

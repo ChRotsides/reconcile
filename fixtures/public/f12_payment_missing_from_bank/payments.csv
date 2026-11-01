@@ -1,0 +1,2 @@
+payment_id,vendor_id,bank_account_id,reference_number,payment_date,payment_method,payment_currency,payment_amount,payment_status,settlement_status,created_at
+PAY_1,V_1,BA_V1,REF_1,2026-05-04,ACH,EUR,500.00,completed,settled,2026-05-04T08:00:00

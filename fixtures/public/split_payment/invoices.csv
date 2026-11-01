@@ -1,0 +1,2 @@
+invoice_id,vendor_id,po_id,invoice_date,received_date,due_date,currency,subtotal,tax,shipping,invoice_total,payment_terms,status
+INV_1,V_1,,2026-05-15,2026-05-16,2026-06-14,EUR,2000.00,0.00,0.00,2000.00,net30,paid

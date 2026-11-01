@@ -1,0 +1,4 @@
+payment_id,invoice_id,allocated_amount,allocation_date
+PAY_1,INV_1,400.00,2026-06-01
+PAY_2,INV_2,600.00,2026-06-01
+PAY_3,INV_3,500.00,2026-06-01
