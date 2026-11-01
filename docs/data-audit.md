@@ -10,7 +10,7 @@ Method:
 
 1. Read the documentation, schema, taxonomy, generator code for the three families and hard negatives, the splitter, the question generator, the evaluators and the frozen Rules/SQL specification (paths in each section).
 2. Read the operational tables `data/benchmark/full/*.csv` with throwaway Python (standard library, `python3 -I` or scratchpad scripts kept outside the repository; nothing from upstream was executed).
-3. Read the per-split label files for **train and validation only** (`data/benchmark/train/*`, `data/benchmark/validation/*`). Test and challenge files were hashed and line-counted only (section 11).
+3. Read the per-split label files for **train and validation only** (`data/benchmark/train/*`, `data/benchmark/validation/*`). During the audit, test and challenge files were hashed and line-counted only; the later baseline reproduction read more (section 11 is the current record).
 4. Traced records to conclusions with predicates that encode the label definitions (taxonomy lines 70-81, 148-159, 174-185). A passing predicate shows the label is consistent with the operational records. It is not independent adjudication of whether the cause stated by the label is true.
 5. Hand-read full record cards for about 20 cases (including F06 RCA_000501 and RCA_000578, F12 RCA_001103 and RCA_001156, F14 RCA_001302 and RCA_001304, and one case of each legitimate variant) before trusting the predicates.
 
@@ -38,21 +38,51 @@ Legitimate cases: label `failure_type == "NO_FAILURE"` in `rca_ground_truth.json
 
 Three zones per PLAN.md section 2. Operational means the field could exist in an AP ledger or bank export before an analyst reaches a conclusion.
 
-### 3.1 Observable operational input (candidate allowlist)
+### 3.1 Observable operational input (enumerated allowlist)
 
 Files: `data/benchmark/full/*.csv`, the 14 tables of `docs/schema.md` lines 7-22. This one snapshot contains every case of every split (all records, including test and challenge entities); the split is a label-side property only.
 
-| Table | Allow | Withhold or restrict |
+Rule: a column is an input only if it appears in the tables below. Any column, table or event type not listed is dropped. This is an allowlist, not a denylist (PLAN.md section 2); a column added upstream later is excluded until audited. Columns I did not examine for class correlation are dropped, not kept.
+
+Column actions:
+
+- **keep**: passed unchanged.
+- **remap**: replaced by an opaque token. One keyed random mapping per identifier namespace, with the key discarded after the run, so the same value maps to the same token in every table and column where it appears (genuine matches survive) and the token carries no order, length, prefix or format of the original. Namespaces: `vendor` (`vendors.vendor_id`, every `vendor_id` column), `po`, `po_line`, `invoice`, `invoice_line`, `payment`, `bank_txn`, `journal`, `journal_line`, `approval`, `audit_event`, `statement`, `change`, `payment_ref` (`payments.reference_number` and `bank_transactions.payment_reference` share it, so payment-to-bank matching by reference works), and `bank_acct_token` (vendor and counterparty tokens). A polymorphic ID column (`gl_entries.source_transaction_id`, `audit_log.entity_id`) is mapped with the namespace of the entity it points to.
+- **drop**: removed.
+- Row order: every table is re-sorted by its opaque key (or shuffled with a fixed seed) before use. In `full/` the rows are in insertion order: the 200 inserted payments are rows 6001-6200 of `payments.csv`, the 147 inserted invoices rows 8001-8147 of `invoices.csv`, and every ID column is ascending (checked on all of these tables). Row position is a leak (L2, L12).
+
+| Table | keep | remap (namespace) | drop |
+|---|---|---|---|
+| `vendors` | `vendor_type`, `country`, `currency`, `payment_terms`, `default_payment_method`, `vendor_status`, `created_at`, `updated_at` | `vendor_id` (vendor), `bank_account_token` (bank_acct_token) | `vendor_name` (embeds the vendor sequence number), `tax_id_hash`, `bank_routing_token` (sequence index), `source_system` |
+| `purchase_orders` | `po_date`, `currency`, `po_total`, `status` | `po_id` (po), `vendor_id` (vendor) | `subtotal`, `tax`, `shipping`, `department`, `cost_center`, `gl_account`, `expected_delivery_date`, `created_by`, `source_system` |
+| `po_lines` | `quantity`, `unit_price`, `line_amount` | `po_id`, `po_line_id` | `item_id`, `description`, `gl_account`, `department`, `cost_center`, `source_system` |
+| `invoices` | `invoice_date`, `received_date`, `due_date`, `currency`, `subtotal`, `tax`, `shipping`, `invoice_total`, `payment_terms`, `status` | `invoice_id` (invoice), `vendor_id`, `po_id` | `invoice_number` (see L12; dropped, not remapped), `duplicate_reference`, `created_at`, `source_system` |
+| `invoice_lines` | `quantity`, `unit_price`, `line_amount` | `invoice_id`, `invoice_line_id` (invoice_line), `po_line_id` | `item_id`, `gl_account`, `department`, `cost_center`, `source_system` |
+| `payments` | `payment_date`, `payment_method`, `payment_currency`, `payment_amount`, `payment_status`, `settlement_status`, `created_at` | `payment_id` (payment), `vendor_id`, `bank_account_id` (bank_acct_token), `reference_number` (payment_ref) | `source_system` |
+| `payment_allocations` | `allocated_amount`, `allocation_date` | `payment_id`, `invoice_id` | `source_system` |
+| `bank_transactions` | `bank_account_id` (the company's own account label; categorical), `transaction_date`, `posted_date`, `transaction_type`, `amount`, `currency`, `direction`, `status` | `bank_transaction_id` (bank_txn), `counterparty_token` (bank_acct_token), `payment_reference` (payment_ref) | `bank_reference` (prefix and counter encode class and order, L12), `source_system` |
+| `bank_statements` | `bank_account_id`, `statement_date`, `opening_balance`, `closing_balance`, `total_debits`, `total_credits` | `bank_statement_id` (statement) | `source_system` |
+| `employees` | none | none | whole table (not needed; employee IDs elsewhere are dropped) |
+| `vendor_change_log` | `field_changed`, `changed_at` | `change_id` (change), `vendor_id`, `old_value`/`new_value` (bank_acct_token, only when `field_changed` is `bank_account_token`; otherwise dropped) | `changed_by`, `change_reason` (narrative, spec section 12), `source_system` |
+| `approval_events` | `approval_level`, `approver_role`, `action`, `event_timestamp`, `previous_status`, `new_status` | `approval_event_id` (approval), `invoice_id` | `approver_id`, `comments` (free text, not inspected), `source_system` |
+| `gl_entries` | `transaction_type` (class-correlated for hard negatives, L6; kept as ordinary ledger structure with the caveat recorded), `posting_date`, `accounting_period`, `gl_account`, `debit`, `credit`, `currency` | `journal_id` (journal), `journal_line_id` (journal_line), `source_transaction_id` (namespace of the source entity) | `memo` (class-correlated, L6; spec section 12), `department`, `cost_center`, `source_system` |
+| `audit_log` (rows kept only where `event_type` is in {`payment_created`, `received`, `received_recurring`, `approval_completed`, `created`, `master_data_changed`}, plus `fx_conversion_applied` only if FX is ever in scope) | `entity_type`, `event_type`, `timestamp` | `event_id` (audit_event), `entity_id` (namespace of `entity_type`) | rows of every other event type (L3); `actor_id`, `field`, `old_value`, `new_value`, `source_system` |
+
+Reference and identifier columns, one line each:
+
+| Column | Action | Why |
 |---|---|---|
-| `vendors`, `purchase_orders`, `po_lines`, `invoices`, `invoice_lines`, `payments`, `payment_allocations`, `bank_transactions`, `bank_statements`, `employees` | All columns except those named here | `invoices.duplicate_reference` (upstream also excludes it, spec line 1086; empty in the rows seen); `source_system` is harmless but not needed |
-| `vendor_change_log` | structured columns | `change_reason` narrative (spec section 12) |
-| `approval_events` | structured columns | `comments` free text (precaution; contents not inspected) |
-| `gl_entries` | `journal_id`, `journal_line_id`, `transaction_type`, `source_transaction_id`, `posting_date`, `accounting_period`, `gl_account`, `debit`, `credit`, `currency` | `memo` (spec section 12; class-correlated, L6). `transaction_type` is class-correlated for hard negatives (L6) but is ordinary ledger structure; keep, with the caveat recorded |
-| `audit_log` | `event_type` in {`payment_created`, `received`, `received_recurring`, `approval_completed`, `created`, `master_data_changed`} and `fx_conversion_applied` only if FX is ever in scope | All anomaly-named event types (L3), and `old_value`/`new_value`/`field` of any retained event (spec section 12) |
+| `payments.reference_number` | remap (`payment_ref`) | Raw value is `PMTREF-` + payment counter + 42; inserted payments get values 6043-6242 against 43-6042 for organic ones (L12) |
+| `bank_transactions.payment_reference` | remap (`payment_ref`, same mapping) | Copy of the payment reference, so payment-to-bank matching survives. Bank rows whose reference matches no payment (the raw `BANKPORTAL-` rows) stay unmatched; that is a genuine observable |
+| `bank_transactions.bank_reference` | drop | `BANKREF-` = bank counter + 42, `BANKFEE-`, `MANUAL-`, `REVERSAL-` prefixes name the row kind; not needed for matching |
+| `invoices.invoice_number` | drop | Organic numbers embed the invoice counter; inserted ones are visibly different (L12). F06, F12 and F14 do not need it. A future duplicate-invoice (F01) experiment would need a normalised-key mapping decision first |
+| `invoices.duplicate_reference` | drop | Upstream excludes it (spec line 1086); empty in the rows seen |
+| every `*_id` primary and foreign key | remap | Insertion order (L2) |
+| `vendors.bank_account_token`, `payments.bank_account_id`, `bank_transactions.counterparty_token` | remap (`bank_acct_token`) | Tokens embed vendor index or change counter, and 100 payments and 100 bank rows carry the literal `BA_TKN_SUPERSEDED_` (an F11 marker; F11 is outside the three target families, flagged) |
 
-Identifier columns are allowed only after remapping to opaque keys (L2): raw IDs encode insertion order.
+Neutral request fields: primary entity type and ID (opaque ID from the namespace of that entity), an investigation cutoff, and a symptom stated without class words. `primary_entity.type` correlates with family (F06 always `invoice`; F12 and F14 always `payment`; section 4, L9) and is a weak leak that a real exception queue also has.
 
-Neutral request fields: primary entity type and ID, an investigation cutoff, and a symptom stated without class words. `primary_entity.type` correlates with family (F06 always `invoice`; F12 and F14 always `payment`; section 4, L9) and is a weak leak that a real exception queue also has.
+Status: this allowlist is a design, not an implemented or tested transform. The remapped dataset has not been built; no check shows it removes the signals in L2 and L12 until a test runs a bag-of-fields classifier on it.
 
 ### 3.2 Development labels (train and validation splits only)
 
@@ -112,6 +142,18 @@ In train+validation every labelled event maps to one class (checked via `affecte
 **L10. Label metadata.** `difficulty`, `reasoning_hops`, `severity` and `scenario_variant` are constant within F06 (medium, 3 hops), F12 (hard, 4 hops) and F14 (medium, 3 hops); all NO_FAILURE cases have severity `none`. Never expose.
 
 **L11. Published baselines are not observable-input baselines.** The classical ML run lists a `primary_entity_type` feature among its strongest (`docs/classical_ml_baseline_evaluation_v1.0.md` section 18) and and its report states it "emits no source-record evidence" (section 1); the Direct-LLM packet includes the full `audit_log` and the case ID route (L3). Published scores (ML exact accuracy 0.9544, Rules/SQL 0.8497 on 439 test cases) are diagnostic, not a counterpart to an observable-input comparison.
+
+**L12. Reference and number fields carry generator order and class, so remapping keys alone is not enough.** Checked in `upstream src/` at the pinned revision and in `data/benchmark/full/`:
+
+- `src/generators/payment_generator.py` line 92: `reference = f"PMTREF-{ctx.ids.counters['PAY'] + (ctx.config['seed'] % 997):010d}"`. `src/failures/f06_double_payment.py` line 40 and `src/failures/f05_payment_without_invoice.py` line 34 build the inserted payments' references the same way. The seed is 42 (`resolved_config.yaml` line 41), so the reference is the payment counter plus 42. In the data, `reference_number` minus the payment ID number is exactly 42 for all 6000 organic and all 200 inserted payments. Organic references run 43-6042; the 200 inserted payments have 6043-6242, so every reference above `PMTREF-0000006042` is an inserted (F05 or F06) payment (200 of 200; 0 organic). RCA_000501 (train): inserted `PAY_0426101` carries `PMTREF-0000006143`, its original `PAY_0423323` carries `PMTREF-0000003365`.
+- Training-label check (evidence payments with a reference above 6042): F06 58 of 58 train and 18 of 18 validation cases; F12 0 of 55 and 0 of 16; F14 0 of 58 and 0 of 18; NO_FAILURE 0 of 387 and 0 of 139. A single threshold on the reference separates F06 from F12, F14 and NO_FAILURE on this evidence.
+- `src/generators/bank_generator.py` line 53 and 77 copy the value into `bank_transactions.payment_reference`. All 200 inserted payments have a bank row (200 bank rows reference an inserted payment), so the same threshold works on the bank side without the payment table.
+- `bank_transactions.bank_reference` (`bank_generator.py` lines 51 and 75; `f13_bank_missing_erp.py` line 42; `hard_negatives.py` line 530): `BANKREF-` equals bank counter plus 42 (6053 rows, offset exactly 42), and the prefixes `BANKFEE-` (63), `MANUAL-` (100, F13) and `REVERSAL-` (47, legitimate reversal) name the row kind. `payment_reference` for F13 rows is `BANKPORTAL-` plus the bank counter (100 rows, F13 only).
+- `invoices.invoice_number` (`invoice_generator.py` line 34): `SYN-<vendor suffix>-<sequence>`, and the sequence equals the invoice counter for all 8000 organic invoices (offset 0). The 147 invoices above `INV_0428000` all fail that format: 100 are dash-stripped copies (`SYN2479004672`, F01) and 47 are `CM-...` credit memos (legitimate). In labels, the F01 evidence always includes such an invoice (46 of 46 train, 27 of 27 validation); so do 19 of 387 train and 16 of 139 validation NO_FAILURE cases (credit memos).
+- Row order: in `full/` every table is written in insertion order and every ID column is ascending. The inserted payments are rows 6001-6200 of `payments.csv` and the inserted invoices rows 8001-8147 of `invoices.csv`. A consumer that keeps file order keeps the leak even after every ID is remapped.
+- `vendors.bank_account_token`, `payments.bank_account_id` and `bank_transactions.counterparty_token` embed the vendor index or a change counter (`vendor_generator.py` line 92; 12 of 500 vendors hold a token index above 500, that is, a changed token); 100 payments and 100 bank rows carry `BA_TKN_SUPERSEDED_` (F11). Other generated numbers (`vendor_name` suffix, `bank_routing_token` index, `employee_id`) are sequence-based; I did not test them for class signal and the allowlist drops them (section 3.1).
+
+Consequence: remapping primary and foreign keys alone (L2) leaves an ordering and class signal in references, numbers and row order. The allowlist in section 3.1 drops `invoice_number` and `bank_reference`, remaps `reference_number`/`payment_reference` with one shared opaque mapping, remaps every ID, and re-sorts rows. Not yet tested on a built dataset. Unchecked: whether free text or the `audit_log` timestamps of retained events still order the rows (L4, L5).
 
 ## 5. Splits, grouping and vendor counts
 
@@ -265,9 +307,13 @@ Population check with the same predicates (train / validation): F06 58/58 and 18
 9. **Data oddities, not labels.** Payment dates fall on weekends (for example RCA_000501's inserted payment on a Sunday, ACH); some invoices have `due_date` earlier than `received_date` (RCA_000501); the quality report records `post_injection_invariant_validation.passed = false` with 615 issues (INVOICE_OVERPAYMENT 147, PAID_INVOICE_BALANCE 200, PAYMENT_ALLOCATION_TOTAL 100, PAYMENT_BANK_ORDER 78, APPROVAL_PAYMENT_ORDER 90) while `quality_gate_passed = true`, described as intended findings (`dataset_quality_report.json`). Not investigated further.
 10. **Not examined**: approval events, PO/quantity families (F01-F05, F07-F11, F13, F15) beyond the leak counts above; whether `bank_statements` balance (upstream reports they do).
 
-## 11. Files and labels inspected
+## 11. Files and labels inspected (single exposure record)
 
-Held-out rule status: no label from `test` or `challenge_test` was opened, printed or counted by label.
+This section is the project's one consolidated, current record of which label and answer files were read, by which activity and on which split. Later activities (11.2) append here. Subsection 11.1 describes the audit as it stood when the audit reading ended; its "no label opened" statements were true at that time and are superseded for the project by 11.3.
+
+### 11.1 Data audit reading (before the baseline reproduction)
+
+Held-out rule status at the end of the audit: no label from `test` or `challenge_test` was opened, printed or counted by label.
 
 Label files opened and parsed:
 
@@ -276,7 +322,7 @@ Label files opened and parsed:
 - `data/benchmark/train/failure_manifest.csv`: first five lines only.
 - `data/benchmark/train/case_entity_records.jsonl`: first 1500 bytes plus the top-level key set of every line (no records inspected beyond case RCA_000005).
 
-Files hashed and line-counted only (no content read): `data/benchmark/test/*`, `data/benchmark/challenge_test/*`, top-level `data/benchmark/rca_ground_truth.jsonl`, `benchmark_questions.jsonl`, `failure_manifest.csv`, `causal_edges.csv`, `internal/mutation_log.jsonl`, and all of `data/raw_clean/` beyond line counts. `data/benchmark/*/case_ids.txt` for test and challenge: line counts only (a name listing would reveal family through the ID blocks, L1).
+Files hashed and line-counted only (no content read), under the rules in force during the audit; AGENTS.md section 7 now also forbids counting or listing `challenge_test/`, so this must not be repeated: `data/benchmark/test/*`, `data/benchmark/challenge_test/*`, top-level `data/benchmark/rca_ground_truth.jsonl`, `benchmark_questions.jsonl`, `failure_manifest.csv`, `causal_edges.csv`, `internal/mutation_log.jsonl`, and all of `data/raw_clean/` beyond line counts. `data/benchmark/*/case_ids.txt` for test and challenge: line counts only (a name listing would reveal family through the ID blocks, L1).
 
 Aggregate information about test and challenge seen through documents and reports (not label files):
 
@@ -284,6 +330,32 @@ Aggregate information about test and challenge seen through documents and report
 - `data/benchmark/dataset_statistics.md`: whole-dataset counts.
 - `docs/classical_ml_baseline_evaluation_v1.0.md` and `docs/rules_sql_baseline_evaluation_v1.0.md`: published **test-set** results, including per-failure test counts (F06 12, F12 21, F14 16) and aggregate scores. I read these before applying the holdout rule to them. The test split is therefore not blind: use it as a reproduction set only (PLAN.md section 2). Nothing about the challenge split was read from these (no occurrence of "challenge" in the baseline evaluation documents).
 - Combining the published test counts with train and validation counts would yield a count of challenge cases per family; I did not compute or record it.
+
+### 11.2 Baseline reproduction (2026-11-01; `docs/baseline-reproduction.md`)
+
+Source: the audit-hook logs `artifacts/m0-baselines/files_read_*.txt`, which list every file the upstream Python opened, and the run documentation. The hook does not see non-Python processes (the `tar` copy) or the pytest subprocesses.
+
+| Split | File | Opened by upstream code (hook log) | Content seen by a person or model |
+|---|---|---|---|
+| train | `case_ids.txt`, `benchmark_questions.jsonl`, `failure_manifest.csv` (ML run); labels also used by the F01 grid selection (Rules/SQL) | yes | no raw content; code extracts `case_id` and `primary_entity` (type, ID) |
+| validation | `case_ids.txt`, `benchmark_questions.jsonl`, `failure_manifest.csv`; Rules/SQL grid reads validation labels | yes | as above |
+| test | `case_ids.txt`, `benchmark_questions.jsonl`, `failure_manifest.csv` (both runs) | yes | as above |
+| test | `rca_ground_truth.jsonl` (Rules/SQL, for evidence-ID scoring) | yes | aggregate and per-class test metrics were produced and reported; confusion matrices and error analyses derived from test labels exist in the run directories |
+| all | `full/*.csv` (14 operational tables), `dataset_quality_report.json` (ML) | yes | operational data and aggregates, as in 11.1 |
+| challenge_test | any file | no (hook log has no entry; directory excluded from the working copy) | none |
+| all splits | top-level `rca_ground_truth.jsonl`, `benchmark_questions.jsonl`, `failure_manifest.csv`, `causal_edges.csv` | no (hook log has no entry) | none |
+
+Aggregate-file copy: the first run (2026-11-01) mounted the complete checkout read-only at `/src` and copied it into a private in-container working copy, excluding `challenge_test/`, `internal/` and `raw_clean/` but not the four top-level combined files above, which contain answers for all four splits including challenge. The copy was a byte copy by `tar`, which the audit hook cannot see; the upstream Python never opened those files (hook log). No recorded process parsed them, no output contains them, the container had no network (`--network none`), and the working copy was an in-memory `tmpfs` removed when the container exited (`--rm`). The `challenge_test/` directory itself was visible inside the container through the `/src` mount but was not copied or opened. This is a handling lapse against the AGENTS.md section 7 intent (those files were not to be opened), not a known read of challenge answers: I cannot show from the logs that nothing read the bytes beyond the copy, only that no recorded process opened them and no output contains them. The review finding is in `artifacts/reviews/m0-review-1.md` (finding 1). The runner script has since been changed to mount an explicit allowlist (`evaluation/baselines/finrca_upstream/run_baselines.sh` header comment); the existing artifacts in `artifacts/m0-baselines/` come from the first-run script, and any later rerun must be appended here with its own hook log.
+
+Test labels were therefore opened by the Rules/SQL reproduction (11.2 table), and test results were read in the published documents (11.1). Train and validation labels were opened by the audit and by both baselines.
+
+### 11.3 Current exposure summary
+
+| Split | Status |
+|---|---|
+| train, validation | Opened and parsed in full by the audit (11.1) and by the baselines (11.2). Development labels. |
+| test | Not blind. Published test results read (11.1); manifests, questions and (Rules/SQL) ground truth opened by the reproduction; aggregate and per-class test results read and reported in `docs/baseline-reproduction.md`. Reproduction set only. |
+| challenge_test | Label, question and entity files were hashed and line-counted during the audit (11.1; counts in `DATA_SOURCES.md` section 5) and have not been opened. The four top-level combined files, which hold challenge answers, were byte-copied into a discarded container (11.2) and not opened. The directory was visible, not read, in the container. Hash and line counts are known; no label content is. Sealed by AGENTS.md section 7: no further opening, listing or counting. |
 
 Other files read: `README.md`, `LICENSE`, `config.yaml`, `requirements.txt`, `.env.example`, `docs/{schema,data_dictionary,failure_taxonomy,generation_methodology,direct_llm_case_packet_leakage_audit_v1.0}.md`, parts of `docs/frozen_rules_sql_baseline_spec_v1.0.md` (sections 1-3, F06, F12, F14 rules, 9-12), leading rows of `docs/ml_feature_leakage_audit_v1.0.md`, `src/utils/ids.py`, `src/failures/{pipeline,hard_negatives,f12_erp_payment_missing_bank,f14_bank_erp_amount}.py` (excerpts), `src/ground_truth/{splits,question_generator}.py` (excerpts), `src/{rules_sql,direct_llm}/evaluation.py` (excerpts), `src/rules_sql/cli.py` and `src/classical_ml/cli.py` (grep only). All 14 `data/benchmark/full/*.csv` tables.
 
@@ -296,7 +368,7 @@ Baseline entry points (not run): `python3 -m src.rules_sql.cli run`, `python3 -m
 3. Who derives the evidence contract for F12, F14 and pending, and how is it validated before holdout use?
 4. Are the FX (47) and cancellation (47) legitimate cases in the release cohort, as abstentions or out-of-scope? PLAN.md section 4 forbids converting without a documented path.
 5. Do we remove or flag the cases with conflicting records (section 10, item 6) before computing any rate, and how are such exclusions reported?
-6. How are opaque IDs generated so that cross-table relationships survive but insertion order does not (L2)?
+6. Opaque IDs and references: section 3.1 specifies one keyed random mapping per namespace (shared for payment references) with rows re-sorted, so cross-table matches survive and insertion order does not (L2, L12). Open: build it and test that a classifier on the remapped fields cannot recover insertion order or class.
 7. Is the dataset MIT-covered (DATA_SOURCES.md section 3)?
 8. Why do 53 vendors have no case group? Do any hold records that a holdout investigation could reach through bridging entities (PLAN.md section 2 "entities bridging splits")? Not checked.
 9. Per-case cutoff: the single global 2026-06-30 cutoff cannot express "as of the date the exception arose"; is a snapshot-only claim acceptable?
@@ -314,7 +386,7 @@ What works:
 
 Blockers (all must be resolved or declared before M1 builds on this data):
 
-1. **Class leakage in the snapshot.** Anomaly-named audit events (L3), tail-range and gap-bearing IDs (L2), missing `payment_created` events (L4), inconsistent pending timestamps (L5), hard-negative-only ledger types and memos (L6) and family-encoding case IDs (L1). An allowlist plus opaque IDs can neutralise most of it but each fix must be tested, and the published baselines were not run under it (L11).
+1. **Class leakage in the snapshot.** Anomaly-named audit events (L3), tail-range and gap-bearing IDs (L2), missing `payment_created` events (L4), inconsistent pending timestamps (L5), hard-negative-only ledger types and memos (L6) and family-encoding case IDs (L1). An allowlist plus opaque IDs and references (L12) can neutralise most of it but each fix must be tested, and the published baselines were not run under it (L11).
 2. **Evidence contract not usable for F12, F14 and pending.** With leaking events removed, 100 percent of their `evidence_ids` become unobservable; absence evidence has no contract (section 8). Needs a new, declared and validated contract.
 3. **Small, skewed samples.** Under 30 holdout cases per family (test plus challenge), 12 to 48 vendor groups per family in train, vendor concentration up to 13 of 171 cases; test is already exposed through published results.
 4. **Label contamination.** Records shared between failure and no-failure cases (25 records, 3 legitimate split-payment cases contradicted) and the F12 fee-row ambiguity.

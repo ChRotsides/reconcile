@@ -52,7 +52,7 @@ Notice rule for Reconcile: if any upstream file is redistributed or any substant
 - Treat the checkout as data only. Upstream entry points (`python -m src.rules_sql.cli run`, `python -m src.classical_ml.cli run`, `python -m src.direct_llm.cli ...`, `generate_finrca_bench.py`) are not to be run outside an isolated environment. Read before running: `src/classical_ml/cli.py` lines 103-111 call `git` and `subprocess`, and line 214 writes into upstream `docs/`. `src/rules_sql/cli.py run` opens test labels itself after writing predictions (`README.md` line 166).
 - Operational inputs are `data/benchmark/full/*.csv` only. Label, truth, provenance and oracle artefacts are listed in `docs/data-audit.md` section 3.
 - `data/benchmark/rca_ground_truth.jsonl`, `benchmark_questions.jsonl`, `failure_manifest.csv`, `causal_edges.csv` at the top level of `data/benchmark/` contain all four splits including test and challenge. Do not open them; use the per-split files.
-- The test and challenge label files were counted (lines) and hashed only. See `docs/data-audit.md` section 11 for exactly what was read.
+- Exposure record: `docs/data-audit.md` section 11 is the single current record of what was read. In the audit itself the test and challenge label files were counted (lines) and hashed only; that was true when the audit ended and is no longer the whole story. The M0 baseline reproduction later opened test manifests and `test/rca_ground_truth.jsonl`, and its first run byte-copied the four top-level combined files (which contain all splits, challenge included) into a discarded container without opening them. Nothing under `challenge_test/` was opened. Read section 11.3 before relying on any statement about a split being unseen. Counting or listing `challenge_test/` is now forbidden (AGENTS.md section 7); the counts and hashes in section 5 below are from the audit and must not be refreshed.
 
 ## 5. Manifest
 
@@ -128,5 +128,5 @@ Not individually hashed: the remaining 762 tracked files (`src/`, `tests/`, `doc
 | train | 1192 | Development labels |
 | validation | 416 | Development labels |
 | test | 439 | Reproduction set only (upstream already published results on it) |
-| challenge_test | 203 | Candidate final holdout; labels not read |
+| challenge_test | 203 | Candidate final holdout; label content not read (counts and hashes known from the audit; see `docs/data-audit.md` section 11.3) |
 | Total | 2250 | Matches `dataset_statistics.md` line 9 |
