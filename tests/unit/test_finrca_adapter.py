@@ -729,3 +729,133 @@ def test_expected_indexes_exist(paths: dict[str, Path]) -> None:
             f"EXPLAIN QUERY PLAN SELECT * FROM bank_transactions WHERE {col} = 'x'",
         )
         assert "ix_bank_transactions_" + col in str(plan)
+
+
+def _mutate_line(p: dict[str, Path], table: str, column: str, value: str) -> None:
+    """Set `column` of the first data row of `<table>.csv` to `value`."""
+    f = p["src"] / f"{table}.csv"
+    lines = f.read_text().splitlines()
+    header = lines[0].split(",")
+    cells = lines[1].split(",")
+    cells[header.index(column)] = value
+    f.write_text("\n".join([lines[0], ",".join(cells), *lines[2:]]) + "\n")
+
+
+@pytest.mark.parametrize(
+    ("table", "column"),
+    [
+        ("vendors", "vendor_id"),
+        ("payments", "payment_id"),
+        ("payment_allocations", "payment_id"),
+        ("payment_allocations", "invoice_id"),
+        ("bank_transactions", "bank_transaction_id"),
+        ("gl_entries", "journal_line_id"),
+        ("invoice_lines", "invoice_line_id"),
+    ],
+)
+def test_blank_identity_is_rejected(
+    paths: dict[str, Path], table: str, column: str
+) -> None:
+    _mutate_line(paths, table, column, "")
+    with pytest.raises(ValueError, match=rf"{table}.csv line 2.*{column}.*empty"):
+        prepare(paths)
+    assert not paths["out"].exists()
+
+
+def test_repeated_blank_identity_is_not_deduplicated(paths: dict[str, Path]) -> None:
+    f = paths["src"] / "payments.csv"
+    lines = f.read_text().splitlines()
+    blank = lines[1].replace("PAY_0000001", "")
+    f.write_text("\n".join([*lines, blank, blank]) + "\n")
+    with pytest.raises(ValueError, match=r"payments.csv line 5.*payment_id.*empty"):
+        prepare(paths)
+
+
+@pytest.mark.parametrize(
+    ("table", "column"),
+    [
+        ("invoices", "vendor_id"),
+        ("purchase_orders", "vendor_id"),
+        ("po_lines", "po_id"),
+        ("invoice_lines", "invoice_id"),
+        ("payments", "vendor_id"),
+        ("approval_events", "invoice_id"),
+        ("vendor_change_log", "vendor_id"),
+    ],
+)
+def test_blank_mandatory_foreign_key_is_rejected(
+    paths: dict[str, Path], table: str, column: str
+) -> None:
+    _mutate_line(paths, table, column, "")
+    with pytest.raises(ValueError, match=rf"{table}.csv line 2.*{column}.*empty"):
+        prepare(paths)
+
+
+def test_only_observed_optional_foreign_keys_may_be_blank(
+    paths: dict[str, Path],
+) -> None:
+    # The fixture already has INV_2 without po_id and IL_2 without po_line_id.
+    prepare(paths)
+    assert rows(paths, "SELECT count(*) FROM invoices WHERE po_id IS NULL") == [(1,)]
+    assert rows(
+        paths, "SELECT count(*) FROM invoice_lines WHERE po_line_id IS NULL"
+    ) == [(1,)]
+
+
+@pytest.mark.parametrize(
+    ("table", "column"),
+    [
+        ("payments", "reference_number"),
+        ("payments", "bank_account_id"),
+        ("bank_transactions", "payment_reference"),
+        ("bank_transactions", "counterparty_token"),
+        ("vendors", "bank_account_token"),
+    ],
+)
+def test_unobserved_empty_references_fail_visibly(
+    paths: dict[str, Path], table: str, column: str
+) -> None:
+    _mutate_line(paths, table, column, "")
+    with pytest.raises(ValueError, match=rf"{table}.csv line 2.*{column}.*empty"):
+        prepare(paths)
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "bad"),
+    [
+        ("payments", "payment_date", "2026-02-30"),
+        ("payments", "payment_date", ""),
+        ("payments", "created_at", "garbage"),
+        ("payments", "created_at", "2026-05-"),
+        ("purchase_orders", "po_date", "01/02/2026"),
+        ("invoices", "due_date", "2026-13-01"),
+        ("invoices", "received_date", "not-a-date"),
+        ("payment_allocations", "allocation_date", "2026-02-30"),
+        ("bank_transactions", "transaction_date", "2026-02-30"),
+        ("bank_statements", "statement_date", "x"),
+        ("vendors", "updated_at", "2026-01-01T25:00:00"),
+        ("vendor_change_log", "changed_at", "yesterday"),
+        ("approval_events", "event_timestamp", "2026-03-03 99:00"),
+    ],
+)
+def test_invalid_dates_and_timestamps_are_rejected(
+    paths: dict[str, Path], table: str, column: str, bad: str
+) -> None:
+    _mutate_line(paths, table, column, bad)
+    with pytest.raises(ValueError, match=rf"{table}.csv line 2.*{column}"):
+        prepare(paths)
+    assert not paths["out"].exists()
+
+
+def test_invalid_date_on_a_cut_row_is_still_rejected(paths: dict[str, Path]) -> None:
+    f = paths["src"] / "gl_entries.csv"
+    f.write_text(f.read_text().replace("2026-07-01,2026-07", "2026-07-32,2026-07"))
+    with pytest.raises(ValueError, match=r"gl_entries.csv line 5.*posting_date"):
+        prepare(paths)
+
+
+def test_valid_dates_are_stored_as_they_were(paths: dict[str, Path]) -> None:
+    prepare(paths)
+    assert rows(paths, "SELECT DISTINCT payment_date, created_at FROM payments") == [
+        ("2026-05-01", "2026-05-01T08:00:00")
+    ]

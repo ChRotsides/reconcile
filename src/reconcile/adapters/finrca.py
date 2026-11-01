@@ -25,7 +25,7 @@ import secrets
 import shutil
 import sqlite3
 import tempfile
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -64,6 +64,14 @@ def _keep(*names: str) -> tuple[Col, ...]:
     return tuple(Col(n, "keep") for n in names)
 
 
+def _dates(*names: str) -> tuple[Col, ...]:
+    return tuple(Col(n, "date") for n in names)
+
+
+def _stamps(*names: str) -> tuple[Col, ...]:
+    return tuple(Col(n, "timestamp") for n in names)
+
+
 # Order matters twice: parents come before the children that look up their
 # currency, and the column order here is the snapshot column order.
 TABLES: dict[str, Table] = {
@@ -73,20 +81,15 @@ TABLES: dict[str, Table] = {
             Col("bank_account_token", "remap", "bank_acct_token"),
             *_keep("vendor_type", "country"),
             Col("currency", "currency"),
-            *_keep(
-                "payment_terms",
-                "default_payment_method",
-                "vendor_status",
-                "created_at",
-                "updated_at",
-            ),
+            *_keep("payment_terms", "default_payment_method", "vendor_status"),
+            *_stamps("created_at", "updated_at"),
         )
     ),
     "purchase_orders": Table(
         (
             Col("po_id", "remap", "po"),
             Col("vendor_id", "remap", "vendor"),
-            Col("po_date", "keep"),
+            Col("po_date", "date"),
             Col("currency", "currency"),
             Col("po_total", "money", "currency"),
             Col("status", "keep"),
@@ -106,8 +109,8 @@ TABLES: dict[str, Table] = {
         (
             Col("invoice_id", "remap", "invoice"),
             Col("vendor_id", "remap", "vendor"),
-            Col("po_id", "remap", "po"),
-            *_keep("invoice_date", "received_date", "due_date"),
+            Col("po_id", "remap_opt", "po"),
+            *_dates("invoice_date", "received_date", "due_date"),
             Col("currency", "currency"),
             Col("subtotal", "money", "currency"),
             Col("tax", "money", "currency"),
@@ -121,7 +124,7 @@ TABLES: dict[str, Table] = {
         (
             Col("invoice_id", "remap", "invoice"),
             Col("invoice_line_id", "remap", "invoice_line"),
-            Col("po_line_id", "remap", "po_line"),
+            Col("po_line_id", "remap_opt", "po_line"),
             Col("quantity", "keep"),
             Col("unit_price", "money_of", "invoice:invoice_id"),
             Col("line_amount", "money_of", "invoice:invoice_id"),
@@ -133,10 +136,12 @@ TABLES: dict[str, Table] = {
             Col("vendor_id", "remap", "vendor"),
             Col("bank_account_id", "remap", "bank_acct_token"),
             Col("reference_number", "remap", "payment_ref"),
-            *_keep("payment_date", "payment_method"),
+            *_dates("payment_date"),
+            *_keep("payment_method"),
             Col("payment_currency", "currency"),
             Col("payment_amount", "money", "payment_currency"),
-            *_keep("payment_status", "settlement_status", "created_at"),
+            *_keep("payment_status", "settlement_status"),
+            *_stamps("created_at"),
         ),
         registers_currency=("payment_id", "payment_currency", "payment"),
     ),
@@ -145,7 +150,7 @@ TABLES: dict[str, Table] = {
             Col("payment_id", "remap", "payment"),
             Col("invoice_id", "remap", "invoice"),
             Col("allocated_amount", "money_of", "payment:payment_id"),
-            Col("allocation_date", "keep"),
+            Col("allocation_date", "date"),
         )
     ),
     "bank_transactions": Table(
@@ -153,9 +158,9 @@ TABLES: dict[str, Table] = {
             Col("bank_transaction_id", "remap", "bank_txn"),
             Col("counterparty_token", "remap", "bank_acct_token"),
             Col("payment_reference", "remap", "payment_ref"),
-            *_keep(
-                "bank_account_id", "transaction_date", "posted_date", "transaction_type"
-            ),
+            *_keep("bank_account_id"),
+            *_dates("transaction_date", "posted_date"),
+            *_keep("transaction_type"),
             Col("amount", "money", "currency"),
             Col("currency", "currency"),
             *_keep("direction", "status"),
@@ -165,14 +170,16 @@ TABLES: dict[str, Table] = {
     "bank_statements": Table(
         (
             Col("bank_statement_id", "remap", "statement"),
-            *_keep("bank_account_id", "statement_date"),
+            *_keep("bank_account_id"),
+            *_dates("statement_date"),
         )
     ),
     "vendor_change_log": Table(
         (
             Col("change_id", "remap", "change"),
             Col("vendor_id", "remap", "vendor"),
-            *_keep("field_changed", "changed_at"),
+            *_keep("field_changed"),
+            *_stamps("changed_at"),
             Col("old_value", "bank_token_value"),
             Col("new_value", "bank_token_value"),
         )
@@ -181,14 +188,9 @@ TABLES: dict[str, Table] = {
         (
             Col("approval_event_id", "remap", "approval"),
             Col("invoice_id", "remap", "invoice"),
-            *_keep(
-                "approval_level",
-                "approver_role",
-                "action",
-                "event_timestamp",
-                "previous_status",
-                "new_status",
-            ),
+            *_keep("approval_level", "approver_role", "action"),
+            *_stamps("event_timestamp"),
+            *_keep("previous_status", "new_status"),
         )
     ),
     "gl_entries": Table(
@@ -196,9 +198,9 @@ TABLES: dict[str, Table] = {
             Col("journal_id", "remap", "journal"),
             Col("journal_line_id", "remap", "journal_line"),
             Col("source_transaction_id", "poly_remap"),
-            *_keep(
-                "transaction_type", "posting_date", "accounting_period", "gl_account"
-            ),
+            *_keep("transaction_type"),
+            *_dates("posting_date"),
+            *_keep("accounting_period", "gl_account"),
             Col("debit", "money", "currency"),
             Col("credit", "money", "currency"),
             Col("currency", "currency"),
@@ -355,6 +357,26 @@ def _read_rows(path: Path) -> tuple[list[str], list[tuple[int, dict[str, str]]]]
     return header, out
 
 
+def _check_row(name: str, table: Table, raw: dict[str, str], line: int) -> None:
+    """Reject, before any dedupe or cutoff, a row with an empty identity or
+    mandatory reference, or with a date or timestamp that does not parse."""
+    where = f"{name}.csv line {line}"
+    for c in KEYS[name]:
+        if not raw[c]:
+            raise ValueError(f"{where}: identity column {c} is empty")
+    for col in table.columns:
+        v = raw[col.name]
+        if col.kind == "remap" and not v:
+            raise ValueError(f"{where}: reference column {col.name} is empty")
+        try:
+            if col.kind == "date":
+                date.fromisoformat(v)
+            elif col.kind == "timestamp":
+                datetime.fromisoformat(v)
+        except ValueError:
+            raise ValueError(f"{where}: {col.name} is not an ISO {col.kind}") from None
+
+
 def _prepare(
     source_dir: Path, out_dir: Path, key: bytes, source_revision: str, cutoff: date
 ) -> dict[str, Any]:
@@ -380,6 +402,7 @@ def _prepare(
         seen: dict[tuple[str, ...], tuple[int, tuple[str, ...]]] = {}
         cut = dupes = 0
         for n, raw in source_rows:
+            _check_row(name, table, raw, n)
             if table.cutoff_column and (
                 date.fromisoformat(raw[table.cutoff_column]) > cutoff
             ):
@@ -459,7 +482,9 @@ def _transform(
         v = raw[col.name]
         if col.kind == "keep":
             out.append(v)
-        elif col.kind == "remap":
+        elif col.kind in ("date", "timestamp"):
+            out.append(v)  # validated by _check_row, stored as written
+        elif col.kind in ("remap", "remap_opt"):
             out.append(tokens.token(col.arg, v) if v else None)
         elif col.kind == "poly_remap":
             ns = next((n for p, n in _POLY_PREFIX.items() if v.startswith(p)), None)
