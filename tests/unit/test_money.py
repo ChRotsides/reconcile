@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Context, Decimal, Inexact, InvalidOperation, Rounded, localcontext
 
 import pytest
 
@@ -266,3 +266,20 @@ def test_add_and_subtract_at_digit_limit_are_exact() -> None:
     assert str(m - zero) == f"{_EDGE} USD"
     assert str(zero - m) == f"-{_EDGE} USD"
     assert m - m == zero
+
+
+def test_operations_ignore_the_ambient_decimal_context() -> None:
+    hostile = Context(
+        prec=1, Emin=0, Emax=3, traps=[Inexact, Rounded, InvalidOperation]
+    )
+    with localcontext(hostile):
+        a = Money.parse("12.34", "EUR")
+        b = Money(Decimal("0.66"), "EUR")
+        assert str(a) == "12.34 EUR"
+        assert Money.from_str("12.34 EUR") == a
+        assert str(a + b) == "13.00 EUR"
+        assert str(a - b) == "11.68 EUR"
+        assert str(-a) == "-12.34 EUR"
+        assert str(abs(-a)) == "12.34 EUR"
+        assert str(Money.parse("-0", "EUR")) == "0.00 EUR"
+        assert str(Money.parse("1234567", "JPY")) == "1234567 JPY"

@@ -74,7 +74,7 @@ class Money:
                 f"{self.currency}; refusing to round"
             )
         try:
-            quantized = self.amount.quantize(Decimal(1).scaleb(-scale), context=_EXACT)
+            quantized = self.amount.quantize(Decimal((0, (1,), -scale)), context=_EXACT)
         except InvalidOperation:
             raise ValueError(f"amount too large: {self.amount}") from None
         if len(quantized.as_tuple().digits) > MAX_DIGITS:
