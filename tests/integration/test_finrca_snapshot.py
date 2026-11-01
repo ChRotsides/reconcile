@@ -55,7 +55,13 @@ def test_real_tables_end_to_end(tmp_path: Path) -> None:
     assert set(first["tables"]) == set(TABLES)
     for name, t in first["tables"].items():
         assert t["rows_before"] == t["rows_after"] + t["dropped_by_cutoff"], name
-        print(name, t["rows_before"], t["rows_after"], t["dropped_by_cutoff"])
+        print(
+            name,
+            t["rows_before"],
+            t["rows_after"],
+            t["dropped_by_cutoff"],
+            t["exact_duplicates_removed"],
+        )
     # docs/data-audit.md section 6: 2 late bank rows and 10 late GL lines
     assert first["tables"]["bank_transactions"]["dropped_by_cutoff"] == 2
     assert first["tables"]["gl_entries"]["dropped_by_cutoff"] == 10

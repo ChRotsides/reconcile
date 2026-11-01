@@ -22,7 +22,9 @@ import hmac
 import json
 import os
 import secrets
+import shutil
 import sqlite3
+import tempfile
 from datetime import date
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -202,6 +204,24 @@ TABLES: dict[str, Table] = {
     ),
 }
 
+# Raw columns that identify a row. Two rows with the same identity are a
+# repeated import if their allowlisted values match, an ingestion error if not.
+# Distinct identities with equal values (a genuine double payment) both stay.
+KEYS: dict[str, tuple[str, ...]] = {
+    "vendors": ("vendor_id",),
+    "purchase_orders": ("po_id",),
+    "po_lines": ("po_line_id",),
+    "invoices": ("invoice_id",),
+    "invoice_lines": ("invoice_line_id",),
+    "payments": ("payment_id",),
+    "payment_allocations": ("payment_id", "invoice_id"),
+    "bank_transactions": ("bank_transaction_id",),
+    "bank_statements": ("bank_statement_id",),
+    "vendor_change_log": ("change_id",),
+    "approval_events": ("approval_event_id",),
+    "gl_entries": ("journal_line_id",),
+}
+
 # gl_entries.source_transaction_id points at different entities; the prefix of
 # the raw ID says which namespace the token belongs to. An unknown prefix fails.
 _POLY_PREFIX = {"INV_": "invoice", "PAY_": "payment", "BT_": "bank_txn"}
@@ -265,13 +285,54 @@ def prepare_finrca_snapshot(
     cutoff: date,
 ) -> dict[str, Any]:
     """Read `<source_dir>/<table>.csv` for each allowlisted table and write
-    `snapshot.sqlite` and `manifest.json` into `out_dir`. Returns the manifest.
+    `snapshot.sqlite` and `manifest.json` into the new directory `out_dir`
+    (which must not exist yet) and return the manifest.
     """
     if out_dir.resolve() in key_path.resolve().parents:
         raise ValueError("key file must be outside the prepared-inputs directory")
+    if out_dir.exists():
+        raise FileExistsError(f"{out_dir} already exists; prepare into a new directory")
     key = _load_key(key_path)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    # Build in a sibling directory and rename it into place in one step, so a
+    # reader sees either nothing or a complete snapshot and manifest pair.
+    work = Path(tempfile.mkdtemp(prefix=".prepare-", dir=out_dir.parent))
+    try:
+        manifest = _prepare(source_dir, work, key, source_revision, cutoff)
+        os.chmod(work, 0o755)
+        os.rename(work, out_dir)
+    except BaseException:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+    return manifest
 
+
+def _read_rows(path: Path) -> tuple[list[str], list[tuple[int, dict[str, str]]]]:
+    """Strictly parse a CSV: bad quoting, duplicate headers and rows with the
+    wrong number of fields raise instead of silently losing or padding rows."""
+    out: list[tuple[int, dict[str, str]]] = []
+    with path.open(newline="", encoding="utf-8") as f:
+        reader = csv.reader(f, strict=True)
+        header = next(reader, None)
+        if header is None:
+            raise ValueError(f"{path.name}: empty file")
+        if len(set(header)) != len(header):
+            raise ValueError(f"{path.name}: duplicate column names in header")
+        for row in reader:
+            if not row:  # blank line
+                continue
+            if len(row) != len(header):
+                raise ValueError(
+                    f"{path.name} line {reader.line_num}: {len(row)} fields, "
+                    f"expected {len(header)}"
+                )
+            out.append((reader.line_num, dict(zip(header, row, strict=True))))
+    return header, out
+
+
+def _prepare(
+    source_dir: Path, out_dir: Path, key: bytes, source_revision: str, cutoff: date
+) -> dict[str, Any]:
     tokens = _Tokens(key)
     stats = _MoneyStats()
     currency_of: dict[str, dict[str, str]] = {}
@@ -282,42 +343,54 @@ def prepare_finrca_snapshot(
     for name, table in TABLES.items():
         src = source_dir / f"{name}.csv"
         file_digests[name] = _sha256_file(src)
-        with src.open(newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            header = list(reader.fieldnames or [])
-            needed = [c.name for c in table.columns]
-            if table.cutoff_column:
-                needed.append(table.cutoff_column)
-            missing = sorted(set(needed) - set(header))
-            if missing:
-                raise ValueError(f"{name}.csv lacks allowlisted columns: {missing}")
-            rows: list[Row] = []
-            before = cut = 0
-            for n, raw in enumerate(reader, start=2):
-                before += 1
-                if table.cutoff_column and (
-                    date.fromisoformat(raw[table.cutoff_column]) > cutoff
-                ):
-                    cut += 1
-                    continue
-                try:
-                    rows.append(_transform(table, raw, tokens, stats, currency_of))
-                except (KeyError, ValueError) as e:
-                    raise ValueError(f"{name}.csv line {n}: {e!r}") from e
-                id_col, cur_col, ns = table.registers_currency
-                if ns:
-                    currency_of.setdefault(ns, {})[raw[id_col]] = raw[cur_col]
+        header, source_rows = _read_rows(src)
+        needed = [c.name for c in table.columns]
+        if table.cutoff_column:
+            needed.append(table.cutoff_column)
+        missing = sorted(set(needed) - set(header))
+        if missing:
+            raise ValueError(f"{name}.csv lacks allowlisted columns: {missing}")
+        rows: list[Row] = []
+        # key -> (line, allowlisted source values) of the first row seen
+        seen: dict[tuple[str, ...], tuple[int, tuple[str, ...]]] = {}
+        cut = dupes = 0
+        for n, raw in source_rows:
+            if table.cutoff_column and (
+                date.fromisoformat(raw[table.cutoff_column]) > cutoff
+            ):
+                cut += 1
+                continue
+            ident = tuple(raw[c] for c in KEYS[name])
+            content = tuple(raw[c] for c in needed)
+            if ident in seen:
+                first_line, first = seen[ident]
+                if first != content:
+                    raise ValueError(
+                        f"{name}.csv: conflicting rows for id {ident} "
+                        f"(lines {first_line} and {n})"
+                    )
+                dupes += 1  # exact repeat of an earlier row: a repeated import
+                continue
+            seen[ident] = (n, content)
+            try:
+                rows.append(_transform(table, raw, tokens, stats, currency_of))
+            except (KeyError, ValueError) as e:
+                raise ValueError(f"{name}.csv line {n}: {e!r}") from e
+            id_col, cur_col, ns = table.registers_currency
+            if ns:
+                currency_of.setdefault(ns, {})[raw[id_col]] = raw[cur_col]
         rows.sort(key=lambda r: tuple("" if v is None else v for v in r))
         snapshot_tables[name] = ([c.name for c in table.columns], rows)
         report[name] = {
-            "rows_before": before,
+            "rows_before": len(source_rows),
             "rows_after": len(rows),
             "dropped_by_cutoff": cut,
+            "exact_duplicates_removed": dupes,
             "columns_kept": [c.name for c in table.columns],
             "source_columns_dropped": sorted(set(header) - set(needed)),
         }
 
-    content, file_sha = write_snapshot(out_dir / SNAPSHOT_FILE, snapshot_tables)
+    content_sha, file_sha = write_snapshot(out_dir / SNAPSHOT_FILE, snapshot_tables)
     manifest: dict[str, Any] = {
         "adapter_version": ADAPTER_VERSION,
         "source_revision": source_revision,
@@ -335,12 +408,11 @@ def prepare_finrca_snapshot(
         },
         "snapshot": {
             "file": SNAPSHOT_FILE,
-            "content_sha256": content,
+            "content_sha256": content_sha,
             "file_sha256": file_sha,
         },
     }
     manifest_path = out_dir / MANIFEST_FILE
-    manifest_path.unlink(missing_ok=True)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     os.chmod(manifest_path, 0o444)
     return manifest

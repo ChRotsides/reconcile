@@ -1,6 +1,7 @@
 """FinRCA input transform on tiny invented fixtures (never upstream rows, D030)."""
 
 import csv
+import shutil
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -263,24 +264,42 @@ def test_tokens_carry_no_order_length_or_format(tmp_path: Path) -> None:
     out = tmp_path / "out"
     prepare_finrca_snapshot(src, out, key_path=key, source_revision="r", cutoff=CUTOFF)
     con = sqlite3.connect(out / "snapshot.sqlite")
-    # rowid order is the stored (sorted) order; recover each token's raw counter
-    # by joining on the amount (i.50), which the fixture ties to the counter.
-    pairs = con.execute(
-        "SELECT CAST(payment_amount AS REAL), payment_id, reference_number "
-        "FROM payments ORDER BY payment_amount"
+    # The fixture ties the amount (i.50) to the raw counter i, so sorting by
+    # amount recovers raw order. Stored order is read back by rowid.
+    raw_order = con.execute(
+        "SELECT payment_id, reference_number FROM payments "
+        "ORDER BY CAST(payment_amount AS REAL)"
+    ).fetchall()
+    stored = con.execute(
+        "SELECT payment_id, reference_number FROM payments ORDER BY rowid"
     ).fetchall()
     con.close()
-    by_counter = sorted(pairs)
-    for column in (1, 2):
-        toks = [p[column] for p in by_counter]
+    for column in (0, 1):
+        toks = [p[column] for p in raw_order]
         assert {len(t) for t in toks} == {32}
         assert all(set(t) <= set("0123456789abcdef") for t in toks)
         assert len({t[:4] for t in toks}) > 100  # no shared prefix
         ups = sum(a < b for a, b in zip(toks, toks[1:], strict=False))
         assert 0.40 < ups / (len(toks) - 1) < 0.60  # no ascending trend
-    # stored order follows the tokens, not the input order
-    stored = [p[1] for p in sorted(pairs, key=lambda p: p[1])]
-    assert stored != [p[1] for p in by_counter]
+    # rows are stored sorted by token, which is unrelated to the input order
+    assert [p[0] for p in stored] == sorted(p[0] for p in stored)
+    assert stored != raw_order
+
+
+def reverse_rows(src: Path) -> None:
+    for f in src.glob("*.csv"):
+        if f.stem in ("audit_log", "employees"):
+            continue
+        header, *body = f.read_text().splitlines()
+        f.write_text("\n".join([header, *reversed(body)]) + "\n")
+
+
+def test_input_row_order_does_not_change_the_snapshot(paths: dict[str, Path]) -> None:
+    a = prepare(paths, out="out")
+    reverse_rows(paths["src"])
+    paths["out2"] = paths["tmp"] / "prepared2"
+    b = prepare(paths, out="out2")
+    assert a["snapshot"]["content_sha256"] == b["snapshot"]["content_sha256"]
 
 
 def test_different_key_gives_different_tokens(paths: dict[str, Path]) -> None:
@@ -288,6 +307,7 @@ def test_different_key_gives_different_tokens(paths: dict[str, Path]) -> None:
     first = rows(paths, "SELECT payment_id FROM payments ORDER BY payment_id")
     other = paths["tmp"] / "private" / "key2"
     create_key_file(other)
+    shutil.rmtree(paths["out"])
     prepare(paths, out="out", key_path=other)
     assert rows(paths, "SELECT payment_id FROM payments ORDER BY payment_id") != first
 
@@ -306,6 +326,7 @@ def test_cutoff_excludes_late_bank_and_gl_rows(paths: dict[str, Path]) -> None:
     ]
     assert rows(paths, "SELECT max(posting_date) FROM gl_entries") == [("2026-05-01",)]
     # the cutoff is a parameter
+    shutil.rmtree(paths["out"])
     later = prepare(paths, out="out", cutoff=date(2026, 7, 1))
     assert later["tables"]["bank_transactions"]["dropped_by_cutoff"] == 0
     assert later["tables"]["gl_entries"]["rows_after"] == 4
@@ -378,6 +399,7 @@ def test_digest_is_reproducible_and_byte_identical(paths: dict[str, Path]) -> No
     # a changed source changes the digest
     f = paths["src"] / "payments.csv"
     f.write_text(f.read_text().replace("1.50", "1.51", 1))
+    shutil.rmtree(paths["out2"])
     c = prepare(paths, out="out2")
     assert c["snapshot"]["content_sha256"] != a["snapshot"]["content_sha256"]
 
@@ -393,8 +415,8 @@ def test_key_is_not_in_the_snapshot_directory(paths: dict[str, Path]) -> None:
         "snapshot.sqlite",
         "manifest.json",
     }
+    shutil.rmtree(paths["out"])
     inside = paths["out"] / "key"
-    create_key_file(inside)
     with pytest.raises(ValueError, match="outside"):
         prepare(paths, key_path=inside)
 
@@ -415,3 +437,101 @@ def test_key_file_is_not_overwritten_and_is_private(tmp_path: Path) -> None:
     assert k.stat().st_mode & 0o077 == 0
     with pytest.raises(FileExistsError):
         create_key_file(k)
+
+
+def test_malformed_csv_fails_instead_of_losing_rows(paths: dict[str, Path]) -> None:
+    # An unterminated quote used to swallow every later row without an error.
+    (paths["src"] / "vendors.csv").write_text(
+        'id,amount,source_system\nP1,1.00,"ERP\nP2,2.00,ERP\nP3,3.00,ERP\n'
+    )
+    with pytest.raises(csv.Error):
+        prepare(paths)
+    assert not paths["out"].exists()
+
+
+def test_duplicate_header_and_wrong_field_count_fail(paths: dict[str, Path]) -> None:
+    f = paths["src"] / "payments.csv"
+    original = f.read_text()
+    f.write_text(original.replace("payment_id,vendor_id", "payment_id,payment_id", 1))
+    with pytest.raises(ValueError, match="duplicate column"):
+        prepare(paths)
+    lines = original.splitlines()
+    for bad in (lines[1] + ",extra", lines[1].rsplit(",", 1)[0]):
+        f.write_text("\n".join([lines[0], bad, *lines[2:]]) + "\n")
+        with pytest.raises(ValueError, match="payments.csv line 2: .* fields"):
+            prepare(paths)
+
+
+def test_exact_duplicate_row_is_a_repeated_import(paths: dict[str, Path]) -> None:
+    f = paths["src"] / "payments.csv"
+    lines = f.read_text().splitlines()
+    f.write_text("\n".join([*lines, lines[1]]) + "\n")
+    m = prepare(paths)
+    assert m["tables"]["payments"]["exact_duplicates_removed"] == 1
+    assert m["tables"]["payments"]["rows_before"] == 4
+    assert m["tables"]["payments"]["rows_after"] == 3
+    assert rows(paths, "SELECT count(*) FROM payments") == [(3,)]
+
+
+def test_same_id_with_different_content_is_an_error(paths: dict[str, Path]) -> None:
+    f = paths["src"] / "payments.csv"
+    lines = f.read_text().splitlines()
+    f.write_text("\n".join([*lines, lines[1].replace("1.50", "9.99")]) + "\n")
+    with pytest.raises(ValueError, match=r"payments.csv.*PAY_0000001.*lines 2 and 5"):
+        prepare(paths)
+    assert not paths["out"].exists()
+
+
+def test_distinct_ids_with_identical_values_both_survive(
+    paths: dict[str, Path],
+) -> None:
+    f = paths["src"] / "payments.csv"
+    lines = f.read_text().splitlines()
+    twin = (
+        lines[1]
+        .replace("PAY_0000001", "PAY_0000777")
+        .replace("PMTREF-0000000043", "PMTREF-0000000043")
+    )  # same amount, vendor, date and reference, different payment ID
+    f.write_text("\n".join([*lines, twin]) + "\n")
+    m = prepare(paths)
+    assert m["tables"]["payments"]["exact_duplicates_removed"] == 0
+    assert rows(paths, "SELECT count(*) FROM payments") == [(4,)]
+    assert rows(
+        paths,
+        "SELECT count(DISTINCT reference_number), count(DISTINCT payment_id) "
+        "FROM payments",
+    ) == [(3, 4)]
+
+
+def test_existing_output_directory_is_refused(paths: dict[str, Path]) -> None:
+    paths["out"].mkdir()
+    (paths["out"] / "stray.txt").write_text("x")
+    with pytest.raises(FileExistsError):
+        prepare(paths)
+    assert [f.name for f in paths["out"].iterdir()] == ["stray.txt"]
+    with pytest.raises(FileExistsError):
+        prepare_finrca_snapshot(
+            paths["src"],
+            paths["src"],
+            key_path=paths["key"],
+            source_revision="r",
+            cutoff=CUTOFF,
+        )
+
+
+def test_failure_mid_prepare_leaves_nothing_behind(paths: dict[str, Path]) -> None:
+    f = paths["src"] / "gl_entries.csv"  # processed last, after other tables
+    f.write_text(f.read_text().replace("1.50,0,EUR", "1.505,0,EUR", 1))
+    with pytest.raises(ValueError, match="gl_entries.csv"):
+        prepare(paths)
+    assert not paths["out"].exists()
+    assert not [p for p in paths["tmp"].iterdir() if p.name.startswith(".prepare-")]
+
+
+def test_success_publishes_both_files_together(paths: dict[str, Path]) -> None:
+    prepare(paths)
+    assert {f.name for f in paths["out"].iterdir()} == {
+        "snapshot.sqlite",
+        "manifest.json",
+    }
+    assert not [p for p in paths["tmp"].iterdir() if p.name.startswith(".prepare-")]
