@@ -155,6 +155,37 @@ Currency. Every variant above compares amounts only within one currency; a payme
 
 Notes. The `payment_reversal`, `bank_fee` and `fx_settlement` journal types are class-correlated ledger structure kept by the section 3.1 allowlist (L6, open residual). The contract uses `payment_reversal` and `bank_fee` as accounting records; it does not use `fx_settlement` or the `799100-FX-SETTLEMENT` account at all. The due-date contract does not check the approval timeline that upstream lists as required (`approval_events`): approval order violates upstream's own invariant checks in 90 cases (audit section 10, item 9). Intent ("scheduled") is not recorded for split, batch and due-date cases; legitimacy rests on arithmetic only.
 
+### 5.1 No exception (answered)
+
+Added after the M1 gate (user decision, 2026-11-01; supersedes the provisional `out_of_scope` of A041). A **payment-primary** request whose records show no exception is answered with category `no_exception`. It is not a clean bill: it says that none of the checks in this contract fires, nothing more. It needs all of:
+
+- the payment, `completed` and `settled`, with a unique reference (A2 count 1) and exactly one posted principal debit in the payment's currency;
+- `|payment_amount - debit| <= quantum` (calculation `delta`);
+- `bdays(payment_date, posted_date) <= clearing limit` of the method (a day count, section 5.3), and the debit not dated before the payment;
+- at least one allocation of the payment, and for every allocated invoice the open balance `invoice_total - sum(effective allocations to it)` is not below `-quantum` (calculation `invoice_open_balance`, citing the invoice and every effective allocation to it). A partial payment leaves a positive balance and is a no exception; an invoice over-allocated by all effective payments is not (abstain `invoice_over_allocated`);
+- equal-looking payments (same vendor, amount, date, currency) are cited as `equal_twin` records and stay distinct payments; they are never merged or counted as a duplicate (principle 4).
+
+Named variants take precedence when they apply to the same records: two or more invoices allocated is the batch variant; method `check` is check clearing; method `ACH` whose clearing interval contains a Saturday or Sunday is weekend clearing. Every other matched payment within its limit is `no_exception`. A matched debit posted after the limit abstains (`clearing_lag_exceeds_limit`): it is not a failure class and not clean. This split between the named variants and `no_exception` is a design choice, not a contract finding: the original table tests only `lag <= limit`, which would also describe every ordinary ACH payment as weekend clearing. Not gradable (abstain): no allocation or invoice incomplete (`required_records_missing`), several debits or a shared reference (`ambiguous_reference`), cross-currency (`unsupported_fx`).
+
+### 5.2 Known contract gaps: detected, abstain
+
+The shapes below would be answered wrongly if only sections 4 and 5 were applied. The investigator detects them and abstains with its own reason until practitioner input refines them (user decision, 2026-11-01). Cited evidence includes the payments and the bank row involved and the arithmetic that triggered the detection.
+
+| Reason | Detection (after A1 = 0, A2 = 1, records present, A3 = 0) | Wrong answer avoided |
+|---|---|---|
+| `bank_batch_grouping_unmodelled` | an unreferenced debit of the same currency and counterparty, inside the clearing window (P8), equals the sum of this payment and one or more other effective payments of that counterparty that have no bank row | F12 for each member |
+| `reference_unmatched_nearby_debit` | such a debit exists but equals no sum; the difference to the payment amount is reported | F12 where a netted or truncated settlement exists |
+| `reference_unmatched_candidate_bank_row` | A3 is not empty (equal amount, currency, counterparty; section 4.2) | F12 |
+| `reversal_followed_by_repayment` | the reversal's invoice is `paid` and another effective payment is allocated to it | calling the reversal confirmed, or a duplicate |
+| `reversal_invoice_still_paid` | the reversal's invoice is `paid` with no other effective allocation | confirming the reversal |
+| `batch_search_limit_exceeded` | more than 12 unbanked payments to check for a batch | a silent partial search |
+
+F14 and net fee: a `bank_fee` journal sourced to the debit that is unbalanced or mixed-currency abstains (`fee_journal_invalid`); a balanced journal that does not equal the shortfall within one quantum (partial or oversized) abstains (`fee_journal_does_not_match_difference`). Only a zero journal count (G1 search) gives F14, and only a journal within the quantum gives net-fee accounting. A bank amount above the payment abstains (`bank_amount_above_payment`). A bank row that is not a posted debit abstains (`bank_row_not_a_posted_debit`).
+
+### 5.3 Business-day counts in the packet
+
+`Calculation` is money-only. A business-day age or lag is a `DayCount` in the packet: it cites the start (an evidence record's timestamp field) and the end (another record's timestamp, or the request cutoff), carries the declared limit and the policy name it came from (`clearing_limit_ach`, ...), and the packet recomputes the count from the cited dates (Monday to Friday in the half-open interval, section 3). The comparison with the limit is a finding that cites the count. Chosen over a typed finding with only the dates cited, because the number can then be verified from the packet alone.
+
 ### FX and out-of-scope behaviour
 
 FX legitimate cases cannot be verified: the conversion rate exists only in the excluded `audit_log`, the FX journal posts a 1.00 placeholder, and there is no rate table (audit section 7; spec lines 1047 and 1114). `PLAN.md` section 4 requires abstention.
@@ -180,6 +211,8 @@ Any `answered` diagnosis, including "legitimate" or "F14", on such a pair is a w
 | P5 | Cutoff | 2026-06-30, snapshot-only | `docs/data-audit.md` section 6; `config.yaml:6` |
 | P6 | Window for the unreferenced-candidate search (A3) | none (any date up to the cutoff) | Chosen to avoid a tunable window; amount, currency and counterparty must all be equal. Declared, not exercised (zero hits) |
 | P7 | Snapshot completeness | every allowlisted table is complete through the cutoff | Spec lines 19 and 1046; an assumption, not verified |
+| P8 | Window for a "nearby" unreferenced debit (section 5.2) | posted on or after the payment date and within the method's clearing limit in business days | Reuses P1; no new number. A3 itself keeps no window (P6) |
+| P9 | Policy version | `evidence-contract-0.1`; every packet records the version applied, the four clearing limits and the tolerance | `src/reconcile/diagnosis/policy.py`; values are P1 to P4 |
 
 No parameter was fitted to labels. The values come from the upstream specification fixed before test evaluation, or are the strictest available choice (equality at the quantum, no window).
 
