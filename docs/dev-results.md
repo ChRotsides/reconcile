@@ -425,3 +425,21 @@ Fresh inference run (`artifacts/dev-runs/m2-dev-6/`, `run-manifest.json`: policy
 
 Reproduce: `uv run python evaluation/dev_run.py run m2-dev-6` (new tag).
 
+## 14. Run 7 (`m2-dev-7`, 2026-11-01): M2 results of record
+
+Fresh inference run (`artifacts/dev-runs/m2-dev-7/`, policy `evidence-contract-0.5`) after the last two fixes: the investigator now keys journal evidence by attribution (`journal:<journal_id>:<source>:<gl_type>`, item values `amount` = payment-attributable total, `journal_total`, `currency`, `source`, `gl_type`) and fails on conflicting evidence, and the evaluator binds every calculation operand to the snapshot (section 12, review round 3). **These figures replace run 6 (section 13) as the M2 results of record**; earlier sections stay as history.
+
+**Comparison with run 6, checked in the two `metrics.json` files and `report.txt`.** Every metric is identical in all three groups (all splits, train, validation): cohort counts, coverage, exact-category precision, evidence-complete, correct and complete, search reproduction, false alarms, the safety metrics, the per-label table, the confusion matrix and the out-of-scope tables. The only differences are the record tokens printed for the six review candidates (the run uses a new key, so tokens differ); the cases are the same. The conflict-evidence check never fired: dispositions over the 1,608 requests are answered 587, abstained 301, out_of_scope 720, **failed 0**.
+
+| Metric | All cases (headline) | Sensitivity: without the 5 verified label conflicts |
+|---|---|---|
+| Cohort cases (train / validation / both) | 380 / 123 / 503 | 376 / 122 / 498 |
+| Answered | 375/380 = 0.987, 122/123 = 0.992, 497/503 = 0.988 | 375/376 = 0.997, 122/122 = 1.000, 497/498 = 0.998 |
+| Exact-category precision | 362/375 = 0.965, 119/122 = 0.975, 481/497 = 0.968 | same |
+| Evidence-complete among answered | 375/375, 122/122, 497/497 | same |
+| Correct and complete / cases | 362/380 = 0.953, 119/123 = 0.967, 481/503 = 0.956 | 362/376 = 0.963, 119/122 = 0.975, 481/498 = 0.966 |
+| Search counts reproduce | 375/375, 122/122, 497/497 | same |
+| False alarms, cohort legitimate | 0/210, 0/71, 0/281 | 0/206, 0/70, 0/276 |
+
+False alarms on all legitimate cases 0/526; all-clear on out-of-scope failures **0/859** (train 0/634, validation 0/225); FX 30/30 correct abstentions. The 16 wrong answers are wrong legitimate variants (13 train, 3 validation), as in runs 5 and 6. Conflict and review candidates are as in section 13: 5 verified, 14 unverified conflict candidates outside the headline cohort, 6 review candidates, none excluded.
+
