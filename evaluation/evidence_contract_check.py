@@ -447,9 +447,9 @@ def check_due_date(s: Snapshot, inv_id: str) -> Result:
         hit = hit or p["payment_date"] == inv["due_date"]
     if not hit:
         return bad("no_payment_on_due_date", ids)
-    if net - money(inv["invoice_total"]) > quantum(inv["currency"]):
-        return bad("overpayment", ids)
-    return ok("paid_on_due_date_no_overpayment", ids)
+    if abs(net - money(inv["invoice_total"])) > quantum(inv["currency"]):
+        return bad("allocation_differs_from_total", ids)
+    return ok("paid_on_due_date_fully_allocated", ids)
 
 
 def check_split(s: Snapshot, inv_id: str) -> Result:

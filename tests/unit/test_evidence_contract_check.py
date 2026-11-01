@@ -32,7 +32,7 @@ CHECKS: dict[str, tuple[str, str, str, str]] = {
     "accounted_bank_fee": ("bank_fee", "BT_2", G, "fee_journal_equals_fee_row"),
     "batch_payment": ("batch", "PAY_1", G, "allocations_equal_payment_and_bank"),
     "check_clearing": ("check", "PAY_1", G, "within_clearing_window"),
-    "due_date_payment": ("due_date", "INV_1", G, "paid_on_due_date_no_overpayment"),
+    "due_date_payment": ("due_date", "INV_1", G, "paid_on_due_date_fully_allocated"),
     "f06_double_payment": ("f06", "INV_1", G, "committed_overpayment"),
     "f06_second_debit_post_cutoff": (
         "f06",
