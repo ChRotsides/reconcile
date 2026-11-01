@@ -253,3 +253,45 @@ Also changed outside the cohort: the 2 AP-side legitimate answers that were wron
 **Remaining all-clears on out-of-scope failures: none.** The guard is a necessary check for those two families, not a diagnosis: a failure of a kind the guard cannot see (for example a wrong accounting period, F10, or a vendor change, F11) would still be answered legitimate if its other records were clean. In this run none of F10, F11 or the other families was answered at all (they are out of scope or abstain for other reasons), so the measured risk is 0/859; that is a development-set measurement on this benchmark only.
 
 Reproduce: `uv run python evaluation/dev_run.py run m2-dev-4`.
+
+### Run 3, label conflicts (re-evaluation of `m2-dev-4`, 2026-11-01)
+
+`evaluate m2-dev-4` was re-run with a second evaluator-side exclusion (`label_conflicts` in `evaluation/dev_run.py`; packets unchanged, no re-run). **Rule.** A cohort case labelled `NO_FAILURE` is a label conflict when a payment or invoice it names is also named or reached by a case of a checked failure family (`CHECKED_FAMILIES`). A case names the payments and invoices in its primary entity, affected entities and evidence IDs; its records are those plus, for each payment, the invoices it is allocated to and, for each invoice, its allocating payments (snapshot allocations, joined by token with the run key). Two cases share a record when one names it and the other names or reaches it; a record both only reach through allocations does not count. Labels of train and validation are pooled. The scored cohort drops the flagged cases, and every cohort figure is shown both ways.
+
+**Why only checked families.** A shared failure excludes a case only if the investigator is meant to see that defect; otherwise the exclusion would hide a correct answer. The tuple comes from the "Checked" list of `SCOPE_LIMITATION` (`src/reconcile/diagnosis/policy.py`):
+- F05 payment without a valid invoice: allocations (the allocation requirement).
+- F06 invoice paid twice: duplicates and invoice totals.
+- F08 approval workflow failure: completed final approval before payment.
+- F09 GL posting mismatch: payment journal equal to the payment.
+- F12 ERP payment missing from bank: settlement and bank match, cutoff.
+- F14 bank/ERP amount mismatch: amounts and bank match.
+- F15 incorrect payment-bank match: bank match of the payment.
+- Left out: F10 (accounting period) is named "not checked" in the same statement; F11 (vendor master data) likewise; F01 to F04, F07 and F13 are AP-side or bank-only defects with no check in the list.
+
+An earlier version of the rule used every failure family and flagged 9 cohort cases: these 5 plus four split payments (RCA_001599, RCA_001663, RCA_002079, RCA_002191) that share a leg with an F10 case. They were answered correctly and F10 is not checked, so excluding them would hide correct answers; they are no longer flagged.
+
+**Flagged in the gradable cohort: 5** (4 train, 1 validation). Each checked in the upstream records.
+
+| Case | Variant | Run 3 outcome | Shared record, failure case | My check |
+|---|---|---|---|---|
+| RCA_001679 | split payment | abstained `payment_journal_amount_differs` | PAY_0420351, F09 RCA_000857 | leg is the F09 case's primary payment |
+| RCA_001759 | split payment | abstained `payment_journal_amount_differs` | PAY_0424667, F09 RCA_000874 | same |
+| RCA_002175 | split payment | abstained `payment_journal_amount_differs` | PAY_0420796, F09 RCA_000889 | same |
+| RCA_002212 | due-date payment | abstained `payment_journal_amount_differs` | invoice INV_0426722 allocated to PAY_0424634, F09 RCA_000832 (journal 4961.50 on a 4784.47 payment) | shares the invoice, not the case's own payment PAY_0424633 |
+| RCA_002182 | net-fee accounting | abstained `invoice_approval_not_completed` | invoice INV_0424017, F08 RCA_000722 | its approval event was removed; the F08 case's records allocate PAY_0420261 |
+
+No other cohort case is flagged. Flagged but outside the scored cohort (14, reported separately, not regrouped): contradicted RCA_002127 (F15 RCA_001410, RCA_001464); FX RCA_002218 (F06 RCA_000568); and 12 AP-side legitimate cases RCA_001547, RCA_001676, RCA_001715, RCA_001773, RCA_001804, RCA_001996, RCA_002027, RCA_002091, RCA_002092, RCA_002125, RCA_002236, RCA_002237 (RCA_002091 and RCA_001996 are the two AP-side guard abstentions).
+
+**Cohort metrics, both views (run 3).** Train / validation / both.
+
+| Metric | Without the 5 (scored) | With the 5 |
+|---|---|---|
+| Cohort cases | 376 / 122 / 498 | 380 / 123 / 503 |
+| Answered | 375 / 122 / 497 = 0.998 | 375 / 122 / 497 = 0.988 |
+| Abstained | 1 / 0 / 1 | 5 / 1 / 6 |
+| Exact-category precision | 362/375, 119/122, 481/497 = 0.968 | same |
+| Correct and complete / cases | 362/376, 119/122, 481/498 = 0.966 | 362/380, 119/123, 481/503 = 0.956 |
+| Evidence-complete among answered | 100% | 100% |
+| False alarms, cohort legitimate | 0/206, 0/70, 0/276 | 0/210, 0/71, 0/281 |
+
+The "with" view reproduces the run 3 table above exactly. Without the 5, the only cohort abstention left is the FX case RCA_000568. All five conflicts are cases the guard abstained on, so the exclusion removes every cohort regression of run 3 against run 2 (answered 502 to 497 is the five abstentions); this does not show the guard is right on genuine legitimate cases, since none in the cohort tests that. The out-of-scope all-clear risk is unchanged (0/859).

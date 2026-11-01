@@ -37,7 +37,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from reconcile.adapters.finrca import create_key_file, prepare_finrca_snapshot
+from reconcile.adapters.finrca import _Tokens, create_key_file, prepare_finrca_snapshot
 from reconcile.adapters.finrca_requests import prepare_finrca_requests
 from reconcile.diagnosis.policy import POLICY_VERSION
 
@@ -618,12 +618,83 @@ def group_of(failure_type: str, variant: str, case_id: str) -> str:
     return "fx" if variant == "legitimate_fx_settlement" else "cohort"
 
 
+# Failure families whose defect the investigator checks, derived from the
+# "Checked" list of SCOPE_LIMITATION (src/reconcile/diagnosis/policy.py):
+# F05 allocation to an invoice, F06 duplicates and invoice totals, F08 approval
+# completion, F09 payment journal equal to the payment, F12 and F14 settlement,
+# bank match and amounts, F15 payment-bank match. F10 (accounting period) is
+# listed there as not checked, so a shared F10 record hides no wrong answer.
+CHECKED_FAMILIES = (
+    "F05_PAYMENT_WITHOUT_VALID_INVOICE",
+    "F06_INVOICE_PAID_TWICE",
+    "F08_APPROVAL_WORKFLOW_FAILURE",
+    "F09_GL_POSTING_MISMATCH",
+    "F12_ERP_PAYMENT_MISSING_FROM_BANK",
+    "F14_BANK_ERP_AMOUNT_MISMATCH",
+    "F15_INCORRECT_PAYMENT_BANK_MATCH",
+)
+
+
+def label_conflicts(labels: dict[str, dict], snap: Snap, key: Path) -> dict[str, list]:
+    """Legitimate-labelled case -> cases of a checked failure family sharing a
+    payment or invoice with it. A case names the payments and invoices of its primary
+    entity, affected entities and evidence IDs; its records are those plus, for
+    each payment, the invoices it is allocated to and, for each invoice, its
+    allocating payments (snapshot allocations, by token). Two cases share a
+    record when one names it and the other names or reaches it, so a record
+    that both only reach through allocations does not count. Such a legitimate
+    case cannot be right on both labels: the same record is called clean and
+    injected-failed."""
+    tokens = _Tokens(bytes.fromhex(key.read_text().strip()))
+    raw_of: dict[str, str] = {}
+
+    def tok(raw: str) -> str:
+        t = tokens.token("payment" if raw.startswith("PAY_") else "invoice", raw)
+        raw_of[t] = raw
+        return t
+
+    def named(lab: dict) -> set[str]:
+        ids = {lab["primary_entity"]["id"], *lab["evidence_ids"]}
+        ids |= {e["id"] for e in lab["affected_entities"]}
+        return {tok(i) for i in ids if i.startswith(("PAY_", "INV_"))}
+
+    def records(named_set: set[str]) -> set[str]:
+        out = set(named_set)
+        for t in named_set:
+            for a in snap.q(
+                "SELECT payment_id, invoice_id FROM payment_allocations"
+                " WHERE payment_id = ? OR invoice_id = ?",
+                t,
+                t,
+            ):
+                out |= {a["payment_id"], a["invoice_id"]}
+        return out
+
+    names = {c: named(lab) for c, lab in labels.items()}
+    recs = {c: records(n) for c, n in names.items()}
+    found: dict[str, list] = {}
+    for c, lab in labels.items():
+        if lab["failure_type"] != "NO_FAILURE":
+            continue
+        for d, dl in sorted(labels.items()):
+            shared = (names[c] & recs[d]) | (recs[c] & names[d])
+            if dl["failure_type"] in CHECKED_FAMILIES and shared:
+                found.setdefault(c, []).append(
+                    {
+                        "failure_case": d,
+                        "failure_type": dl["failure_type"],
+                        "shared": sorted(raw_of.get(t, t) for t in shared),
+                    }
+                )
+    return found
+
+
 def classify(row: dict) -> None:
     """Fill row['outcome'] (and 'kind' for wrong ones)."""
     disp, cat, grp = row["disposition"], row["category"], row["group"]
     label_fail = row["failure_type"] != "NO_FAILURE"
     expected = row["expected_category"]
-    if grp in ("cohort",):
+    if grp in ("cohort", "label_conflict"):
         if disp != "answered":
             row["outcome"] = disp  # abstained | out_of_scope | failed
         elif cat == expected:
@@ -719,7 +790,9 @@ def fx_abstention_cites(packet: dict) -> bool:
     )
 
 
-def load_split(root: Path, split: str, labels_by_case: dict, snap: Snap) -> list[dict]:
+def load_split(
+    root: Path, split: str, labels_by_case: dict, snap: Snap, conflicts: dict
+) -> list[dict]:
     links = {
         r["request_id"]: r["case_id"]
         for r in read_jsonl(root / "evaluator" / split / "links.jsonl")
@@ -740,6 +813,8 @@ def load_split(root: Path, split: str, labels_by_case: dict, snap: Snap) -> list
         d = p["diagnosis"]
         ent = requests[rid]["primary_entity"]
         group = group_of(lab["failure_type"], lab["scenario_variant"], case_id)
+        if group == "cohort" and case_id in conflicts:
+            group = "label_conflict"
         row = {
             "split": split,
             "case_id": case_id,
@@ -749,6 +824,7 @@ def load_split(root: Path, split: str, labels_by_case: dict, snap: Snap) -> list
             "disposition": d["disposition"],
             "category": d["category"],
             "reason": d["reason"],
+            "label_conflict_with": conflicts.get(case_id, []),
             "entity_table": ent["table"],
             "expected_category": FAMILY_KEYS.get(lab["failure_type"])
             or VARIANT_CATEGORY.get(lab["scenario_variant"]),
@@ -775,9 +851,10 @@ def frac(n: int, d: int) -> dict:
     return {"n": n, "d": d, "rate": (round(n / d, 4) if d else None)}
 
 
-def cohort_metrics(rows: list[dict]) -> dict:
-    """Metrics over the gradable in-scope cohort (group == cohort)."""
-    c = [r for r in rows if r["group"] == "cohort"]
+def cohort_metrics(rows: list[dict], groups: tuple[str, ...] = ("cohort",)) -> dict:
+    """Metrics over the gradable in-scope cohort (default: without the label
+    conflicts; pass ("cohort", "label_conflict") for the view with them)."""
+    c = [r for r in rows if r["group"] in groups]
     answered = [r for r in c if r["disposition"] == "answered"]
     correct = [r for r in answered if r["outcome"] == "correct"]
     complete = [r for r in correct if r.get("complete")]
@@ -885,8 +962,39 @@ def all_metrics(rows: list[dict]) -> dict:
     return {
         "dispositions_all": dict(Counter(r["disposition"] for r in rows)),
         "cohort": cohort_metrics(rows),
-        "cohort_per_label": per_label(rows, ("cohort", "fx")),
-        "cohort_confusion": confusion(rows, ("cohort", "fx")),
+        "cohort_with_label_conflicts": cohort_metrics(
+            rows, ("cohort", "label_conflict")
+        ),
+        "label_conflicts": [
+            {
+                k: r.get(k)
+                for k in (
+                    "split",
+                    "case_id",
+                    "variant",
+                    "disposition",
+                    "category",
+                    "reason",
+                    "outcome",
+                    "label_conflict_with",
+                )
+            }
+            for r in sorted(rows, key=lambda r: r["case_id"])
+            if r["group"] == "label_conflict"
+        ],
+        "flagged_outside_scored_cohort": [
+            {
+                "split": r["split"],
+                "case_id": r["case_id"],
+                "group": r["group"],
+                "variant": r["variant"],
+                "label_conflict_with": r["label_conflict_with"],
+            }
+            for r in sorted(rows, key=lambda r: r["case_id"])
+            if r["label_conflict_with"] and r["group"] != "label_conflict"
+        ],
+        "cohort_per_label": per_label(rows, ("cohort", "label_conflict", "fx")),
+        "cohort_confusion": confusion(rows, ("cohort", "label_conflict", "fx")),
         "fx_slice": {
             "cases": len(fx),
             "correct_abstention_unsupported_fx": frac(
@@ -928,9 +1036,12 @@ def all_metrics(rows: list[dict]) -> dict:
                 sum(
                     r.get("kind") == "false_alarm"
                     for r in legit_all
-                    if r["group"] in ("cohort", "fx", "contradicted")
+                    if r["group"] in ("cohort", "label_conflict", "fx", "contradicted")
                 ),
-                sum(r["group"] in ("cohort", "fx", "contradicted") for r in legit_all),
+                sum(
+                    r["group"] in ("cohort", "label_conflict", "fx", "contradicted")
+                    for r in legit_all
+                ),
             ),
             "ap_side_variants_out_of_scope": frac(
                 sum(
@@ -1038,6 +1149,32 @@ def render(m: dict) -> str:
         line("false alarms (cohort legit)", pct(c["false_alarms"]))
         line("wrong by kind", c["wrong_by_kind"])
         line("non-answer reasons", c["abstain_or_nonanswer_reasons"])
+        w = a["cohort_with_label_conflicts"]
+        n_conf = len(a["label_conflicts"])
+        lines.append(f"cohort WITH the {n_conf} label conflicts: {w['cases']} cases")
+        line("answered (coverage)", pct(w["answered"]))
+        line("answer precision (exact category)", pct(w["answer_precision"]))
+        line("correct and complete / cases", pct(w["correct_and_evidence_complete"]))
+        line("false alarms (cohort legit)", pct(w["false_alarms"]))
+        line("non-answer reasons", w["abstain_or_nonanswer_reasons"])
+        for r in a["label_conflicts"]:
+            lines.append(
+                f"  label conflict {r['case_id']} {r['variant']}: {r['outcome']}"
+                f" {r['reason'] or r['category']} <- "
+                + ", ".join(
+                    f"{x['failure_case']} {x['failure_type'][:3]} {x['shared']}"
+                    for x in r["label_conflict_with"]
+                )
+            )
+        for r in a["flagged_outside_scored_cohort"]:
+            lines.append(
+                f"  flagged, not in scored cohort {r['case_id']} ({r['group']},"
+                f" {r['variant']}) <- "
+                + ", ".join(
+                    f"{x['failure_case']} {x['failure_type'][:3]} {x['shared']}"
+                    for x in r["label_conflict_with"]
+                )
+            )
         line("FX correct abstentions", pct(fx["correct_abstention_unsupported_fx"]))
         line(
             "FX abstentions citing both",
@@ -1098,14 +1235,19 @@ def evaluate(tag: str, upstream: Path = DEFAULT_UPSTREAM) -> None:
             sys.exit(f"{split}: packets.jsonl differs from the run manifest")
     snap = Snap(root / "prepared/snapshot/snapshot.sqlite")
     rows: list[dict] = []
-    for split in SPLITS:  # labels opened only here, split by split, dev splits only
-        labels = {
+    labels_by_split = {  # labels opened only here, dev splits only
+        split: {
             r["case_id"]: r
             for r in read_jsonl(
                 upstream / "data/benchmark" / split / "rca_ground_truth.jsonl"
             )
         }
-        rows += load_split(root, split, labels, snap)
+        for split in SPLITS
+    }
+    all_labels = {c: lab for ls in labels_by_split.values() for c, lab in ls.items()}
+    conflicts = label_conflicts(all_labels, snap, REPO / "data/private" / tag / "key")
+    for split in SPLITS:
+        rows += load_split(root, split, labels_by_split[split], snap, conflicts)
     rows.sort(key=lambda r: (r["split"], r["case_id"]))
     metrics = {
         "tag": tag,
@@ -1125,7 +1267,7 @@ def evaluate(tag: str, upstream: Path = DEFAULT_UPSTREAM) -> None:
             r["group"] in ("cohort", "fx")
             and r["outcome"] not in ("correct", "correct_abstention")
         )
-        or r["group"] in ("contradicted", "not_gradable")
+        or r["group"] in ("contradicted", "not_gradable", "label_conflict")
         or (
             r["group"] in ("oos_failure", "oos_legit")
             and r["disposition"] == "answered"
