@@ -1,15 +1,20 @@
 """Run `python -m <module> args...` and log every file opened under data/ to a file.
 The log is opened exclusively ("x"), so an existing log is never overwritten."""
-import os, runpy, sys
+
+import os
+import runpy
+import sys
 
 log_path = os.environ["READ_LOG"]
 seen = set()
+
 
 def hook(event, args):
     if event == "open" and isinstance(args[0], (str, bytes, os.PathLike)):
         p = os.fsdecode(args[0])
         if "/data/" in os.path.abspath(p) + "/" and p not in seen:
             seen.add(p)
+
 
 sys.addaudithook(hook)
 module = sys.argv[1]

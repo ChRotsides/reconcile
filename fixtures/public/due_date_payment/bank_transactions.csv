@@ -1,0 +1,2 @@
+bank_transaction_id,counterparty_token,payment_reference,bank_account_id,transaction_date,posted_date,transaction_type,amount,currency,direction,status
+BT_1,BA_V1,REF_1,ACC_1,2026-06-12,2026-06-12,ACH debit,1500.00,EUR,debit,posted

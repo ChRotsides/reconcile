@@ -1,0 +1,5 @@
+journal_id,journal_line_id,source_transaction_id,transaction_type,posting_date,accounting_period,gl_account,debit,credit,currency
+J_PAY_1,J_PAY_1_L1,PAY_1,payment,2026-05-04,2026-05,220000,400.00,0.00,EUR
+J_PAY_1,J_PAY_1_L2,PAY_1,payment,2026-05-04,2026-05,100000,0.00,400.00,EUR
+J_PAY_2,J_PAY_2_L1,PAY_2,payment,2026-05-04,2026-05,220000,650.00,0.00,EUR
+J_PAY_2,J_PAY_2_L2,PAY_2,payment,2026-05-04,2026-05,100000,0.00,650.00,EUR
