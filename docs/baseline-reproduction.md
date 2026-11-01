@@ -49,7 +49,12 @@ python -m src.classical_ml.cli run --data-root data/benchmark --output-root /out
 
 Every log of a run lives in `artifacts/m0-baselines/$RUN_TAG/`: `run.stdout.txt` (combined stdout/stderr of both stages), `files_read_rules_sql.txt`, `files_read_classical_ml.txt`, and the run outputs. `audit_run.py` opens its read log with mode `"x"`, so it cannot overwrite one either. `STAGES="classical_ml"` selects one stage. Arguments to `run_docker.sh` replace the entrypoint, used for the absence check below.
 
-`PYTHONHASHSEED=314159` was set globally (the upstream ML test subprocess sets it). `audit_run.py` wraps each CLI with a Python audit hook that logs every file opened under `data/` (`files_read_*.txt`). The hook does not see the pytest subprocesses (they use synthetic fixtures).
+`PYTHONHASHSEED=314159` was set globally (the upstream ML test subprocess sets it). `audit_run.py` wraps each CLI with a Python audit hook that logs every file opened under `data/` (`files_read_*.txt`). The hook does not see the pytest subprocesses, so `files_read_*.txt` does not list what the tests read. The tests are not purely synthetic; reading the test files shows they read real benchmark paths (by test file):
+
+- `tests/classical_ml/test_ml_baseline.py` (run by the ML stage, 20 tests): `docs/ml_feature_registry_v1.0.csv` and the frozen `docs/*.sha256` files; `data/benchmark/{train,validation,test}/benchmark_questions.jsonl` via `load_routes` (case ID and primary entity only); `data/benchmark/dataset_quality_report.json`; all of `data/benchmark/full/` through `FinancialSnapshot`. Some tests use synthetic frames (e.g. the preprocessing test).
+- `tests/rules_sql/test_validation_integration.py` (run by the Rules/SQL stage, 40 tests across `tests/rules_sql`): `data/benchmark/full/`, the `validation` split inputs via `run_inference` (routes from the split directory), and the `validation` labels in `data/benchmark/validation/failure_manifest.csv`. The other `tests/rules_sql` files use synthetic tables.
+- Neither test directory contains any reference to `challenge_test`, `rca_ground_truth`, `causal_edges`, `internal` or `raw_clean` (grep by path name only). In run 20261101b these paths were not mounted, so the tests could not reach them. In run 20261101 the whole checkout was mounted, but no test names those paths.
+- Consequence: these test reads touch only the train, validation and test splits and `full/`, the same sets as the audit-hook list, so they do not change the label-files-read conclusions, but the read log is incomplete for them.
 
 ## Experiments run
 
