@@ -100,7 +100,7 @@ def investigate(
                 packet = diagnose_bank_row(request, reader, prov)
             elif entity.table == "invoices":
                 facts = gather_invoice(reader, entity.record_id, request.cutoff)
-                packet = diagnose_invoice(request, facts, prov)
+                packet = diagnose_invoice(request, facts, prov, reader)
             else:
                 return _packet(
                     request,

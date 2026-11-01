@@ -10,6 +10,7 @@ nearby debit) are detected and abstain with their own reason.
 from datetime import date
 from itertools import combinations
 
+from reconcile.diagnosis.guard import guarded
 from reconcile.diagnosis.ledger import Ledger, is_effective, req, val
 from reconcile.diagnosis.policy import CLEARING_LIMITS, clearing_policy, quantum
 from reconcile.diagnosis.settled import (
@@ -89,9 +90,12 @@ def diagnose_payment(
         return led.abstain(
             "ambiguous_reference", "a payment reference unique to one payment"
         )
-    if rows:
-        return diagnose_settled(request, reader, led, pay, rows)
-    return _no_bank_row(request, reader, led, pay)
+    packet = (
+        diagnose_settled(request, reader, led, pay, rows)
+        if rows
+        else _no_bank_row(request, reader, led, pay)
+    )
+    return guarded(led, reader, [pid], packet)
 
 
 def _age(led: Ledger, pay: Row, pay_ev: str, cutoff: date) -> tuple[int, int] | None:
@@ -365,10 +369,11 @@ def diagnose_bank_row(
         (fee_ev, pay_ev, *evs),
         ("fee_row_minus_journals",),
     )
-    return led.packet(
+    packet = led.packet(
         Diagnosis(
             Disposition.ANSWERED,
             ACCOUNTED_FEE,
             (finding, allocated_finding(led, resolved[0], allocs)),
         )
     )
+    return guarded(led, reader, [req(resolved[0], "payment_id")], packet)

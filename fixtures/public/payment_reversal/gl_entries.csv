@@ -1,3 +1,5 @@
 journal_id,journal_line_id,source_transaction_id,transaction_type,posting_date,accounting_period,gl_account,debit,credit,currency
 J_REV_1,J_REV_1_L1,PAY_1,payment_reversal,2026-06-10,2026-06,100000,600.00,0.00,EUR
 J_REV_1,J_REV_1_L2,PAY_1,payment_reversal,2026-06-10,2026-06,220000,0.00,600.00,EUR
+J_PAY_PAY_1,J_PAY_PAY_1_L1,PAY_1,payment,2026-06-01,2026-06,220000,600.00,0.00,EUR
+J_PAY_PAY_1,J_PAY_PAY_1_L2,PAY_1,payment,2026-06-01,2026-06,100000,0.00,600.00,EUR

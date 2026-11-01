@@ -40,6 +40,7 @@ NAMESPACE = {
     "payments": "payment",
     "bank_transactions": "bank_txn",
     "gl_entries": "journal",
+    "approval_events": "approval",
 }
 # expected.json name -> (our calculation id, sign): our difference operations
 # compute "invoice total minus X", the contract's overpayment is "X minus total".
@@ -679,7 +680,7 @@ def run_clone(p: Prepared, tmp_path: Path) -> EvidencePacket:
 
 def test_policy_is_declared_in_every_packet(prepared: dict[str, Prepared]) -> None:
     prov = dict(run(prepared, "weekend_clearing").provenance)
-    assert prov["policy_version"] == "evidence-contract-0.2"
+    assert prov["policy_version"] == "evidence-contract-0.3"
     assert [
         prov[f"clearing_limit_{m}"] for m in ("ach", "wire", "check", "virtual_card")
     ] == [
@@ -801,3 +802,125 @@ def test_batch_without_clearing_overlap_lists_no_alternative(
     prepared: dict[str, Prepared],
 ) -> None:
     assert run(prepared, "batch_payment").diagnosis.alternatives == ()
+
+
+# --- all-clear prerequisites: final approval and payment journal -------------
+
+ALL_CLEAR_FIXTURES = [
+    n
+    for n, e in EXPECTED.items()
+    if e["disposition"] == "answered"
+    and (e["category"].startswith("legitimate_") or e["category"] == "no_exception")
+]
+
+
+def primary_packet(
+    prepared: dict[str, Prepared], tmp_path: Path, name: str, *sql: str
+) -> EvidencePacket:
+    p = prepared[name]
+    e = EXPECTED[name]["primary_entity"]
+    return investigate(clone(p, tmp_path, *sql), p.request(e["table"], e["id"]))
+
+
+def test_the_guard_covers_every_all_clear_fixture() -> None:
+    assert len(ALL_CLEAR_FIXTURES) == 11
+
+
+@pytest.mark.parametrize("name", ALL_CLEAR_FIXTURES)
+def test_no_completed_final_approval_is_never_an_all_clear(
+    prepared: dict[str, Prepared], tmp_path: Path, name: str
+) -> None:
+    packet = primary_packet(prepared, tmp_path, name, "DELETE FROM approval_events")
+    assert reason(packet) == ("abstained", "invoice_approval_not_completed")
+    (finding,) = packet.diagnosis.findings
+    assert finding.check_id == "invoice_approval_not_completed"
+    assert finding.state.value == "supported"
+
+
+@pytest.mark.parametrize("name", ALL_CLEAR_FIXTURES)
+def test_missing_payment_journal_is_never_an_all_clear(
+    prepared: dict[str, Prepared], tmp_path: Path, name: str
+) -> None:
+    packet = primary_packet(
+        prepared,
+        tmp_path,
+        name,
+        "DELETE FROM gl_entries WHERE transaction_type = 'payment'",
+    )
+    # Pending settlement already needed its journal before the guard existed.
+    want = "required_records_missing" if name == "pending_settlement" else None
+    assert reason(packet) == ("abstained", want or "payment_journal_missing")
+
+
+def test_payment_before_final_approval_abstains(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    packet = primary_packet(
+        prepared,
+        tmp_path,
+        "weekend_clearing",
+        "UPDATE approval_events SET event_timestamp = '2026-06-06T10:00:00'"
+        " WHERE new_status = 'approved'",
+    )
+    assert reason(packet) == ("abstained", "payment_before_approval")
+    assert packet.diagnosis.findings[0].check_id == "payment_before_approval"
+
+
+def test_approval_on_the_payment_date_is_enough(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    packet = primary_packet(
+        prepared,
+        tmp_path,
+        "weekend_clearing",
+        "UPDATE approval_events SET event_timestamp = '2026-06-05T17:00:00'"
+        " WHERE new_status = 'approved'",
+    )
+    assert reason(packet) == ("answered", "legitimate_weekend_clearing")
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        (
+            "UPDATE gl_entries SET credit = '700.00' WHERE credit = '800.00'",
+            "payment_journal_unbalanced",
+        ),
+        ("UPDATE gl_entries SET currency = 'USD'", "payment_journal_currency_differs"),
+        (
+            "UPDATE gl_entries SET debit = '800.02' WHERE debit = '800.00'",
+            "payment_journal_unbalanced",
+        ),
+    ],
+)
+def test_payment_journal_defects_abstain(
+    prepared: dict[str, Prepared], tmp_path: Path, sql: str, expected: str
+) -> None:
+    packet = primary_packet(prepared, tmp_path, "weekend_clearing", sql)
+    assert reason(packet) == ("abstained", expected)
+
+
+def test_journal_within_one_minor_unit_is_enough(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    packet = primary_packet(
+        prepared,
+        tmp_path,
+        "weekend_clearing",
+        "UPDATE gl_entries SET debit = '800.01' WHERE debit = '800.00'",
+        "UPDATE gl_entries SET credit = '800.01' WHERE credit = '800.00'",
+    )
+    assert reason(packet) == ("answered", "legitimate_weekend_clearing")
+
+
+def test_journal_two_minor_units_off_abstains(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    packet = primary_packet(
+        prepared,
+        tmp_path,
+        "weekend_clearing",
+        "UPDATE gl_entries SET debit = '800.02' WHERE debit = '800.00'",
+        "UPDATE gl_entries SET credit = '800.02' WHERE credit = '800.00'",
+    )
+    assert reason(packet) == ("abstained", "payment_journal_amount_differs")

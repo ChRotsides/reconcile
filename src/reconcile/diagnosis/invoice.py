@@ -9,6 +9,7 @@ never `legitimate`.
 
 from dataclasses import dataclass, field
 
+from reconcile.diagnosis.guard import guarded
 from reconcile.diagnosis.ledger import Ledger, is_effective, req, val
 from reconcile.diagnosis.policy import quantum
 from reconcile.domain.contracts import (
@@ -22,6 +23,7 @@ from reconcile.domain.contracts import (
 )
 from reconcile.domain.money import Money
 from reconcile.retrieval.invoice import InvoiceFacts
+from reconcile.retrieval.snapshot import Reader
 
 F06 = "F06"
 SPLIT = "legitimate_split_payment"
@@ -64,6 +66,7 @@ def diagnose_invoice(
     request: InvestigationRequest,
     facts: InvoiceFacts,
     provenance: tuple[tuple[str, str], ...],
+    reader: Reader,
 ) -> EvidencePacket:
     led = Ledger(request, provenance)
     inv_tok = request.primary_entity.record_id
@@ -279,12 +282,14 @@ def diagnose_invoice(
     diagnosis = Diagnosis(
         Disposition.ANSWERED, category, tuple(findings), alternatives=others
     )
-    return led.packet(
+    packet = led.packet(
         diagnosis,
         limitations=(
             "Legitimacy rests on arithmetic only; scheduling intent is not recorded.",
         ),
     )
+    pids = [leg.pay_ev.removeprefix("pay:") for leg in live]
+    return guarded(led, reader, pids, packet)
 
 
 def _f06(led: Ledger, live: list[_Leg], committed: list[_Leg]) -> EvidencePacket:

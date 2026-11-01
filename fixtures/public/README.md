@@ -11,7 +11,7 @@ Small scenarios invented for this project (decision D030: no upstream FinRCA row
 - `quality_gaps`: the exact non-zero relationship gaps `quality_report` must show; `dropped_by_cutoff`; `snapshot_rows` (rows that must survive preparation);
 - `known_contract_gap`: set only where the current contract would answer wrongly. The contract is not changed.
 
-Section numbers refer to `docs/evidence-contract.md`. Clearing days use Monday to Friday only (June 2026 starts on a Monday).
+Every fixture that ends in an all-clear (`legitimate_*` or `no_exception`) carries a completed final approval for each allocated invoice, dated before the payment, and a balanced payment journal equal to the payment (the prerequisites of section 5, `evidence-contract-0.3`). Section numbers refer to `docs/evidence-contract.md`. Clearing days use Monday to Friday only (June 2026 starts on a Monday).
 
 ## Contract scenarios
 
@@ -50,6 +50,8 @@ Section numbers refer to `docs/evidence-contract.md`. Clearing days use Monday t
 | `real_truncated_reference_netted_fee` | The truncated reference of the case above plus a debit 12.50 below the payment and no fee journal. A3 requires an equal amount, so it finds no candidate. **Current contract answers F12 wrongly** (false positive: the debit exists). Target: abstain `reference_unmatched_nearby_debit` | 4.2 A3; G1, G4 |
 | `real_free_text_reference` | Bank reference is free text containing the payment reference (`PAYMENT REF_1 INV 123`). Same shape and outcome as the truncated case. The contract would answer F12 wrongly only if the debit amount also differed (A3 empty); not exercised | 4.2 A3; G1 |
 | `real_payment_without_allocation` | The `weekend_clearing` payment with its allocation removed: settled, debit matches, inside the limit, but no invoice. Must abstain `payment_without_invoice_allocation`, never `legitimate_weekend_clearing` or `no_exception` | 5 (no invoice, no all-clear) |
+| `real_approval_missing` | The `weekend_clearing` payment whose invoice shows only an intermediate approval (`pending_level_2`, no `approved` event). Must abstain `invoice_approval_not_completed` | 5 (all-clear prerequisites) |
+| `real_gl_payment_journal_mismatch` | The `weekend_clearing` payment whose balanced payment journal posts 829.60 against a payment of 800.00. Must abstain `payment_journal_amount_differs` | 5 (all-clear prerequisites) |
 | `real_partial_payment` | Invoice 1000.00 (status `approved`, see below) paid 400.00, debit 400.00. Not F06, not F14, not a missing settlement. Answered `no_exception` (open balance 600.00 reported) | 5.1; 4.1 |
 | `real_netted_fee_no_journal` | Debit 12.50 below the payment and no fee journal for it; a fee journal for another payment's debit must not explain it. F14 "unexplained shortfall"; the fee is unobservable and must not be asserted | 4.3 |
 | `real_reversal_then_repayment` | Reversed payment (debit, credit, journal), then a second payment settles the same invoice. Not a duplicate. **The reversal contract requires the invoice not to be `paid`, so the current contract does not confirm it.** Target (user decision, 2026-11-01): abstain `reversal_followed_by_repayment` until practitioner input | 5 reversal; 4.1 |

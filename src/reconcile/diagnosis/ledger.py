@@ -196,7 +196,11 @@ class Ledger:
     ) -> EvidencePacket:
         category = diagnosis.category or ""
         all_clear = category.startswith("legitimate_") or category == "no_exception"
-        if diagnosis.disposition is Disposition.ANSWERED and all_clear:
+        if (
+            diagnosis.disposition is Disposition.ANSWERED
+            and all_clear
+            and SCOPE_LIMITATION not in limitations
+        ):
             limitations = (*limitations, SCOPE_LIMITATION)
         return EvidencePacket(
             self.request,
