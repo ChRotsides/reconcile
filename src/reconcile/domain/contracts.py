@@ -24,6 +24,7 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import Any, TypeVar
 
+from reconcile.domain.calendar import business_days
 from reconcile.domain.money import Money
 
 T = TypeVar("T")
@@ -506,6 +507,103 @@ class Calculation:
 
 
 @dataclass(frozen=True, slots=True)
+class DayCount:
+    """A business-day count between two cited dates, with the declared limit it
+    is compared with. The packet recomputes `result` from the cited evidence
+    timestamps, so a reported count cannot differ from the records.
+
+    `end_evidence` is None when the count runs to the request cutoff.
+    """
+
+    calculation_id: str
+    start_evidence: str
+    start_field: str
+    end_evidence: str | None
+    end_field: str | None
+    result: int
+    limit: int
+    limit_policy: str  # the declared policy value used, e.g. clearing_limit_ach
+
+    def __post_init__(self) -> None:
+        _ident("calculation_id", self.calculation_id)
+        _ident("start_evidence", self.start_evidence)
+        _ident("start_field", self.start_field)
+        if (self.end_evidence is None) != (self.end_field is None):
+            raise ValueError("end_evidence and end_field go together")
+        if self.end_evidence is not None:
+            _ident("end_evidence", self.end_evidence)
+            _ident("end_field", self.end_field)
+        for name, v in (("result", self.result), ("limit", self.limit)):
+            if type(v) is not int or v < 0:
+                raise ValueError(f"{name} must be an integer >= 0")
+        _ident("limit_policy", self.limit_policy)
+
+    def to_obj(self) -> dict[str, Any]:
+        return {
+            "calculation_id": self.calculation_id,
+            "start_evidence": self.start_evidence,
+            "start_field": self.start_field,
+            "end_evidence": self.end_evidence,
+            "end_field": self.end_field,
+            "result": self.result,
+            "limit": self.limit,
+            "limit_policy": self.limit_policy,
+        }
+
+    @classmethod
+    def from_obj(cls, obj: object) -> "DayCount":
+        o = _exact(
+            "DayCount",
+            obj,
+            {
+                "calculation_id",
+                "start_evidence",
+                "start_field",
+                "end_evidence",
+                "end_field",
+                "result",
+                "limit",
+                "limit_policy",
+            },
+        )
+        return cls(
+            o["calculation_id"],
+            o["start_evidence"],
+            o["start_field"],
+            o["end_evidence"],
+            o["end_field"],
+            o["result"],
+            o["limit"],
+            o["limit_policy"],
+        )
+
+
+def _cited_day(
+    count_id: str, by_id: dict[str, EvidenceItem], evidence_id: str, name: str
+) -> date:
+    item = by_id.get(evidence_id)
+    if item is None or item.record is None:
+        raise ValueError(f"{count_id}: unknown record {evidence_id}")
+    value = dict(item.timestamps).get(name)
+    if value is None:
+        raise ValueError(f"{count_id}: {evidence_id} has no timestamp {name!r}")
+    return _timestamp_day(name, value)
+
+
+def _check_day_count(c: DayCount, by_id: dict[str, EvidenceItem], cutoff: date) -> None:
+    start = _cited_day(c.calculation_id, by_id, c.start_evidence, c.start_field)
+    if c.end_evidence is None or c.end_field is None:
+        end = cutoff
+    else:
+        end = _cited_day(c.calculation_id, by_id, c.end_evidence, c.end_field)
+    if business_days(start, end) != c.result:
+        raise ValueError(
+            f"{c.calculation_id}: {c.result} business days does not match "
+            f"the cited dates {start} to {end}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class Finding:
     check_id: str
     state: FindingState
@@ -712,6 +810,7 @@ class EvidencePacket:
     recommendations: tuple[Recommendation, ...] = ()
     limitations: tuple[str, ...] = ()
     provenance: tuple[tuple[str, str], ...] = ()
+    day_counts: tuple[DayCount, ...] = ()
     schema_version: str = SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -724,12 +823,15 @@ class EvidencePacket:
         _tuple("evidence", self.evidence, EvidenceItem)
         _tuple("calculations", self.calculations, Calculation)
         _tuple("recommendations", self.recommendations, Recommendation)
+        _tuple("day_counts", self.day_counts, DayCount)
         for t in _tuple("limitations", self.limitations, str):
             _text("limitations item", t)
         _set(self, provenance=_pairs("provenance", self.provenance))
 
         evidence_ids = tuple(e.evidence_id for e in self.evidence)
-        calc_ids = tuple(c.calculation_id for c in self.calculations)
+        calc_ids = tuple(c.calculation_id for c in self.calculations) + tuple(
+            c.calculation_id for c in self.day_counts
+        )
         _unique("evidence ids", evidence_ids)
         _unique("calculation ids", calc_ids)
         for e in self.evidence:
@@ -748,6 +850,8 @@ class EvidencePacket:
                 if op.evidence_id not in by_id:
                     raise ValueError(f"{c.calculation_id}: unknown {op.evidence_id}")
                 _check_operand(c.calculation_id, op, by_id[op.evidence_id])
+        for dc in self.day_counts:
+            _check_day_count(dc, by_id, self.request.cutoff)
         for f in self.diagnosis.findings:
             for i in f.evidence_ids:
                 if i not in evidence_ids:
@@ -771,6 +875,7 @@ class EvidencePacket:
             "recommendations": [r.to_obj() for r in self.recommendations],
             "limitations": list(self.limitations),
             "provenance": dict(self.provenance),
+            "day_counts": [c.to_obj() for c in self.day_counts],
         }
 
     @classmethod
@@ -788,6 +893,7 @@ class EvidencePacket:
                 "recommendations",
                 "limitations",
                 "provenance",
+                "day_counts",
             },
         )
         return cls(
@@ -800,6 +906,7 @@ class EvidencePacket:
             ),
             limitations=_strs("limitations", o["limitations"]),
             provenance=tuple(_type("provenance", o["provenance"], dict).items()),
+            day_counts=_each("day_counts", o["day_counts"], DayCount.from_obj),
             schema_version=o["schema_version"],
         )
 
