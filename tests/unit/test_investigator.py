@@ -18,6 +18,8 @@ from reconcile.adapters.finrca import (
     create_key_file,
     prepare_finrca_snapshot,
 )
+from reconcile.diagnosis import pipeline
+from reconcile.diagnosis.invoice import diagnose_invoice
 from reconcile.diagnosis.pipeline import investigate
 from reconcile.domain.contracts import (
     Disposition,
@@ -91,6 +93,22 @@ def prepared(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Prepared]:
             _Tokens(_load_key(key)),
         )
     return out
+
+
+def clone(p: Prepared, tmp_path: Path, *sql: str) -> Path:
+    """Copy a snapshot and its manifest into tmp_path, then apply hand-written SQL."""
+    out = tmp_path / "snap"
+    out.mkdir(exist_ok=True)
+    shutil.copy(p.snapshot.parent / "manifest.json", out / "manifest.json")
+    copy = out / "snapshot.sqlite"
+    shutil.copy(p.snapshot, copy)
+    copy.chmod(0o644)
+    con = sqlite3.connect(copy)
+    for statement in sql:
+        con.execute(statement)
+    con.commit()
+    con.close()
+    return copy
 
 
 def run(prepared: dict[str, Prepared], name: str, **kw: Any) -> EvidencePacket:
@@ -236,15 +254,11 @@ def test_invoice_age_is_not_evidence(
 ) -> None:
     """Residual R4: changing invoice_date and received_date changes nothing."""
     p = prepared[name]
-    copy = tmp_path / "snapshot.sqlite"
-    shutil.copy(p.snapshot, copy)
-    copy.chmod(0o644)
-    con = sqlite3.connect(copy)
-    con.execute(
-        "UPDATE invoices SET invoice_date = '2001-01-01', received_date = '2001-01-02'"
+    copy = clone(
+        p,
+        tmp_path,
+        "UPDATE invoices SET invoice_date = '2001-01-01', received_date = '2001-01-02'",
     )
-    con.commit()
-    con.close()
     request = p.request("invoices", "INV_1")
     assert investigate(copy, request) == investigate(p.snapshot, request)
 
@@ -260,3 +274,149 @@ def test_no_query_reads_invoice_dates() -> None:
     ]
     assert sql
     assert not any("invoice_date" in q or "received_date" in q for q in sql)
+
+
+def test_returned_row_still_gets_a_bounded_search(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    """A third payment whose only bank row is returned: absence is evidenced."""
+    p = prepared["f06_double_payment"]
+    pay2, ref3 = p.token("payments", "PAY_2"), "r3"
+    inv = p.token("invoices", "INV_1")
+    copy = clone(
+        p,
+        tmp_path,
+        f"INSERT INTO payments SELECT 'p3', vendor_id, bank_account_id, '{ref3}',"
+        f" payment_date, payment_method, payment_currency, payment_amount,"
+        f" payment_status, settlement_status, created_at FROM payments"
+        f" WHERE payment_id = '{pay2}'",
+        f"INSERT INTO payment_allocations VALUES ('p3', '{inv}', '1000.00',"
+        f" '2026-06-09')",
+        f"INSERT INTO bank_transactions SELECT 'b3', counterparty_token, '{ref3}',"
+        f" bank_account_id, transaction_date, posted_date, transaction_type, amount,"
+        f" currency, direction, 'returned' FROM bank_transactions"
+        f" WHERE payment_reference = (SELECT reference_number FROM payments"
+        f" WHERE payment_id = '{pay2}')",
+    )
+    packet = investigate(copy, p.request("invoices", "INV_1"))
+    assert packet.diagnosis.category == "F06"
+    finding = next(
+        f
+        for f in packet.diagnosis.findings
+        if f.check_id == "allocating_payment_without_posted_debit"
+    )
+    cited = {e.evidence_id: e for e in packet.evidence}
+    searches = [s for i in finding.evidence_ids if (s := cited[i].search) is not None]
+    assert len(searches) == 1 and searches[0].observed_count == 0
+    assert "direction = 'debit'" in searches[0].predicate
+
+
+def test_missing_counterpart_stays_visible_when_abstaining(
+    prepared: dict[str, Prepared],
+) -> None:
+    packet = run(prepared, "f06_second_debit_post_cutoff")
+    assert packet.diagnosis.disposition is Disposition.ABSTAINED
+    assert [f.check_id for f in packet.diagnosis.findings] == [
+        "allocating_payment_without_posted_debit"
+    ]
+
+
+def test_unreadable_snapshot_fails_explicitly(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    p = prepared["f06_double_payment"]
+    copy = clone(p, tmp_path)
+    copy.write_bytes(b"this is not a database" * 100)
+    packet = investigate(copy, p.request("invoices", "INV_1"))
+    assert packet.diagnosis.disposition is Disposition.FAILED
+    assert packet.diagnosis.reason == "snapshot_unreadable"
+
+
+def test_missing_table_fails_explicitly(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    p = prepared["f06_double_payment"]
+    copy = clone(p, tmp_path, "DROP TABLE payment_allocations")
+    packet = investigate(copy, p.request("invoices", "INV_1"))
+    assert packet.diagnosis.disposition is Disposition.FAILED
+    assert packet.diagnosis.reason == "snapshot_unreadable"
+
+
+def test_duplicate_invoice_rows_fail_explicitly(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    p = prepared["f06_double_payment"]
+    copy = clone(p, tmp_path, "INSERT INTO invoices SELECT * FROM invoices")
+    packet = investigate(copy, p.request("invoices", "INV_1"))
+    assert packet.diagnosis.disposition is Disposition.FAILED
+    assert packet.diagnosis.reason == "malformed_record"
+
+
+@pytest.mark.parametrize(
+    ("debit", "category", "reason"),
+    [
+        ("1199.99", "legitimate_split_payment", None),
+        ("1200.01", "legitimate_split_payment", None),
+        ("1199.98", None, "debit_differs_from_payment"),
+    ],
+)
+def test_debit_difference_uses_one_minor_unit_tolerance(
+    prepared: dict[str, Prepared],
+    tmp_path: Path,
+    debit: str,
+    category: str | None,
+    reason: str | None,
+) -> None:
+    p = prepared["split_payment"]
+    copy = clone(
+        p,
+        tmp_path,
+        f"UPDATE bank_transactions SET amount = '{debit}' WHERE amount = '1200.00'",
+    )
+    d = investigate(copy, p.request("invoices", "INV_1")).diagnosis
+    assert (d.category, d.reason) == (category, reason)
+
+
+def test_partial_payment_on_due_date_is_not_legitimate(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    p = prepared["real_partial_payment"]
+    copy = clone(p, tmp_path, "UPDATE invoices SET due_date = '2026-06-01'")
+    d = investigate(copy, p.request("invoices", "INV_1")).diagnosis
+    assert d.disposition is Disposition.OUT_OF_SCOPE
+
+
+def test_time_budget_covers_diagnosis(
+    prepared: dict[str, Prepared], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [0.0]
+    original = diagnose_invoice
+
+    def slow(*args: Any) -> EvidencePacket:
+        packet = original(*args)
+        now[0] = 100.0  # diagnosis ran past the deadline
+        return packet
+
+    monkeypatch.setattr(pipeline, "diagnose_invoice", slow)
+    packet = run(prepared, "f06_double_payment", limits=Limits(clock=lambda: now[0]))
+    assert packet.diagnosis.disposition is Disposition.ABSTAINED
+    assert packet.diagnosis.reason == "retrieval_time_limit"
+
+
+def test_snapshot_must_match_the_request(
+    prepared: dict[str, Prepared],
+) -> None:
+    a, b = prepared["f06_double_payment"], prepared["split_payment"]
+    packet = investigate(b.snapshot, a.request("invoices", "INV_1"))
+    assert packet.diagnosis.disposition is Disposition.FAILED
+    assert packet.diagnosis.reason == "snapshot_mismatch"
+
+
+def test_missing_manifest_fails_explicitly(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    p = prepared["f06_double_payment"]
+    copy = clone(p, tmp_path)
+    (copy.parent / "manifest.json").unlink()
+    packet = investigate(copy, p.request("invoices", "INV_1"))
+    assert packet.diagnosis.reason == "snapshot_manifest_unreadable"

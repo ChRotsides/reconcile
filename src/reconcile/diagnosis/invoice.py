@@ -45,6 +45,16 @@ def _val(row: Row, key: str) -> str:
     return row[key] or ""
 
 
+@dataclass
+class _Leg:
+    pay_ev: str
+    alloc_ev: str
+    effective: bool
+    debit_ev: str | None = None
+    evidence: list[str] = field(default_factory=list)  # bank rows or search
+    done: bool = False  # bank side fully examined
+
+
 class _Ledger:
     """Collects evidence and calculations for one packet."""
 
@@ -55,6 +65,7 @@ class _Ledger:
         self.provenance = provenance
         self.items: dict[str, EvidenceItem] = {}
         self.calcs: dict[str, Calculation] = {}
+        self.legs: list[_Leg] = []
 
     def record(
         self,
@@ -124,23 +135,32 @@ class _Ledger:
             self.provenance,
         )
 
+    def missing_debit_finding(self) -> Finding | None:
+        """Contract 4.1 / principle 5: an effective payment with no posted debit
+        stays visible, with its bounded search, in every packet that touched it."""
+        unproven = [
+            leg
+            for leg in self.legs
+            if leg.effective and leg.done and leg.debit_ev is None
+        ]
+        if not unproven:
+            return None
+        return Finding(
+            "allocating_payment_without_posted_debit",
+            FindingState.SUPPORTED,
+            tuple(e for leg in unproven for e in (leg.pay_ev, *leg.evidence)),
+        )
+
     def abstain(self, reason: str, missing: str) -> EvidencePacket:
+        finding = self.missing_debit_finding()
         diagnosis = Diagnosis(
             Disposition.ABSTAINED,
             None,
+            findings=(finding,) if finding else (),
             reason=reason,
             missing_information=(missing,),
         )
         return self.packet(diagnosis)
-
-
-@dataclass
-class _Leg:
-    pay_ev: str
-    alloc_ev: str
-    effective: bool
-    debit_ev: str | None = None
-    evidence: list[str] = field(default_factory=list)  # bank rows or search
 
 
 def _quantum(currency: str) -> Money:
@@ -215,6 +235,7 @@ def diagnose_invoice(
         )
         leg = _Leg(pay_ev, alloc_ev, effective)
         legs.append(leg)
+        led.legs.append(leg)
         if not effective:
             continue
 
@@ -255,21 +276,25 @@ def diagnose_invoice(
                 )
             if r["direction"] == "debit" and r["status"] == "posted":
                 debits.append(b_ev)
-        if not rows:
+        if len(debits) > 1:
+            return led.abstain(
+                "ambiguous_reference", "which one bank debit settles the payment"
+            )
+        if not debits:
+            # Bounded search for the missing counterpart, also when only
+            # returned or credit rows exist (contract 4.1).
             leg.evidence.append(
                 led.search(
                     "bank_transactions",
                     f"payment_reference = '{ref}' AND transaction_type <> 'bank fee'"
+                    f" AND direction = 'debit' AND status = 'posted'"
                     f" AND posted_date <= '{request.cutoff.isoformat()}'",
                     0,
                     "reference_search",
                 )
             )
-        if len(debits) > 1:
-            return led.abstain(
-                "ambiguous_reference", "which one bank debit settles the payment"
-            )
         leg.debit_ev = debits[0] if debits else None
+        leg.done = True
 
     live = [leg for leg in legs if leg.effective]
     if not live:
@@ -312,8 +337,8 @@ def diagnose_invoice(
         )
 
     # --- legitimate variants, section 5 ----------------------------------
-    # Stricter than the contract's "allocations do not exceed the total": an
-    # under-allocated invoice is a partial payment, which no variant covers.
+    # Full allocation (docs/evidence-contract.md section 5): an under-allocated
+    # invoice is a partial payment, which no variant covers.
     fully_allocated = abs(total_minus_allocated.result).amount <= q.amount
     is_split = fully_allocated and len(live) >= 2
     due = _val(facts.invoice, "due_date")
@@ -340,7 +365,7 @@ def diagnose_invoice(
             [(leg.debit_ev, "amount"), (leg.pay_ev, "payment_amount")],
             q,
         )
-        if diff.result.amount != 0:
+        if abs(diff.result).amount > q.amount:
             return led.abstain(
                 "debit_differs_from_payment", "an explanation of the debit difference"
             )
@@ -390,16 +415,9 @@ def _f06(led: _Ledger, live: list[_Leg], committed: list[_Leg]) -> EvidencePacke
             ("allocated", "committed", "invoice_total_minus_committed"),
         )
     ]
-    unproven = [leg for leg in live if leg.debit_ev is None]
-    if unproven:
-        # Contract 4.1: reported as its own finding, not counted as committed.
-        findings.append(
-            Finding(
-                "allocating_payment_without_posted_debit",
-                FindingState.SUPPORTED,
-                tuple(e for leg in unproven for e in (leg.pay_ev, *leg.evidence)),
-            )
-        )
+    unproven = led.missing_debit_finding()
+    if unproven:  # contract 4.1: its own finding, not counted as committed
+        findings.append(unproven)
     diagnosis = Diagnosis(
         Disposition.ANSWERED,
         F06,

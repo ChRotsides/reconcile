@@ -4,6 +4,8 @@ Inference sees the prepared snapshot and the request only. Every request ends
 in an explicit disposition (PLAN.md section 4).
 """
 
+import json
+import sqlite3
 from pathlib import Path
 
 from reconcile.diagnosis.invoice import diagnose_invoice
@@ -16,6 +18,7 @@ from reconcile.domain.contracts import (
 from reconcile.retrieval.invoice import gather_invoice
 from reconcile.retrieval.snapshot import HOPS, Limits, Reader, RetrievalIncomplete
 
+MANIFEST_FILE = "manifest.json"  # written beside the snapshot by preparation
 INVESTIGATOR = "invoice_primary_v1"
 DEFAULT_LIMITS = Limits()
 # Tables whose primary-key column is known, to tell "absent" from "unsupported".
@@ -41,6 +44,26 @@ def _packet(
     )
 
 
+class _Failure(Exception):
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(detail)
+        self.reason = reason
+
+
+def _check_snapshot(path: Path, request: InvestigationRequest) -> None:
+    """Bind the file to the request through the manifest written beside it.
+
+    Trusts the manifest; the content digest is not recomputed (assumption).
+    """
+    try:
+        manifest = json.loads((path.parent / MANIFEST_FILE).read_text())
+        digest = manifest["snapshot"]["content_sha256"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise _Failure("snapshot_manifest_unreadable", f"{type(e).__name__}") from e
+    if digest != request.snapshot:
+        raise _Failure("snapshot_mismatch", "request names a different snapshot")
+
+
 def investigate(
     snapshot_path: Path,
     request: InvestigationRequest,
@@ -54,6 +77,7 @@ def investigate(
     )
     entity = request.primary_entity
     try:
+        _check_snapshot(snapshot_path, request)
         with Reader(snapshot_path, limits) as reader:
             key = KEY_COLUMNS.get(entity.table)
             if key is not None and not reader.exists(
@@ -77,6 +101,10 @@ def investigate(
                     ),
                 )
             facts = gather_invoice(reader, entity.record_id, request.cutoff)
+            packet = diagnose_invoice(request, facts, prov)
+            if packet.diagnosis.disposition is Disposition.ANSWERED:
+                reader.check_time()  # the budget covers diagnosis too
+            return packet
     except RetrievalIncomplete as e:
         return _packet(
             request,
@@ -86,13 +114,24 @@ def investigate(
             ("complete retrieval within the declared limits",),
             ("Retrieval hit a limit; the evidence is incomplete, not absent.",),
         )
-    try:
-        return diagnose_invoice(request, facts, prov)
-    except ValueError as e:  # malformed row, inconsistent packet: explicit failure
-        return _packet(
-            request,
-            prov,
-            Disposition.FAILED,
-            "malformed_record",
-            limitations=(f"Investigation failed: {e}",),
-        )
+    except _Failure as e:
+        return _failed(request, prov, e.reason, str(e))
+    except sqlite3.Error as e:
+        return _failed(request, prov, "snapshot_unreadable", type(e).__name__)
+    except ValueError as e:  # malformed or non-unique row, inconsistent packet
+        return _failed(request, prov, "malformed_record", str(e))
+
+
+def _failed(
+    request: InvestigationRequest,
+    prov: tuple[tuple[str, str], ...],
+    reason: str,
+    detail: str,
+) -> EvidencePacket:
+    return _packet(
+        request,
+        prov,
+        Disposition.FAILED,
+        reason,
+        limitations=(f"Investigation failed: {detail}",),
+    )

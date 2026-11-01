@@ -14,6 +14,7 @@ into an abstention.
 
 import sqlite3
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -29,6 +30,7 @@ TIME_LIMIT = "retrieval_time_limit"
 class Limits:
     max_rows: int = 200
     max_seconds: float = 10.0
+    clock: Callable[[], float] = time.monotonic  # injectable for tests
 
 
 class RetrievalIncomplete(Exception):
@@ -42,7 +44,8 @@ class Reader:
 
     def __init__(self, path: Path, limits: Limits) -> None:
         self._max_rows = limits.max_rows
-        self._deadline = time.monotonic() + limits.max_seconds
+        self._clock = limits.clock
+        self._deadline = self._clock() + limits.max_seconds
         self._con = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
         self._con.row_factory = sqlite3.Row
         self._con.execute("PRAGMA query_only = ON")
@@ -50,7 +53,12 @@ class Reader:
         self._con.set_progress_handler(self._expired, 1000)
 
     def _expired(self) -> int:
-        return int(time.monotonic() > self._deadline)
+        return int(self._clock() > self._deadline)
+
+    def check_time(self) -> None:
+        """Raise if the whole-investigation budget is spent (call before answering)."""
+        if self._expired():
+            raise RetrievalIncomplete(TIME_LIMIT)
 
     def __enter__(self) -> "Reader":
         return self
@@ -65,8 +73,7 @@ class Reader:
 
     def rows(self, sql: str, params: tuple[str, ...] = ()) -> list[Row]:
         """Run a SELECT built from constants; `params` carry every value."""
-        if self._expired():
-            raise RetrievalIncomplete(TIME_LIMIT)
+        self.check_time()
         try:
             got = self._con.execute(
                 f"{sql} LIMIT {self._max_rows + 1}", params
