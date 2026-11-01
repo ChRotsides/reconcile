@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from reconcile.domain.money import Money
 
-POLICY_VERSION = "evidence-contract-0.4"
+POLICY_VERSION = "evidence-contract-0.5"
 
 # Stated in every answered legitimate_* and no_exception packet, so an all-clear
 # cannot be read as a general clean bill (docs/evidence-contract.md section 5.1).

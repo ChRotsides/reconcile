@@ -11,7 +11,7 @@ Small scenarios invented for this project (decision D030: no upstream FinRCA row
 - `quality_gaps`: the exact non-zero relationship gaps `quality_report` must show; `dropped_by_cutoff`; `snapshot_rows` (rows that must survive preparation);
 - `known_contract_gap`: set only where the current contract would answer wrongly. The contract is not changed.
 
-Every fixture that ends in an all-clear (`legitimate_*` or `no_exception`) carries an approval that is effective on the payment date for each allocated invoice, no over-allocated invoice, and a balanced payment journal equal to the payment (the prerequisites of section 5, `evidence-contract-0.4`). Section numbers refer to `docs/evidence-contract.md`. Clearing days use Monday to Friday only (June 2026 starts on a Monday).
+Every fixture that ends in an all-clear (`legitimate_*` or `no_exception`) carries an approval that is effective on the payment date for each allocated invoice, no over-allocated invoice, and a balanced payment journal equal to the payment (the prerequisites of section 5, `evidence-contract-0.5`). Section numbers refer to `docs/evidence-contract.md`. Clearing days use Monday to Friday only (June 2026 starts on a Monday).
 
 ## Contract scenarios
 

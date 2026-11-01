@@ -152,7 +152,8 @@ def _no_bank_row(
     journal_evs = [
         ev
         for jid, lines in rt.journals(reader, pid, "payment", cutoff).items()
-        if (ev := led.journal(jid, lines, "payment_journal")) is not None
+        if (ev := led.journal(jid, lines, "payment_journal", pid, "payment"))
+        is not None
     ]
     if not alloc_evs or not journal_evs:
         return led.abstain(
@@ -341,7 +342,11 @@ def diagnose_bank_row(
             "unsupported_fx", "a documented conversion path between currencies"
         )
     lines = rt.journals(reader, bid, "bank_fee", cutoff)
-    evs = [e for j, ls in lines.items() if (e := led.journal(j, ls, "fee_journal"))]
+    evs = [
+        e
+        for j, ls in lines.items()
+        if (e := led.journal(j, ls, "fee_journal", bid, "bank_fee"))
+    ]
     if not lines:
         led.search(
             "gl_entries",

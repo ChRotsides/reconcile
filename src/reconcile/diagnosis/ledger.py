@@ -108,29 +108,58 @@ class Ledger:
             {"posted_date": req(row, "posted_date")},
         )
 
-    def journal(self, journal: str, lines: list[Row], relationship: str) -> str | None:
-        """Cite a balanced journal (total debit = total credit > 0); None if it
-        is not balanced or mixes currencies. Its amount is the total debit."""
+    def journal(
+        self,
+        journal: str,
+        lines: list[Row],
+        relationship: str,
+        source: str,
+        gl_type: str,
+    ) -> str | None:
+        """Cite a journal that is balanced as a whole (total debit = total credit
+        > 0, one currency) and whose lines of `gl_type` sourced to `source` are
+        themselves balanced. Its `amount` is the total debit of those attributable
+        lines, the figure to compare with the source record; `journal_total` is
+        the whole journal's total debit. None if either check fails."""
         currencies = {req(x, "currency") for x in lines}
         if len(currencies) != 1:
             return None
         cur = currencies.pop()
-        debit = reduce(
-            lambda a, b: a + b, (Money.parse(req(x, "debit"), cur) for x in lines)
+        total = self._sides(lines, cur)
+        own = self._sides(
+            [
+                x
+                for x in lines
+                if x["source_transaction_id"] == source
+                and x["transaction_type"] == gl_type
+            ],
+            cur,
         )
-        credit = reduce(
-            lambda a, b: a + b, (Money.parse(req(x, "credit"), cur) for x in lines)
-        )
-        if debit != credit or debit.amount <= 0:
+        if total[0] != total[1] or total[0].amount <= 0:
+            return None
+        if own[0] != own[1] or own[0].amount <= 0:
             return None
         return self.record(
             f"journal:{journal}",
             "gl_entries",
             journal,
             relationship,
-            {"amount": str(debit), "currency": cur},
+            {"amount": str(own[0]), "journal_total": str(total[0]), "currency": cur},
             {"posting_date": max(req(x, "posting_date") for x in lines)},
         )
+
+    @staticmethod
+    def _sides(lines: list[Row], cur: str) -> tuple[Money, Money]:
+        zero = Money.parse("0", cur)
+        debit = reduce(
+            lambda a, b: a + b, (Money.parse(req(x, "debit"), cur) for x in lines), zero
+        )
+        credit = reduce(
+            lambda a, b: a + b,
+            (Money.parse(req(x, "credit"), cur) for x in lines),
+            zero,
+        )
+        return debit, credit
 
     def search(self, table: str, predicate: str, count: int, relationship: str) -> str:
         evidence_id = f"search_{len(self.items)}"

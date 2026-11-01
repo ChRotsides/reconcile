@@ -682,7 +682,7 @@ def run_clone(p: Prepared, tmp_path: Path) -> EvidencePacket:
 
 def test_policy_is_declared_in_every_packet(prepared: dict[str, Prepared]) -> None:
     prov = dict(run(prepared, "weekend_clearing").provenance)
-    assert prov["policy_version"] == "evidence-contract-0.4"
+    assert prov["policy_version"] == "evidence-contract-0.5"
     assert [
         prov[f"clearing_limit_{m}"] for m in ("ach", "wire", "check", "virtual_card")
     ] == [
@@ -1169,7 +1169,7 @@ def test_payment_journal_with_an_unrelated_line_is_not_balanced(
     assert reason(packet) == ("abstained", "payment_journal_unbalanced")
 
 
-def test_payment_journal_with_an_unrelated_balanced_pair_differs(
+def test_unrelated_balanced_pair_does_not_change_a_correct_payment_posting(
     prepared: dict[str, Prepared], tmp_path: Path
 ) -> None:
     packet = primary_packet(
@@ -1179,7 +1179,48 @@ def test_payment_journal_with_an_unrelated_balanced_pair_differs(
         extra_line("OTHER", "accrual", "50.00", "0.00", "payment"),
         extra_line("OTHER", "accrual", "0.00", "50.00", "payment"),
     )
+    assert reason(packet) == ("answered", "legitimate_weekend_clearing")
+    journal = next(e for e in packet.evidence if e.relationship == "payment_journal")
+    values = dict(journal.values)
+    assert values["amount"] == "800.00 EUR" and values["journal_total"] == "850.00 EUR"
+
+
+def test_unrelated_postings_cannot_fill_a_payment_posting_shortfall(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    """Review round 2: 800 paid, 640 posted for the payment plus a balanced 160 pair
+    of another transaction in the same journal. The journal balances at 800 but
+    only 640 is attributable to the payment."""
+    packet = primary_packet(
+        prepared,
+        tmp_path,
+        "weekend_clearing",
+        "UPDATE gl_entries SET debit = '640.00' WHERE debit = '800.00'",
+        "UPDATE gl_entries SET credit = '640.00' WHERE credit = '800.00'",
+        extra_line("OTHER", "accrual", "160.00", "0.00", "payment"),
+        extra_line("OTHER", "accrual", "0.00", "160.00", "payment"),
+    )
     assert reason(packet) == ("abstained", "payment_journal_amount_differs")
+    (calc,) = [
+        c
+        for c in packet.calculations
+        if c.calculation_id.startswith("payment_minus_payment_journals")
+    ]
+    assert calc.result == Money.parse("160.00", "EUR")
+
+
+def test_unbalanced_payment_lines_hidden_by_other_lines_are_unbalanced(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    """The whole journal balances (800 = 800) but the payment's own lines do not."""
+    packet = primary_packet(
+        prepared,
+        tmp_path,
+        "weekend_clearing",
+        "UPDATE gl_entries SET credit = '700.00' WHERE credit = '800.00'",
+        extra_line("OTHER", "accrual", "0.00", "100.00", "payment"),
+    )
+    assert reason(packet) == ("abstained", "payment_journal_unbalanced")
 
 
 def test_fee_journal_with_an_unrelated_line_is_invalid(
@@ -1209,15 +1250,66 @@ def test_accounted_fee_in_another_currency_than_the_payment_abstains(
     assert reason(packet) == ("abstained", "unsupported_fx")
 
 
+SECOND_INVOICE = (
+    "INSERT INTO invoices SELECT 'inv2', vendor_id, po_id, invoice_date,"
+    " received_date, due_date, currency, '5.00', '0.00', '0.00', '5.00',"
+    " payment_terms, status FROM invoices LIMIT 1",
+    "INSERT INTO payment_allocations SELECT payment_id, 'inv2', '5.00',"
+    " allocation_date FROM payment_allocations LIMIT 1",
+    "INSERT INTO approval_events SELECT 'apr2', 'inv2', approval_level,"
+    " approver_role, action, event_timestamp, previous_status, new_status"
+    " FROM approval_events WHERE new_status = 'approved'",
+)
+PAY_1505 = (  # the payment, its debit and its journal all grow by the 5.00
+    "UPDATE payments SET payment_amount = '1505.00'",
+    "UPDATE bank_transactions SET amount = '1505.00'",
+    "UPDATE gl_entries SET debit = '1505.00' WHERE debit = '1500.00'",
+    "UPDATE gl_entries SET credit = '1505.00' WHERE credit = '1500.00'",
+)
+
+
 def test_guard_cites_every_allocation_and_approval_of_a_multi_invoice_payment(
     prepared: dict[str, Prepared], tmp_path: Path
 ) -> None:
     """A due-date payment that also covers a second invoice: the guard relies on
     that invoice's allocation and approval, so the packet must cite both."""
     p = prepared["due_date_payment"]
-    copy = clone(
-        p,
+    copy = clone(p, tmp_path, *PAY_1505, *SECOND_INVOICE)
+    packet = investigate(copy, p.request("invoices", "INV_1"))
+    assert reason(packet) == ("answered", "legitimate_due_date_payment")
+    cited = {e.record.record_id for e in packet.evidence if e.record}
+    assert {a.split("|")[1] for a in cited if "|" in a} >= {
+        p.token("invoices", "INV_1"),
+        "inv2",
+    }
+    assert "apr2" in cited
+
+
+def test_payment_allocated_beyond_its_amount_is_not_an_all_clear(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    """Review round 2: 1500 paid, allocated 1500 and 5; each invoice is fine."""
+    p = prepared["due_date_payment"]
+    copy = clone(p, tmp_path, *SECOND_INVOICE)
+    packet = investigate(copy, p.request("invoices", "INV_1"))
+    assert reason(packet) == ("abstained", "payment_over_allocated")
+    assert [f.check_id for f in packet.diagnosis.findings] == ["payment_over_allocated"]
+    (calc,) = [
+        c
+        for c in packet.calculations
+        if c.calculation_id.startswith("payment_minus_allocations")
+    ]
+    assert calc.result == Money.parse("-5.00", "EUR")
+
+
+@pytest.mark.parametrize("name", ["weekend_clearing", "check_clearing"])
+def test_payment_primary_over_allocation_is_not_an_all_clear(
+    prepared: dict[str, Prepared], tmp_path: Path, name: str
+) -> None:
+    packet = primary_packet(
+        prepared,
         tmp_path,
+        name,
         "INSERT INTO invoices SELECT 'inv2', vendor_id, po_id, invoice_date,"
         " received_date, due_date, currency, '5.00', '0.00', '0.00', '5.00',"
         " payment_terms, status FROM invoices LIMIT 1",
@@ -1227,11 +1319,5 @@ def test_guard_cites_every_allocation_and_approval_of_a_multi_invoice_payment(
         " approver_role, action, event_timestamp, previous_status, new_status"
         " FROM approval_events WHERE new_status = 'approved'",
     )
-    packet = investigate(copy, p.request("invoices", "INV_1"))
-    assert reason(packet) == ("answered", "legitimate_due_date_payment")
-    cited = {e.record.record_id for e in packet.evidence if e.record}
-    assert {a.split("|")[1] for a in cited if "|" in a} >= {
-        p.token("invoices", "INV_1"),
-        "inv2",
-    }
-    assert "apr2" in cited
+    # Two invoices make this a batch whose allocations differ, or the guard fires.
+    assert packet.diagnosis.disposition is Disposition.ABSTAINED

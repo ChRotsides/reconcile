@@ -3,8 +3,9 @@
 Before a payment is called legitimate or "no exception", three generic finance
 rules must hold, all read from allowlisted snapshot tables:
 
-1. Invoice totals. No invoice the payment is allocated to is over-allocated by
-   the effective payments (this is also the duplicate check), in one currency.
+1. Allocations. No invoice the payment is allocated to is over-allocated by the
+   effective payments (this is also the duplicate check), and the payment's own
+   allocations do not exceed its amount, all in one currency.
 2. Approval. Each invoice the payment is allocated to has an approval that is
    effective on the payment date: the latest approval-workflow event dated on
    or before the payment date is a final approval, i.e. `action` approved or
@@ -13,8 +14,10 @@ rules must hold, all read from allowlisted snapshot tables:
    cancellation or reopening on or before the payment date revokes it; events
    after the payment date do not matter. Events with the same timestamp have no
    order, so the approval is effective only if every one of them is final.
-3. GL posting. The payment has a balanced ERP payment journal in the payment's
-   currency whose amount equals the payment amount within one minor unit.
+3. GL posting. The payment has ERP payment journals, each balanced as a whole,
+   in the payment's currency, whose lines sourced to the payment are balanced
+   and total the payment amount within one minor unit. Unrelated lines in the
+   same journal may not make up a shortfall.
 
 If any cannot be confirmed the case abstains with a specific reason. The guard
 runs last, so every other reason keeps its precedence.
@@ -37,6 +40,7 @@ from reconcile.retrieval.snapshot import Reader, Row
 
 NOT_COMPLETED = "invoice_approval_not_completed"
 NOT_EFFECTIVE = "invoice_approval_not_effective"
+PAYMENT_OVER_ALLOCATED = "payment_over_allocated"
 BEFORE_APPROVAL = "payment_before_approval"
 JOURNAL_MISSING = "payment_journal_missing"
 JOURNAL_UNBALANCED = "payment_journal_unbalanced"
@@ -154,23 +158,41 @@ def _totals(
     invoices: list[str],
     allocs: list[Row],
     cutoff: date,
-) -> Finding | EvidencePacket:
+) -> list[Finding] | EvidencePacket:
     pay_ev = f"pay:{pid}"
     cur = dict(led.items[pay_ev].values)["payment_currency"]
     bals = invoice_balances(led, reader, invoices, cur, cutoff, pid)
     if isinstance(bals, EvidencePacket):
         return bals
     # Every allocation of the payment is relied on (its invoice is approved and
-    # totalled below), so each is cited whether or not the payment is effective.
-    return _supported(
-        "invoice_totals_not_exceeded",
-        (
-            pay_ev,
-            *alloc_evs_of(led, pid, allocs, cur),
-            *[e for b in bals for e in b.evidence],
-        ),
-        tuple(b.calc_id for b in bals if b.calc_id),
+    # totalled), so each is cited whether or not the payment is effective.
+    alloc_evs = alloc_evs_of(led, pid, allocs, cur)
+    q = quantum(cur)
+    spread = led.calc(
+        f"payment_minus_allocations:{pid}",
+        "difference",
+        [(pay_ev, "payment_amount"), *[(e, "allocated_amount") for e in alloc_evs]],
+        q,
     )
+    if spread.result.amount < -q.amount:  # allocated more than was paid
+        finding = _supported(
+            PAYMENT_OVER_ALLOCATED, (pay_ev, *alloc_evs), (spread.calculation_id,)
+        )
+        return led.abstain(
+            PAYMENT_OVER_ALLOCATED,
+            "an explanation of allocations that exceed the payment amount",
+            (finding,),
+        )
+    return [
+        _supported(
+            "payment_not_over_allocated", (pay_ev, *alloc_evs), (spread.calculation_id,)
+        ),
+        _supported(
+            "invoice_totals_not_exceeded",
+            (pay_ev, *alloc_evs, *[e for b in bals for e in b.evidence]),
+            tuple(b.calc_id for b in bals if b.calc_id),
+        ),
+    ]
 
 
 def _journal(
@@ -194,7 +216,7 @@ def _journal(
         )
     evs: list[str] = []
     for jid, ls in lines.items():
-        ev = led.journal(jid, ls, "payment_journal")
+        ev = led.journal(jid, ls, "payment_journal", pid, "payment")
         if ev is None:
             return led.abstain(
                 JOURNAL_UNBALANCED,
@@ -242,7 +264,7 @@ def guard_payment(
     journal = _journal(led, reader, pid, cutoff)
     if isinstance(journal, EvidencePacket):
         return journal
-    return [totals, *approval, *journal]
+    return [*totals, *approval, *journal]
 
 
 def guarded(

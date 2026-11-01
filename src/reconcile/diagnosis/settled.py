@@ -125,7 +125,11 @@ def _shortfall(
             ),
             ("The cause of the shortfall is not observable and is not asserted.",),
         )
-    evs = [e for j, ls in lines.items() if (e := led.journal(j, ls, "fee_journal"))]
+    evs = [
+        e
+        for j, ls in lines.items()
+        if (e := led.journal(j, ls, "fee_journal", d_id, "bank_fee"))
+    ]
     if len(evs) != len(lines):
         return led.abstain(
             "fee_journal_invalid", "balanced single-currency fee journals"
@@ -391,7 +395,9 @@ def _reversal(
     c_ev = row_evs[req(credits[0], "bank_transaction_id")]
     lines = rt.journals(reader, pid, "payment_reversal", cutoff)
     evs = [
-        e for j, ls in lines.items() if (e := led.journal(j, ls, "reversal_journal"))
+        e
+        for j, ls in lines.items()
+        if (e := led.journal(j, ls, "reversal_journal", pid, "payment_reversal"))
     ]
     if len(lines) != 1 or len(evs) != 1:
         return led.abstain(

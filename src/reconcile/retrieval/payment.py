@@ -76,7 +76,8 @@ def journals(
     line of that journal_id, whatever its source or type), so that a balance
     claim covers the whole journal and not only the lines found by the filter."""
     lines = reader.rows(
-        "SELECT journal_id, posting_date, debit, credit, currency FROM gl_entries"
+        "SELECT journal_id, source_transaction_id, transaction_type, posting_date,"
+        " debit, credit, currency FROM gl_entries"
         " WHERE posting_date <= ? AND journal_id IN (SELECT journal_id FROM gl_entries"
         " WHERE source_transaction_id = ? AND transaction_type = ?"
         " AND posting_date <= ?) ORDER BY journal_id, journal_line_id",
