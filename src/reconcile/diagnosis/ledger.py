@@ -62,7 +62,19 @@ class Ledger:
         values: dict[str, str],
         timestamps: dict[str, str] | None = None,
     ) -> str:
-        if evidence_id in self.items:  # first citation wins (keeps its relationship)
+        old = self.items.get(evidence_id)
+        if old is not None:
+            # Re-citing is allowed when it is the same record with the same values
+            # and timestamps; the first relationship text is kept (a label, not a
+            # fact). Anything else is an id collision, which must not silently
+            # reuse the first item's figures.
+            same = (
+                old.record == RecordRef(self.request.snapshot, table, record_id)
+                and dict(old.values) == values
+                and dict(old.timestamps) == (timestamps or {})
+            )
+            if not same:
+                raise ValueError(f"evidence id {evidence_id!r} re-recorded differently")
             return evidence_id
         self.items[evidence_id] = EvidenceItem(
             evidence_id,
@@ -118,7 +130,9 @@ class Ledger:
     ) -> str | None:
         """Cite a journal that is balanced as a whole (total debit = total credit
         > 0, one currency) and whose lines of `gl_type` sourced to `source` are
-        themselves balanced. Its `amount` is the total debit of those attributable
+        themselves balanced. The evidence id is `journal:<journal_id>:<source>:
+        <gl_type>`: the amount depends on the attribution, so each attribution is
+        its own item. Its `amount` is the total debit of those attributable
         lines, the figure to compare with the source record; `journal_total` is
         the whole journal's total debit. None if either check fails."""
         currencies = {req(x, "currency") for x in lines}
@@ -140,11 +154,17 @@ class Ledger:
         if own[0] != own[1] or own[0].amount <= 0:
             return None
         return self.record(
-            f"journal:{journal}",
+            f"journal:{journal}:{source}:{gl_type}",
             "gl_entries",
             journal,
             relationship,
-            {"amount": str(own[0]), "journal_total": str(total[0]), "currency": cur},
+            {
+                "amount": str(own[0]),
+                "journal_total": str(total[0]),
+                "currency": cur,
+                "source": source,
+                "gl_type": gl_type,
+            },
             {"posting_date": max(req(x, "posting_date") for x in lines)},
         )
 

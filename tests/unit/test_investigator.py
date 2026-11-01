@@ -1321,3 +1321,79 @@ def test_payment_primary_over_allocation_is_not_an_all_clear(
     )
     # Two invoices make this a batch whose allocations differ, or the guard fires.
     assert packet.diagnosis.disposition is Disposition.ABSTAINED
+
+
+# --- evidence identity: one journal shared by two guarded payments ------------
+
+
+def shared_journal(p: Prepared) -> tuple[str, ...]:
+    """Put the payment lines of PAY_2 into PAY_1's journal."""
+    pay1, pay2 = p.token("payments", "PAY_1"), p.token("payments", "PAY_2")
+    return (
+        "UPDATE gl_entries SET journal_id = (SELECT journal_id FROM gl_entries"
+        f" WHERE source_transaction_id = '{pay1}' LIMIT 1)"
+        f" WHERE source_transaction_id = '{pay2}'",
+    )
+
+
+EQUAL_PAYMENTS = (  # both split payments become 1000.00 (invoice total is 2000.00)
+    "UPDATE payments SET payment_amount = '1000.00'",
+    "UPDATE payment_allocations SET allocated_amount = '1000.00'",
+    "UPDATE bank_transactions SET amount = '1000.00'",
+    "UPDATE gl_entries SET debit = '1000.00' WHERE debit <> '0.00'",
+    "UPDATE gl_entries SET credit = '1000.00' WHERE credit <> '0.00'",
+)
+
+
+def test_second_payment_in_a_shared_journal_that_posts_short_abstains(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    """Review round 3: PAY_1 and PAY_2 (1000 each) share journal J. PAY_1's pair is
+    1000, PAY_2's pair only 800. PAY_2 must not reuse the amount cited for PAY_1."""
+    p = prepared["split_payment"]
+    pay2 = p.token("payments", "PAY_2")
+    copy = clone(
+        p,
+        tmp_path,
+        *EQUAL_PAYMENTS,
+        *shared_journal(p),
+        "UPDATE gl_entries SET debit = '800.00' WHERE debit = '1000.00'"
+        f" AND source_transaction_id = '{pay2}'",
+        "UPDATE gl_entries SET credit = '800.00' WHERE credit = '1000.00'"
+        f" AND source_transaction_id = '{pay2}'",
+    )
+    packet = investigate(copy, p.request("invoices", "INV_1"))
+    assert reason(packet) == ("abstained", "payment_journal_amount_differs")
+
+
+def test_shared_journal_with_correct_postings_of_different_amounts_is_clear(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    """Converse: 1200 and 800 correctly posted in one journal; each payment is
+    compared with its own attribution, so neither abstains."""
+    p = prepared["split_payment"]
+    copy = clone(p, tmp_path, *shared_journal(p))
+    packet = investigate(copy, p.request("invoices", "INV_1"))
+    assert reason(packet) == ("answered", "legitimate_split_payment")
+    ids = sorted(
+        e.evidence_id for e in packet.evidence if e.relationship == "payment_journal"
+    )
+    assert len(ids) == 2 and all(i.startswith("journal:") for i in ids)
+    assert {i.split(":")[2] for i in ids} == {
+        p.token("payments", "PAY_1"),
+        p.token("payments", "PAY_2"),
+    }
+    assert {i.split(":")[3] for i in ids} == {"payment"}
+
+
+def test_recording_an_evidence_id_with_different_values_fails_loudly() -> None:
+    from reconcile.diagnosis.ledger import Ledger
+
+    request = InvestigationRequest(
+        "r", "a" * 64, RecordRef("a" * 64, "payments", "p1"), "s", CUTOFF, "pol"
+    )
+    led = Ledger(request, ())
+    led.record("x", "payments", "p1", "primary", {"a": "1"})
+    led.record("x", "payments", "p1", "other relationship", {"a": "1"})  # same fact
+    with pytest.raises(ValueError, match="re-recorded differently"):
+        led.record("x", "payments", "p1", "primary", {"a": "2"})
