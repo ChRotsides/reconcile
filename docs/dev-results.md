@@ -323,3 +323,45 @@ The "with" view reproduces the run 3 table above exactly. Without the 5, the onl
 (Run 3 evaluator: 100% evidence-complete, correct and complete 481/498 and 481/503.) **What the stricter evaluator found:** 6 answered cohort packets (and 15 answered packets in all, counting the 9 that are outside the scored views) are incomplete, all for the same item, `guard_allocations`: they are `legitimate_due_date_payment` packets whose effective payment is also allocated to a second invoice. The guard checks that invoice's approval, but the packet cites only the allocation of the primary invoice, so the packet does not show where the second invoice came from. This is an investigator evidence gap, not an evaluator artefact; it is for the investigator fix and for the next run to confirm. Every other answered packet passes all the new items, so the approval and journal findings are present everywhere.
 
 Reproduce: `uv run python evaluation/dev_run.py evaluate m2-dev-4`.
+
+## 11. Run 5 (`m2-dev-5`, 2026-11-01): policy `evidence-contract-0.4`, guard-aware completeness
+
+Fresh inference run (`artifacts/dev-runs/m2-dev-5/`, `run-manifest.json`: policy `evidence-contract-0.4`) after the M2 review fixes, scored by the run 4 evaluator (`evaluation/dev_run.py`): evidence-complete means the category's requirements plus the contract 0.3 guard items (allocations, terminal approval event and finding, payment journal, journal calculation and finding) for every all-clear, and every stated search must reproduce on the snapshot (section 10, "Run 4"). The cohort and label-conflict code is the shared `evaluation/cohort.py`. All numbers below are from `artifacts/dev-runs/m2-dev-5/report.txt`. Dispositions over the 1,608 requests: answered 587, out_of_scope 720, abstained 301.
+
+**What changed against the run 4 re-evaluation of `m2-dev-4`.** The stricter evaluator, applied to the old packets, found 15 answered packets incomplete on `guard_allocations` (6 in the scored cohort: correct and complete 475/498, evidence-complete among answered 491/497). In `m2-dev-5` those are gone after the investigator citation fix (commit f7fffcc, policy 0.4): evidence-complete 497/497 and correct and complete 481/498, the same count as the pre-guard run 3 evaluator. Exact-category precision (481/497), the 16 wrong variants, the 5 label conflicts, the 5 label conflicts (0 review candidates) and the FX slice are unchanged.
+
+**Cohort metrics, both views.** Train / validation / both.
+
+| Metric | Without the 5 label conflicts (scored) | With the 5 |
+|---|---|---|
+| Cohort cases | 376 / 122 / 498 | 380 / 123 / 503 |
+| Answered (coverage) | 375/376, 122/122, 497/498 = 0.998 | 375/380, 122/123, 497/503 = 0.988 |
+| Exact-category precision (correct / answered) | 362/375 = 0.965, 119/122 = 0.975, 481/497 = 0.968 | same |
+| Failure vs no-failure accuracy, answered | 497/497 | 497/497 |
+| Evidence-complete among answered | 375/375, 122/122, 497/497 | 375/375, 122/122, 497/497 (same answered set) |
+| Correct and complete / cases | 362/376 = 0.963, 119/122 = 0.975, 481/498 = 0.966 | 362/380 = 0.953, 119/123 = 0.968, 481/503 = 0.956 |
+| Search counts reproduce, among answered | 375/375, 122/122, 497/497 | same |
+| False alarms, cohort legitimate | 0/206, 0/70, 0/276 | 0/210, 0/71, 0/281 |
+| Wrong by kind | `wrong_legit_variant` 13 / 3 / 16 | same |
+| Non-answer reasons | `unsupported_fx` 1 (RCA_000568) | plus `payment_journal_amount_differs` 4 and `invoice_approval_not_completed` 1 (the five label conflicts, all abstentions) |
+
+**Safety metrics (all splits, validation in brackets).** False alarms on all legitimate cases 0/526 (0/139); cohort variants including FX 0/315 (0/80); AP-side variants 0/211 (0/59). **All-clear on out-of-scope failures (the risk metric): 0/859 (0/225)**, zero in every one of the 12 out-of-scope failure families. FX: 30/30 correct abstentions (9/9), 30/30 citing the payment and the other-currency bank row (9/9).
+
+**Error slices (all splits).** The only wrong answers are 16 wrong legitimate variants, all answered with another legitimate category (so no false alarm and correct on the failure axis):
+
+| Label | Cases | Answered correct | Wrong answer |
+|---|---:|---:|---|
+| legitimate weekend clearing | 38 | 32 | 6 as `legitimate_batch_payment` |
+| legitimate check clearing | 27 | 22 | 5 as `legitimate_batch_payment` |
+| legitimate due-date payment | 34 | 28 | 5 as `legitimate_split_payment`; 1 abstained (RCA_002212, label conflict) |
+| legitimate split payment | 35 | 32 | 3 abstained (label conflicts) |
+| legitimate net-fee accounting | 33 | 32 | 1 abstained (label conflict RCA_002182) |
+| F06 | 75 | 74 | 1 abstained (`unsupported_fx`, RCA_000568) |
+| F12 71/71, F14 76/76, accounted fee 23/23, batch 26/26, reversal 32/32, pending 33/33 | | all | none |
+
+These are wrong-variant answers of the same kinds as in earlier runs (weekend and check clearing answered as batch, due-date answered as split); the full confusion matrix is in `m2-dev-5/report.txt`.
+
+**Out of scope.** 859 failure cases from 12 families: out_of_scope 574, abstained 256, answered 29 (all F15 cases answered `F14`: a failure class, not an all-clear). 211 AP-side legitimate cases: answered 61 (`legitimate_due_date_payment` 37, `legitimate_split_payment` 24, none a false alarm), out_of_scope 143, abstained 7. Special cases: contradicted RCA_001631, RCA_001791, RCA_002223 out_of_scope, RCA_002127 abstained `debit_differs_from_payment`; not gradable RCA_000588 abstained `commitment_not_proven_at_cutoff`.
+
+Reproduce: `uv run python evaluation/dev_run.py run m2-dev-5` (new tag); the re-evaluation of an existing run is `evaluate TAG`.
+

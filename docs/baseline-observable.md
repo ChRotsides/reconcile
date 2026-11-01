@@ -1,13 +1,13 @@
 # Observable-input classical-ML baseline (M2)
 
-Status: PLAN.md M2 task "the strongest applicable classical-ML baseline against the same observable inputs". Run tag `obs-2` (final code, 2026-11-01), key-order check `obs-1`. Code: `evaluation/baselines/observable/` (`features.py`, `evidence.py`, `run.py`) and the shared `evaluation/cohort.py`. Investigator compared: run `m2-dev-4` (policy `evidence-contract-0.3`), validation rows recomputed from `artifacts/dev-runs/m2-dev-4/cases.jsonl` with the same definitions (`run.py` `investigator_rows`).
+Status: PLAN.md M2 task "the strongest applicable classical-ML baseline against the same observable inputs". Current run `obs-3` (2026-11-01, after the M2 review fixes: shared calendar, shared cohort, relabelled evidence check), compared with investigator run `m2-dev-5` (policy `evidence-contract-0.4`; `--investigator-run m2-dev-5`). Earlier runs `obs-1` and `obs-2` used the old calendar and cohort and are history. Code: `evaluation/baselines/observable/` (`features.py`, `evidence.py`, `run.py`) and the shared `evaluation/cohort.py`. All figures in sections 2 to 4 come from `artifacts/baselines/obs-3/metrics.json` and `artifacts/dev-runs/m2-dev-5/cases.jsonl` (via `run.py` `investigator_rows`), unless a sentence names another run.
 
-**Stale numbers.** Every figure below (sections 2 to 4) is from `obs-2`, computed before the M2 review fixes: with business days counted in `[start, end)` (the review found that the investigator counts `(start, end]`), against the investigator cohort of 123 in the baseline and 122 in `investigator_validation` (finding 11), and with the evidence check described under "Deterministic evidence retrieval" before it was relabelled (finding 10). The code now uses the investigator's calendar, the shared cohort and both views, but the baseline has not been re-run, so no number here has been regenerated. The parent re-runs `run.py` and replaces the tables.
+**What changed since `obs-2`.** `obs-3` counts business days in `(start, end]` with the investigator's function (`obs-2` used `[start, end)`), scores both systems on identical cohorts in two views (`obs-2` compared a 123-case baseline with a 122-case investigator), and describes the evidence check as a relaxed record-availability bound. The cohort-level result did not move (109/123 correct, the same 14 wrong cohort cases); the all-clear count on out-of-scope failures went from 5/225 to 6/225 (section 3).
 
 ## 1. What this is and is not
 
 - Development-set numbers on a synthetic benchmark (FinRCA, revision `76c93ec`), train and validation only. The investigator was written against the same labels (`docs/dev-results.md` section 1), and this baseline's model was selected on the validation split, so neither is unseen. `test`, `challenge_test` and the top-level combined label files were not opened.
-- Same inputs as the investigator: the prepared snapshot (allowlist, opaque tokens, cutoff 2026-06-30) and neutral requests (primary entity table and token only). The baseline prepared its own key (`data/private/obs-2/key`) and snapshot with the same adapters. Feature code opens no label file, no key and no links file; labels are opened by `run.py` after all features exist.
+- Same inputs as the investigator: the prepared snapshot (allowlist, opaque tokens, cutoff 2026-06-30) and neutral requests (primary entity table and token only). The baseline prepared its own key (`data/private/obs-3/key`) and snapshot with the same adapters. Feature code opens no label file, no key and no links file; labels are opened by `run.py` after all features exist.
 - One model, one grid, one seed (`20261101`). No claim beyond the tables below.
 
 ## 2. Method
@@ -31,14 +31,14 @@ Business days are Monday to Friday in `(start, end]`, from `reconcile.domain.cal
 | Model family | Validation cohort correct (range over its grid) |
 |---|---:|
 | HistGradientBoosting (8) | 103 to 109 |
-| Random forest (4) | 97 to 103 |
-| Logistic regression (3) | 90 to 92 |
+| Random forest (4) | 99 to 102 |
+| Logistic regression (3) | 92 to 95 |
 
-HistGradientBoosting is also the upstream published winner (`docs/baseline-reproduction.md`); here it is also best on the observable inputs. Selection bias: the best of 15 on 123 cases is optimistic, and the neighbours of the winner (106 to 109) show the spread, so the 109 is an upper-end estimate for this baseline.
+HistGradientBoosting is also the upstream published winner (`docs/baseline-reproduction.md`); here it is also best on the observable inputs. Selection bias: the best of 15 on 123 cases is optimistic, and the neighbours of the winner (106 to 109) show the spread (the HistGradientBoosting grid ranges 103 to 109, `obs-3`), so the 109 is an upper-end estimate for this baseline.
 
 **Scoring.** Cohort, groups, label conflicts and category mapping are one module, `evaluation/cohort.py` (`group_of`, `label_conflicts`, `FAMILY_KEYS`, `VARIANT_CATEGORY`, `CONTRADICTED`, `NOT_GRADABLE`, `is_no_failure`, `is_failure`), imported by both `dev_run.py` and the baseline (`tests/unit/test_cohort.py` fails if either script defines them again). Both systems are reported in the same two views: **without the label conflicts** (the scored cohort, 122 validation cases on `m2-dev-4`) and **with** them (123), from the same groups. `run.py` recomputes the investigator's groups from the shared function and stops if the baseline and investigator cohorts differ in either view, or if the investigator's `cases.jsonl` was written with a different conflict set (re-run `dev_run.py evaluate`). Model selection and the abstention threshold keep the pre-conflict definition (all in-scope cases, 123 on validation) so that the selected model does not depend on the conflict rule. The metric definitions are replicated from `dev_run.py` (`classify`, `cohort_metrics`, `all_clear_risk`; these are not shared code). A classifier always answers, so coverage is 100% in the primary view. A "false alarm" follows `dev_run`: a legitimate case answered with any category that is not `legitimate_*` (so it includes a predicted F08 or F01); the narrower "predicted F06, F12 or F14" count is given beside it.
 
-**Optional abstention.** Declared rule: take the cross-validated (5-fold, grouped by vendor token) class probabilities of the selected configuration on TRAIN; the threshold is the smallest value on the grid 0.50 to 0.95 (step 0.05) whose train cohort answer precision is at least 0.99; the baseline abstains below it. Chosen: 0.85 (`obs-2`; 0.90 in `obs-1`).
+**Optional abstention.** Declared rule: take the cross-validated (5-fold, grouped by vendor token) class probabilities of the selected configuration on TRAIN; the threshold is the smallest value on the grid 0.50 to 0.95 (step 0.05) whose train cohort answer precision is at least 0.99; the baseline abstains below it. Chosen: 0.90 in `obs-3` (train cross-validated precision 0.9895 at 0.85, 1.000 at 0.90; 0.85 in `obs-2`, 0.90 in `obs-1`).
 
 **Evidence check: a relaxed record-availability upper bound** (`evidence.py`). For the predicted category and the primary entity, test whether the snapshot holds the record kinds and absence counts the category's main contract branch needs. It is not a check of the contract and not a packet check: nothing is assembled, cited or rendered. What it does not check:
 - the contract 0.3 all-clear prerequisites: completed final approval of each allocated invoice on or before the payment date, the payment journal in the payment's currency, payment minus journals within one quantum;
@@ -50,26 +50,42 @@ HistGradientBoosting is also the upstream published winner (`docs/baseline-repro
 - `no_exception` and every category the contract does not define here (other failure families, the FX variant, AP-side variants, GL entities): always incomplete;
 - citation ids, calculations, day-count items, claim text, and whether stated search counts reproduce (they are computed from the snapshot).
 
-**Decision (finding 10): relabel, do not strengthen.** Strengthening to the contract and the guard would be a second implementation of the investigator's rules, which is the duplication that produced findings 8 and 11, and the baseline would still emit no packet to check. The honest description is a bound: the baseline's "evidence-complete" figures say "the records are available", an upper bound on what a packet-producing baseline could show under the investigator's stricter check. `metrics.json` carries `evidence_complete_meaning` saying this. The metric keys keep their names because the investigator rows go through the same function; read them accordingly. A wrong category usually fails its own check (a bank row exists, so "F12" cannot have a count-0 reference search); `obs-2` figures: 111 of 123 answers, and 109 of 109 correct ones, passed.
+**Decision (finding 10): relabel, do not strengthen.** Strengthening to the contract and the guard would be a second implementation of the investigator's rules, which is the duplication that produced findings 8 and 11, and the baseline would still emit no packet to check. The honest description is a bound: the baseline's "evidence-complete" figures say "the records are available", an upper bound on what a packet-producing baseline could show under the investigator's stricter check. `metrics.json` carries `evidence_complete_meaning` saying this. The metric keys keep their names because the investigator rows go through the same function; read them accordingly. A wrong category usually fails its own check (a bank row exists, so "F12" cannot have a count-0 reference search); `obs-3`: 111 of 123 answers, and 109 of 109 correct ones, passed (110 of 122 without the label conflict).
 
 ## 3. Validation results against the investigator
 
-Gradable validation cohort, 123 cases (the "with label conflicts" view; the investigator column was computed before the shared cohort, where its own scored cohort was 122 and the baseline's 123, so the two columns did not use identical cohorts). Investigator: `m2-dev-4`, no cases failed. Baseline: `obs-2`. After the fixes both systems are reported in two views on identical cohorts (122 and 123), by `run.py`; this table is to be replaced by the parent's re-run.
+Gradable validation cohort in both views: **without** the label conflict (122 cases, the scored cohort) and **with** it (123; the conflict is RCA_002212). The two systems are scored on identical cohorts in both (`run.py` stops otherwise; `identical_cohorts_checked` is true in `obs-3/metrics.json`). Investigator: `m2-dev-5`, nothing failed. Baseline: `obs-3`, selected HistGradientBoosting (lr 0.05, depth 3, L2 1.0), abstention threshold 0.90 (chosen on TRAIN).
 
-| Metric | Investigator `m2-dev-4` | Baseline, no abstention | Baseline, threshold 0.85 (chosen on TRAIN) |
+Without the label conflict (122 cases, scored view):
+
+| Metric | Investigator `m2-dev-5` | Baseline, no abstention | Baseline, threshold 0.90 |
 |---|---:|---:|---:|
-| Coverage (answered / cohort) | 122/123 = 0.992 | 123/123 = 1.000 | 98/123 = 0.797 |
-| Exact-category precision (correct / answered) | 119/122 = 0.975 | 109/123 = 0.886 | 94/98 = 0.959 |
-| Failure vs no-failure accuracy, answered | 122/122 = 1.000 | 115/123 = 0.935 | 94/98 = 0.959 |
-| **Correct and evidence-complete / cohort (primary)** | **119/123 = 0.967** (recorded before the run 4 evaluator, `dev-results.md`: now 118/123) | 109/123 = 0.886 (record availability only, see above) | 94/123 = 0.764 |
-| False alarms, cohort legitimate (dev_run definition) | 0/71 | 8/71 = 0.113 | 4/71 = 0.056 |
-| of which predicted F06, F12 or F14 | 0/71 | 0/71 | 0/71 |
+| Coverage (answered / cohort) | 122/122 = 1.000 | 122/122 = 1.000 | 93/122 = 0.762 |
+| Exact-category precision (correct / answered) | 119/122 = 0.975 | 109/122 = 0.893 | 92/93 = 0.989 |
+| Failure vs no-failure accuracy, answered | 122/122 = 1.000 | 114/122 = 0.934 | 92/93 = 0.989 |
+| **Correct and evidence-complete / cohort (primary)** | **119/122 = 0.975** | 109/122 = 0.893 (record availability only, section 2) | 92/122 = 0.754 |
+| False alarms, cohort legitimate (dev_run definition) | 0/70 | 8/70 = 0.114 | 1/70 = 0.014 |
+| of which predicted F06, F12 or F14 | 0/70 | 0/70 | 0/70 |
 | False alarms, AP-side legitimate (out of scope) | 0/59 | 17/59 = 0.288 | 0/59 |
-| False alarms, all legitimate | 0/139 | 25/139 = 0.180 | 4/139 = 0.029 |
-| All-clear on out-of-scope failures | 0/225 | 5/225 = 0.022 | 0/225 |
+| False alarms, all legitimate | 0/139 | 25/139 = 0.180 | 1/139 = 0.007 |
+| All-clear on out-of-scope failures | 0/225 | 6/225 = 0.027 | 0/225 |
 | FX slice (9 cases; investigator abstains `unsupported_fx` = correct) | 9/9 abstained | 9/9 called `legitimate_fx_settlement` | not applicable |
 
-Reading. On the same observable inputs the strong classifier is clearly worse on the primary outcome (0.886 against 0.967 without abstention), and it never reaches the investigator by abstaining (0.764 at 0.85). It gives up precision and false-alarm and all-clear safety, which the investigator, a rule set with an explicit contract, holds at 0 on this development set. The classifier's evidence completeness is not an independent measurement (above); its correct answers are as "complete" as the snapshot allows.
+With the label conflict (123 cases):
+
+| Metric | Investigator `m2-dev-5` | Baseline, no abstention | Baseline, threshold 0.90 |
+|---|---:|---:|---:|
+| Coverage | 122/123 = 0.992 | 123/123 = 1.000 | 93/123 = 0.756 |
+| Exact-category precision | 119/122 = 0.975 | 109/123 = 0.886 | 92/93 = 0.989 |
+| Failure vs no-failure accuracy, answered | 122/122 = 1.000 | 115/123 = 0.935 | 92/93 = 0.989 |
+| **Correct and evidence-complete / cohort (primary)** | **119/123 = 0.967** | 109/123 = 0.886 | 92/123 = 0.748 |
+| False alarms, cohort legitimate | 0/71 | 8/71 = 0.113 | 1/71 = 0.014 |
+| False alarms, all legitimate | 0/139 | 25/139 = 0.180 | 1/139 = 0.007 |
+| All-clear on out-of-scope failures | 0/225 | 6/225 = 0.027 | 0/225 |
+
+Reading. On the same observable inputs the strong classifier is clearly worse on the primary outcome (0.893 against 0.975 without abstention, scored view) and never reaches the investigator by abstaining (0.754 at 0.90): abstaining raises its precision to 0.989 but cuts coverage to 0.762. It gives up precision and false-alarm and all-clear safety, which the investigator, a rule set with an explicit contract, holds at 0 on this development set. The classifier's evidence completeness is not an independent measurement (section 2); its correct answers are as "complete" as the snapshot allows.
+
+**All-clear on out-of-scope failures: 5 to 6.** `obs-2` gave 5/225 (F02 1, F03 2, F04 1, F08 1); `obs-3` gives 6/225 (F02 1, F03 2, F04 2, F08 1). The difference is one case, RCA_000367 (F04), which `obs-3` labels `legitimate_po_tolerance` and `obs-2` did not. The cohort predictions are identical between the two runs (the same 14 wrong cohort cases, 109/123). The change is attributed to the calendar change (the baseline now counts `(start, end]`, which changes the age and lag features for some payments, including payments of that case's entity); that attribution is not isolated: `obs-3` also used a new key, and the earlier key comparison (below) shows that a key change alone moves the grids and the threshold by a few cases. Out-of-scope all-clear counts of 5 and 6 are within that noise; the investigator is 0/225 in both.
 
 The classifier is not weak where the evidence is simple: F06 18/18, F12 16/16, F14 17/18, pending 6/6, reversal 9/9, net fee 11/11, accounted fee 4/4, check 4/4, split 4/4. Its losses:
 
@@ -82,53 +98,52 @@ The classifier is not weak where the evidence is simple: F06 18/18, F12 16/16, F
 
 Seven of the eight cohort false alarms are legitimate batch payments called an F08 approval failure (the eighth is a weekend clearing payment). Hypothesis, not tested: batch payments touch several invoices, so the minimum-approval-count feature is more often low or odd for them, which the classifier associates with F08. The investigator checks approvals with a fixed rule (completed final approval before the payment) and made none of these errors on validation.
 
-Out-of-scope failures answered "no failure" (5): F02 1, F03 2, F04 1, F08 1, of 225. Not a measure of its safety: F08 and F09 are in the label space and the classifier can name them.
+Out-of-scope failures answered "no failure" (6, `obs-3`): F02 1, F03 2, F04 2, F08 1, of 225. Not a measure of its safety: F08 and F09 are in the label space and the classifier can name them.
 
-Stability. `obs-1` used a different key. Tokens, and therefore the request order, differ, and the cohort figures are the same (109/123, false alarms 8/71 and 0 narrow, all-clear 5/225); the random-forest grid moved by one to two cases (97 to 103 instead of 98 to 103) and the CV-chosen abstention threshold was 0.90 (94 of 123 answered, 93 correct) instead of 0.85. The abstention view is therefore the less stable one.
+Stability. `obs-1`, `obs-2` and `obs-3` used different keys. Tokens, and therefore the request order, differ, and the cohort figures are the same (109/123, false alarms 8/71 and 0 narrow) except the all-clear count (5/225 in `obs-1` and `obs-2`, 6/225 in `obs-3`, above); the random-forest grid moved by one to three cases (`obs-2` 97 to 103, `obs-3` 99 to 102) and the CV-chosen abstention threshold was 0.90 in `obs-1` (94 of 123 answered, 93 correct), 0.85 in `obs-2` (98 answered, 94 correct) and 0.90 in `obs-3` (93 answered, 92 correct). The abstention view is therefore the less stable one.
 
 ## 4. What the model relies on
 
-Permutation importance on validation (selected model, 10 repeats, drop in exact-label accuracy over all 416 requests; `obs-2`):
+Permutation importance on validation (selected model, 10 repeats, drop in exact-label accuracy over all 416 requests; `obs-3`):
 
 | Feature | Drop | Meaning |
 |---|---:|---|
-| `i_alloc_ratio` | 0.103 | allocated amount over invoice total (F06 evidence) |
+| `i_alloc_ratio` | 0.100 | allocated amount over invoice total (F06 evidence) |
 | `i_status_received` | 0.093 | invoice status (residual R1) |
-| `p_pay_journal_ratio` | 0.088 | payment journal amount over payment (F09 evidence) |
-| `p_debit_ratio` | 0.070 | bank debit over payment (F14, net fee) |
-| `b_amount_log10` | 0.069 | bank row amount (bank-row cases) |
-| `p_alloc_ratio` | 0.067 | allocated over payment |
+| `p_pay_journal_ratio` | 0.086 | payment journal amount over payment (F09 evidence) |
+| `p_debit_ratio` | 0.071 | bank debit over payment (F14, net fee) |
+| `b_amount_log10` | 0.068 | bank row amount (bank-row cases) |
+| `p_alloc_ratio` | 0.064 | allocated over payment |
 | `e_gl` | 0.058 | entity is a GL journal (residual R3) |
-| `p_n_bank` | 0.045 | bank rows on the reference (F12, pending) |
-| `i_n_approval` | 0.043 | approval events of the invoice (residual R1) |
-| `p_gl_has_bankfee`, `p_n_returned`, `i_n_committed`, `p_gl_has_reversal`, `i_status_canceled` | 0.041 to 0.033 | fee journal, returned rows, committed payments, reversal journal, status |
+| `p_n_bank` | 0.047 | bank rows on the reference (F12, pending) |
+| `i_n_committed`, `i_n_approval`, `p_gl_has_bankfee`, `p_n_returned`, `i_status_canceled`, `p_gl_has_reversal` | 0.043 to 0.034 | committed payments, approval events (R1), fee journal, returned rows, status, reversal journal |
 
-By block, permuting all the columns of the block together (relative drop of cohort correct): payment block 0.75, invoice block 0.38, bank-row block 0.05, GL block 0.0. The reliance is mostly on the evidence a practitioner would use.
+By block, permuting all the columns of the block together (relative drop of cohort correct): payment block 0.75, invoice block 0.39, bank-row block 0.05, GL block 0.0. The reliance is mostly on the evidence a practitioner would use.
 
-**Residuals.** Retraining the selected configuration without a residual group (validation cohort correct; baseline 109):
+**Residuals.** Retraining the selected configuration without a residual group (validation cohort correct out of the 123 in-scope cases, the pre-conflict selection definition; baseline 109):
 
 | Group removed | Columns | Cohort correct | Joint permutation drop |
 |---|---|---:|---:|
-| R1 invoice status and approvals | `i_status_*`, `i_n_approval`, `p_inv_min_approval` | 105 | 0.083 |
+| R1 invoice status and approvals | `i_status_*`, `i_n_approval`, `p_inv_min_approval` | 103 | 0.077 |
 | R2 FX codes | `g_fx`, `g_type_fx_settlement`, `p_gl_has_fx` | 109 | 0.000 |
-| R3 entity type | `e_*` | 108 | 0.032 |
-| R4 invoice age | `i_age_days` | 104 | 0.004 |
-| allocation count | `p_n_alloc`, `i_n_alloc` | 106 | 0.091 |
+| R3 entity type | `e_*` | 109 | 0.037 |
+| R4 invoice age | `i_age_days` | 106 | 0.000 |
+| allocation count | `p_n_alloc`, `i_n_alloc` | 105 | 0.086 |
 | all five | | 94 | |
 
-Without all five groups: 94/123 = 0.764 correct, cohort false alarms 18/71 (still 0 for F06, F12, F14), all-clear 6/225.
+Without all five groups (scored view, 122 cases): 94/122 = 0.770 correct, cohort false alarms 18/70 (still 0 for F06, F12, F14), all-clear 6/225, all legitimate 47/139.
 
 Findings:
 - R2 is not used: removing it changes nothing. The full model labels the FX slice `legitimate_fx_settlement` 9/9; whether that comes from the FX journal or from the currency mismatch (`p_debit_cur_match`) was not isolated.
-- R1, R3 and the allocation count carry weight (1 to 4 cases each, 15 together). They are not clean leaks: invoice approvals and the allocation count are evidence the investigator also reads, and the entity type is a request field (R3). The group definitions mix the declared residual and genuine evidence, so the 15 cases are an upper bound for "won through a residual", not a measurement of it. R1's `i_status_received` is the second most important single feature; it separates inserted F01 and credit-memo invoices (outside the cohort), so it explains out-of-scope behaviour more than cohort correctness.
-- R4: removing `i_age_days` costs 5 cases but its permutation importance is about zero, so the retrain difference is within what the 15-candidate selection spread shows (3 to 6 cases); not a firm reliance. A date-only model for invoice-primary cohort cases (31 validation cases, F06 against legitimate) gets balanced accuracy 0.712 (leakage test: 0.756), and the full model gets 1.000 on the same cases through allocation amounts. So R4 exists as a weak signal but the baseline does not need it.
-- Entity type only (HistGradientBoosting depth 3 on `e_*`, full label space) gets 0/123 on the cohort: it names the most common out-of-scope family for each type. Beside every headline number this is the R3 control; here it is far below 109.
-- The baseline does not win through a residual: with the five groups removed it still scores 94/123, and the investigator, which does not use R1 to R4 as diagnostic evidence (its approvals check is a prerequisite, `dev-results.md` section 10), scores 119/123.
+- R1, R3 (no cost in `obs-3`) and the allocation count carry weight (up to 6 cases each, 15 together with R4). They are not clean leaks: invoice approvals and the allocation count are evidence the investigator also reads, and the entity type is a request field (R3). The group definitions mix the declared residual and genuine evidence, so the 15 cases are an upper bound for "won through a residual", not a measurement of it. R1's `i_status_received` is the second most important single feature; it separates inserted F01 and credit-memo invoices (outside the cohort), so it explains out-of-scope behaviour more than cohort correctness.
+- R4: removing `i_age_days` costs 3 cases and its permutation importance is 0, so the retrain difference is within what the 15-candidate selection spread shows; not a firm reliance. A date-only model for invoice-primary cohort cases (31 validation cases, F06 against legitimate) gets balanced accuracy 0.712 (leakage test: 0.756), and the full model gets 1.000 on the same cases through allocation amounts. So R4 exists as a weak signal but the baseline does not need it.
+- Entity type only (HistGradientBoosting depth 3 on `e_*`, full label space) gets 0 of 123 on the cohort: it names the most common out-of-scope family for each type. Beside every headline number this is the R3 control; here it is far below 109.
+- The baseline does not win through a residual: with the five groups removed it still scores 94 of 123 in-scope cases, and the investigator, which does not use R1 to R4 as diagnostic evidence (its approvals check is a prerequisite, `dev-results.md` section 10), scores 119 of 122 (scored view).
 
 ## 5. Limitations
 
 - Development data on a synthetic benchmark; selection on validation (best of 15). Both systems were built with these labels in view. Results do not transfer to real exports.
-- One snapshot and key per run; two keys gave the same cohort figures. Small cohort (123), small strata (batch 15, due date 9), so a one-case change moves a rate by 0.8 points.
+- One snapshot and key per run; three keys gave the same cohort figures. Small cohort (122 or 123), small strata (batch 15, due date 9), so a one-case change moves a rate by 0.8 points.
 - The label space for the baseline includes the out-of-scope families, which the investigator cannot name. That helps the baseline on some safety metrics (it can say F08) and it is not a like-for-like removal of that advantage. A baseline trained only on the 13 cohort labels would have no out-of-scope label to give and would be forced to answer everything as a cohort category; that variant was not run.
 - The evidence check is a relaxed record-availability upper bound and omits the all-clear guard (section 2). The baseline's primary outcome is therefore an upper bound on what a packet-producing baseline would achieve under the investigator's check, not a like-for-like number.
 - Features were hand-chosen from the allowlist. A better feature set, early stopping, longer training or other models might do better; the grid is small. The abstention threshold uses a declared target precision (0.99) that is itself a policy choice.
@@ -141,4 +156,4 @@ Findings:
 uv run --group eval python evaluation/baselines/observable/run.py TAG   # TAG must be new; about 3 min
 ```
 
-Needs the `eval` dependency group (scikit-learn 1.9.1, numpy 2.5.4, scipy 1.18.1 in `uv.lock`; not part of the runtime or dev groups) and the upstream checkout (`--upstream`, default `/home/charalambos/Documents/fin-tech-projects/reconcile/data/upstream/FinRCA-AI-Bench`). Compares with the investigator run named by `--investigator-run` (default `m2-dev-4`; its `cases.jsonl` must exist). Outputs under `artifacts/baselines/TAG/` (untracked): `metrics.json` (grid, selected model, every table above), `cases.jsonl` (one row per validation request: prediction, confidence, retrieval result), `prepared/`, `evaluator/`. Key at `data/private/TAG/key`. Snapshot content digest of `obs-2`: `9c13d820...b3d4`.
+Needs the `eval` dependency group (scikit-learn 1.9.1, numpy 2.5.4, scipy 1.18.1 in `uv.lock`; not part of the runtime or dev groups) and the upstream checkout (`--upstream`, default `/home/charalambos/Documents/fin-tech-projects/reconcile/data/upstream/FinRCA-AI-Bench`). Compares with the investigator run named by `--investigator-run` (default `m2-dev-4`; its `cases.jsonl` must exist). Outputs under `artifacts/baselines/TAG/` (untracked): `metrics.json` (grid, selected model, every table above), `cases.jsonl` (one row per validation request: prediction, confidence, retrieval result), `prepared/`, `evaluator/`. Key at `data/private/TAG/key`. Snapshot content digest of `obs-3`: `84e489f4...e255`.
