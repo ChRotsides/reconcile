@@ -394,3 +394,34 @@ Adding a prerequisite is one entry in `PAYMENT_CHECKS` or `PACKET_CHECKS` plus i
 
 Reproduce: `uv run python evaluation/dev_run.py evaluate TAG`.
 
+## 13. Run 6 (`m2-dev-6`, 2026-11-01): policy `evidence-contract-0.5`, M2 results of record
+
+Fresh inference run (`artifacts/dev-runs/m2-dev-6/`, `run-manifest.json`: policy `evidence-contract-0.5`) scored by the final evaluator (section 12: invoice-totals, payment-allocation, effective-approval, recomputed journal comparison and scope-statement requirements, headline view = all cases). **These figures replace the run 5 figures (section 11) as the M2 results of record.** Sections 1 to 12 stay as history. All numbers are from `artifacts/dev-runs/m2-dev-6/report.txt`. Dispositions over the 1,608 requests: answered 587, out_of_scope 720, abstained 301 (the same split as run 5).
+
+**Cohort metrics, both views.** Train / validation / both.
+
+| Metric | All cases (headline) | Sensitivity: without the 5 verified label conflicts |
+|---|---|---|
+| Cohort cases | 380 / 123 / 503 | 376 / 122 / 498 |
+| Answered (coverage) | 375/380 = 0.987, 122/123 = 0.992, 497/503 = 0.988 | 375/376 = 0.997, 122/122 = 1.000, 497/498 = 0.998 |
+| Exact-category precision (correct / answered) | 362/375 = 0.965, 119/122 = 0.975, 481/497 = 0.968 | same |
+| Failure vs no-failure accuracy, answered | 375/375, 122/122, 497/497 | same |
+| Evidence-complete among answered | 375/375, 122/122, 497/497 | same |
+| Correct and complete / cases | 362/380 = 0.953, 119/123 = 0.967, 481/503 = 0.956 | 362/376 = 0.963, 119/122 = 0.975, 481/498 = 0.966 |
+| Search counts reproduce, among answered | 375/375, 122/122, 497/497 | same |
+| False alarms, cohort legitimate | 0/210, 0/71, 0/281 | 0/206, 0/70, 0/276 |
+| Wrong by kind | `wrong_legit_variant` 13 / 3 / 16 | same |
+| Non-answer reasons | `unsupported_fx` 1 (RCA_000568); `payment_journal_amount_differs` 3 / 1 / 4 and `invoice_approval_not_completed` 1 / 0 / 1 (the verified conflicts, all abstentions) | `unsupported_fx` 1 (train and both); none on validation |
+
+**Against run 5.** The cohort counts and every figure above are the same as run 5 (section 11), and the stricter final evaluator (policy-0.5 guard items) passes all 497 answered packets: evidence-complete stays 497/497, correct and complete 481/503. What changed is the packets (policy 0.5 adds `payment_not_over_allocated` and the payment-attributable journal amount) and the evaluator that now demands them.
+
+**Safety metrics (all splits; train / validation).** False alarms on all legitimate cases 0/526 (0/387, 0/139); cohort variants including FX 0/315 (0/235, 0/80); AP-side variants 0/211 (0/152, 0/59). **All-clear on out-of-scope failures (the risk metric): 0/859 (0/634, 0/225)**, zero in every one of the 12 families. FX: 30/30 (21/21, 9/9) correct abstentions, all citing the payment and the other-currency bank row.
+
+**Error slices (all splits).** The only wrong answers are 16 wrong legitimate variants, each answered with another legitimate category (no false alarm; correct on the failure axis). The per-label table and confusion matrix are those of run 5 (section 11): weekend clearing 38 cases, 32 correct, 6 as batch; check clearing 27, 22, 5 as batch; due-date 34, 28, 5 as split and 1 abstained (RCA_002212); split 35, 32, 3 abstained; net fee 33, 32, 1 abstained; F06 75, 74, 1 abstained (`unsupported_fx`); F12 71/71, F14 76/76, accounted fee 23/23, batch 26/26, reversal 32/32, pending 33/33.
+
+**Out of scope.** 859 failure cases: out_of_scope 574, abstained 256, answered 29 (all F15 cases answered `F14`, a failure class). 211 AP-side legitimate cases: answered 61 (`legitimate_due_date_payment` 37, `legitimate_split_payment` 24, no false alarms), out_of_scope 143, abstained 7.
+
+**Conflict and review candidates (`m2-dev-6/report.txt`).** Verified (leave the sensitivity view only): RCA_001679 (F09 RCA_000857, PAY_0420351), RCA_001759 (RCA_000874, PAY_0424667), RCA_002175 (RCA_000889, PAY_0420796), RCA_002182 (F08 RCA_000722, INV_0424017), RCA_002212 (F09 RCA_000832, PAY_0424634); all abstained (4 on `payment_journal_amount_differs`, 1 on `invoice_approval_not_completed`). Unverified conflict candidates, not excluded, none in the headline cohort: 12 AP-side legitimate cases, 1 contradicted (RCA_002127) and 1 FX (RCA_002218). Review candidates, not excluded (reported only): RCA_001616, RCA_001648 and RCA_002000 (weekend clearing, correct), RCA_002227 (accounted fee, correct), RCA_001834 and RCA_002010 (FX, correct abstentions), each overlapping one F15, F14, F09 or F12 case through allocations.
+
+Reproduce: `uv run python evaluation/dev_run.py run m2-dev-6` (new tag).
+
