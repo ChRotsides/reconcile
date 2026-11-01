@@ -1,0 +1,35 @@
+# Upstream benchmark files, prepared snapshots, answer labels and private
+# practitioner exports. Never commit these; see PLAN.md section 2.
+data/
+
+# Run outputs. Reviewed release artifacts are copied out explicitly.
+artifacts/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
