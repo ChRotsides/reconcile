@@ -505,7 +505,8 @@ def check_split(s: Snapshot, inv_id: str) -> Result:
         ids.add(b["bank_transaction_id"])
         if {p["payment_currency"], b["currency"]} != {inv["currency"]}:
             return cross_currency(ids)
-        if money(b["amount"]) != money(p["payment_amount"]):
+        gap = abs(money(b["amount"]) - money(p["payment_amount"]))
+        if gap > quantum(inv["currency"]):  # contract P4: one minor unit
             return bad("leg_bank_amount_differs", ids)
         net += money(a["allocated_amount"])
     if abs(net - money(inv["invoice_total"])) > quantum(inv["currency"]):

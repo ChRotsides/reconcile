@@ -341,3 +341,21 @@ def test_unbalanced_reversal_journal_not_gradable(tmp_path: Path) -> None:
         tmp_path, "payment_reversal", ("gl_entries.csv", "0.00,600.00", "0.00,500.00")
     )
     assert ecc.check_reversal(s, "PAY_1").status == NG
+
+
+def test_split_debit_tolerance_is_one_minor_unit(tmp_path: Path) -> None:
+    # Contract P4: a leg debit within one minor unit of its payment still
+    # matches; two minor units apart does not.
+    within = edited(
+        tmp_path / "a",
+        "split_payment",
+        ("bank_transactions.csv", "ACH debit,1200.00", "ACH debit,1200.01"),
+    )
+    assert ecc.check_split(within, "INV_1").status == G
+    beyond = edited(
+        tmp_path / "b",
+        "split_payment",
+        ("bank_transactions.csv", "ACH debit,1200.00", "ACH debit,1200.02"),
+    )
+    res = ecc.check_split(beyond, "INV_1")
+    assert (res.status, res.reason) == (C, "leg_bank_amount_differs")
