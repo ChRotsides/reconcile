@@ -1,6 +1,8 @@
 """FinRCA input transform on tiny invented fixtures (never upstream rows, D030)."""
 
 import csv
+import hashlib
+import json
 import shutil
 import sqlite3
 from datetime import date
@@ -10,10 +12,13 @@ from typing import Any
 import pytest
 
 from reconcile.adapters.finrca import (
+    INDEXES,
     TABLES,
     create_key_file,
     prepare_finrca_snapshot,
+    quality_report,
 )
+from reconcile.store.snapshot import Row, write_snapshot
 
 CUTOFF = date(2026, 6, 30)
 SENTINELS = [
@@ -197,7 +202,9 @@ def rows(p: dict[str, Path], sql: str) -> list[tuple[Any, ...]]:
 
 def test_only_allowlisted_columns_and_tables(paths: dict[str, Path]) -> None:
     prepare(paths)
-    assert {r[0] for r in rows(paths, "SELECT name FROM sqlite_master")} == set(TABLES)
+    assert {
+        r[0] for r in rows(paths, "SELECT name FROM sqlite_master WHERE type = 'table'")
+    } == set(TABLES)
     for name, table in TABLES.items():
         cols = [r[1] for r in rows(paths, f'PRAGMA table_info("{name}")')]
         assert cols == [c.name for c in table.columns]
@@ -414,6 +421,7 @@ def test_key_is_not_in_the_snapshot_directory(paths: dict[str, Path]) -> None:
     assert {f.name for f in paths["out"].iterdir()} == {
         "snapshot.sqlite",
         "manifest.json",
+        "quality.json",
     }
     shutil.rmtree(paths["out"])
     inside = paths["out"] / "key"
@@ -533,5 +541,191 @@ def test_success_publishes_both_files_together(paths: dict[str, Path]) -> None:
     assert {f.name for f in paths["out"].iterdir()} == {
         "snapshot.sqlite",
         "manifest.json",
+        "quality.json",
     }
     assert not [p for p in paths["tmp"].iterdir() if p.name.startswith(".prepare-")]
+
+
+def quality(p: dict[str, Path]) -> dict[str, Any]:
+    gaps: dict[str, Any] = json.loads((p["out"] / "quality.json").read_text())["gaps"]
+    return gaps
+
+
+def edit(p: dict[str, Path], table: str, old: str, new: str) -> None:
+    f = p["src"] / f"{table}.csv"
+    text = f.read_text()
+    assert old in text
+    f.write_text(text.replace(old, new, 1))
+
+
+def test_baseline_quality_facts(paths: dict[str, Path]) -> None:
+    manifest = prepare(paths)
+    g = quality(paths)
+    # BT_9000002 carries a reference no payment has; INV_2 has no allocation;
+    # payments 2 and 3 have no allocation; the late bank row is cut off.
+    assert g["bank_payment_reference_unmatched"]["count"] == 1
+    assert g["invoice_without_allocation"]["count"] == 1
+    assert g["payment_without_allocation"]["count"] == 2
+    assert g["payment_without_bank_row"]["count"] == 0
+    assert g["gl_source_unresolved"]["count"] == 0
+    assert g["allocation_payment_missing"]["count"] == 0
+    assert all(v["count"] == 0 for k, v in g.items() if k.startswith("currency_"))
+    q = json.loads((paths["out"] / "quality.json").read_text())
+    assert q["row_counts"]["payments"] == 3
+    digest = hashlib.sha256((paths["out"] / "quality.json").read_bytes()).hexdigest()
+    assert manifest["quality"] == {"file": "quality.json", "sha256": digest}
+
+
+def test_quality_is_deterministic_and_token_only(paths: dict[str, Path]) -> None:
+    prepare(paths)
+    first = (paths["out"] / "quality.json").read_bytes()
+    shutil.rmtree(paths["out"])
+    prepare(paths)
+    assert (paths["out"] / "quality.json").read_bytes() == first
+    text = first.decode()
+    for raw in ("PAY_0", "INV_", "BT_9", "PMTREF", "BANKPORTAL"):
+        assert raw not in text
+    for gap in quality(paths).values():
+        assert len(gap["sample_tokens"]) <= 5
+        assert all(len(t) == 32 for t in gap["sample_tokens"])
+
+
+def test_allocation_with_missing_payment_or_invoice(tmp_path: Path) -> None:
+    # prepare_finrca_snapshot cannot produce this (the allocation's currency
+    # comes from its payment, so a missing payment fails the preparation), so
+    # build the snapshot directly.
+    tables: dict[str, tuple[list[str], list[Row]]] = {
+        n: ([c.name for c in t.columns], []) for n, t in TABLES.items()
+    }
+    cols = tables["payment_allocations"][0]
+    row = {"payment_id": "p-gone", "invoice_id": "i-gone"}
+    tables["payment_allocations"][1].append(tuple(row.get(c) for c in cols))
+    path = tmp_path / "s.sqlite"
+    write_snapshot(path, tables)
+    g = quality_report(path)["gaps"]
+    assert g["allocation_payment_missing"] == {"count": 1, "sample_tokens": ["p-gone"]}
+    assert g["allocation_invoice_missing"] == {"count": 1, "sample_tokens": ["i-gone"]}
+
+
+def test_allocation_to_a_missing_payment_fails_preparation(
+    paths: dict[str, Path],
+) -> None:
+    edit(paths, "payment_allocations", "PAY_0000001,INV_1", "PAY_9999999,INV_1")
+    with pytest.raises(ValueError, match="payment_allocations.csv"):
+        prepare(paths)
+
+
+def test_allocation_to_a_missing_invoice_is_a_finding(paths: dict[str, Path]) -> None:
+    edit(paths, "payment_allocations", "PAY_0000001,INV_1", "PAY_0000001,INV_8")
+    prepare(paths)
+    g = quality(paths)
+    assert g["allocation_invoice_missing"]["count"] == 1
+    assert g["invoice_without_allocation"]["count"] == 2  # INV_1 and INV_2
+
+
+def test_payment_without_bank_row_by_cutoff(paths: dict[str, Path]) -> None:
+    # PMTREF-0000000099 belongs to a bank row posted after the cutoff.
+    edit(paths, "payments", "PMTREF-0000000044", "PMTREF-0000000099")
+    prepare(paths)
+    g = quality(paths)
+    assert g["payment_without_bank_row"]["count"] == 1
+    assert g["effective_payment_without_bank_row"]["count"] == 1
+    # the unmatched bank reference is still the BANKPORTAL one; the 044 row is
+    # now a bank row whose reference matches no payment too
+    assert g["bank_payment_reference_unmatched"]["count"] == 2
+
+
+def test_fee_row_is_not_a_bank_row_for_the_payment(paths: dict[str, Path]) -> None:
+    edit(
+        paths,
+        "bank_transactions",
+        "BT_0000001,BANK_MAIN,2026-05-01,2026-05-04,credit",
+        "BT_0000001,BANK_MAIN,2026-05-01,2026-05-04,bank fee",
+    )
+    prepare(paths)
+    assert quality(paths)["payment_without_bank_row"]["count"] == 1
+
+
+def test_pending_payment_is_separated_from_effective(paths: dict[str, Path]) -> None:
+    edit(
+        paths,
+        "payments",
+        "completed,settled,PMTREF-0000000044",
+        "completed,pending,PMTREF-0000000099",
+    )
+    prepare(paths)
+    g = quality(paths)
+    assert g["payment_without_bank_row"]["count"] == 1
+    assert g["effective_payment_without_bank_row"]["count"] == 0
+
+
+def test_shared_reference_is_reported(paths: dict[str, Path]) -> None:
+    edit(paths, "payments", "PMTREF-0000000044", "PMTREF-0000000043")
+    prepare(paths)
+    assert quality(paths)["payment_shares_reference"]["count"] == 2
+
+
+def test_gl_source_not_resolving(paths: dict[str, Path]) -> None:
+    edit(paths, "gl_entries", "JE_2,JL_3,invoice,INV_1", "JE_2,JL_3,invoice,INV_7")
+    prepare(paths)
+    g = quality(paths)["gl_source_unresolved"]
+    assert g["count"] == 1
+    assert len(g["sample_tokens"]) == 1
+
+
+def test_po_line_reference_not_resolving(paths: dict[str, Path]) -> None:
+    edit(paths, "invoice_lines", "INV_1,IL_1,POL_1", "INV_1,IL_1,POL_7")
+    prepare(paths)
+    assert quality(paths)["invoice_line_po_line_unresolved"]["count"] == 1
+
+
+def test_invoice_po_and_vendor_not_resolving(paths: dict[str, Path]) -> None:
+    edit(paths, "invoices", "INV_1,V_1,PO_1", "INV_1,V_7,PO_7")
+    prepare(paths)
+    g = quality(paths)
+    assert g["invoice_po_unresolved"]["count"] == 1
+    assert g["invoice_vendor_unresolved"]["count"] == 1
+
+
+def test_currency_disagreement_between_linked_rows(paths: dict[str, Path]) -> None:
+    # bank row for payment 1 in USD; payment 1 allocated to a JPY invoice
+    edit(paths, "bank_transactions", "1.50,EUR,out", "1.50,USD,out")
+    edit(
+        paths, "payment_allocations", "PAY_0000001,INV_1,1.50", "PAY_0000001,INV_2,1.50"
+    )
+    edit(paths, "purchase_orders", "PO_1,V_1,2026-02-01,EUR", "PO_1,V_1,2026-02-01,USD")
+    prepare(paths)
+    g = quality(paths)
+    assert g["currency_bank_vs_payment"]["count"] == 1
+    assert g["currency_allocation_vs_invoice"]["count"] == 1
+    assert g["currency_invoice_vs_po"]["count"] == 1
+
+
+def test_samples_are_capped_at_five(paths: dict[str, Path]) -> None:
+    f = paths["src"] / "bank_transactions.csv"
+    extra = [
+        f"BT_{i:07d},BANK_MAIN,2026-05-01,2026-05-04,credit,1.00,EUR,out,B,CP_1,"
+        f"NOREF-{i},posted,bank"
+        for i in range(100, 108)
+    ]
+    f.write_text(f.read_text() + "\n".join(extra) + "\n")
+    prepare(paths)
+    g = quality(paths)["bank_payment_reference_unmatched"]
+    assert g["count"] == 9  # eight added, plus BANKPORTAL
+    assert len(g["sample_tokens"]) == 5
+    assert g["sample_tokens"] == sorted(g["sample_tokens"])
+
+
+def test_expected_indexes_exist(paths: dict[str, Path]) -> None:
+    prepare(paths)
+    have = {
+        r[0] for r in rows(paths, "SELECT name FROM sqlite_master WHERE type = 'index'")
+    }
+    want = {f"ix_{t}_{c}" for t, cols in INDEXES.items() for c in cols}
+    assert have == want
+    for col in ("payment_reference", "posted_date"):
+        plan = rows(
+            paths,
+            f"EXPLAIN QUERY PLAN SELECT * FROM bank_transactions WHERE {col} = 'x'",
+        )
+        assert "ix_bank_transactions_" + col in str(plan)

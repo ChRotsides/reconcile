@@ -4,6 +4,7 @@ Skips when the pinned checkout is absent. Set FINRCA_FULL_DIR to its
 `data/benchmark/full` directory, or place the checkout at the default path.
 """
 
+import json
 import os
 import subprocess
 from datetime import date
@@ -67,3 +68,8 @@ def test_real_tables_end_to_end(tmp_path: Path) -> None:
     assert first["tables"]["gl_entries"]["dropped_by_cutoff"] == 10
     assert first["money"]["max_digits"] <= first["money"]["max_digits_allowed"]
     print(first["money"], first["snapshot"])
+    quality = json.loads((tmp_path / "a" / "quality.json").read_text())
+    assert quality == json.loads((tmp_path / "b" / "quality.json").read_text())
+    for name, gap in quality["gaps"].items():
+        print("quality", name, gap["count"])
+        assert len(gap["sample_tokens"]) <= 5

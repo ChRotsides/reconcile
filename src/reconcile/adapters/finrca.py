@@ -30,11 +30,14 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from reconcile.domain.money import MAX_DIGITS, Money
-from reconcile.store.snapshot import Row, write_snapshot
+from reconcile.store.snapshot import Indexes, Row, write_snapshot
 
 ADAPTER_VERSION = "1"
 SNAPSHOT_FILE = "snapshot.sqlite"
 MANIFEST_FILE = "manifest.json"
+QUALITY_FILE = "quality.json"
+QUALITY_VERSION = 1
+SAMPLE_LIMIT = 5
 DROPPED_TABLES = ("audit_log", "employees")
 TOKEN_HEX_CHARS = 32
 
@@ -222,6 +225,28 @@ KEYS: dict[str, tuple[str, ...]] = {
     "gl_entries": ("journal_line_id",),
 }
 
+# Lookup and join columns of docs/evidence-contract.md and of the quality report
+# below; nothing else is indexed.
+INDEXES: Indexes = {
+    # sections 3, 4.1 (payments by ID, allocating payments), quality FK checks
+    "payments": ("payment_id", "reference_number"),  # reference: sections 3, 4.2 A1/A2
+    "invoices": ("invoice_id",),  # section 4.1 invoice by ID; allocation parent
+    "payment_allocations": ("payment_id", "invoice_id"),  # sections 4.1, 4.2, 5
+    "bank_transactions": (
+        "bank_transaction_id",  # citations resolve by ID; GL source (4.3)
+        "payment_reference",  # sections 3 and 4.2 A1: principal bank row
+        "posted_date",  # section 2 rule 1: observable (cutoff) rows
+        "counterparty_token",  # section 4.2 A3: unreferenced candidate search
+    ),
+    "gl_entries": (
+        "source_transaction_id",  # sections 4.2, 4.3: journals sourced to a record
+        "journal_id",  # section 3: balanced journal of type T
+    ),
+    "vendors": ("vendor_id",),  # quality FK checks only
+    "purchase_orders": ("po_id",),  # quality FK checks only
+    "po_lines": ("po_line_id",),  # quality FK checks only
+}
+
 # gl_entries.source_transaction_id points at different entities; the prefix of
 # the raw ID says which namespace the token belongs to. An unknown prefix fails.
 _POLY_PREFIX = {"INV_": "invoice", "PAY_": "payment", "BT_": "bank_txn"}
@@ -390,7 +415,10 @@ def _prepare(
             "source_columns_dropped": sorted(set(header) - set(needed)),
         }
 
-    content_sha, file_sha = write_snapshot(out_dir / SNAPSHOT_FILE, snapshot_tables)
+    content_sha, file_sha = write_snapshot(
+        out_dir / SNAPSHOT_FILE, snapshot_tables, INDEXES
+    )
+    quality_sha = _write_quality(out_dir)
     manifest: dict[str, Any] = {
         "adapter_version": ADAPTER_VERSION,
         "source_revision": source_revision,
@@ -411,6 +439,7 @@ def _prepare(
             "content_sha256": content_sha,
             "file_sha256": file_sha,
         },
+        "quality": {"file": QUALITY_FILE, "sha256": quality_sha},
     }
     manifest_path = out_dir / MANIFEST_FILE
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -452,3 +481,139 @@ def _transform(
         else:
             raise AssertionError(col.kind)
     return tuple(out)
+
+
+# (name, rows-in-gap SQL tail, sampled expression). Facts only: a gap can be
+# the very exception under investigation, so nothing here is an error or a
+# failure class. Dangling references are counted per referring row; samples are
+# distinct tokens of the sampled expression, sorted, at most SAMPLE_LIMIT.
+_EFFECTIVE = "p.payment_status = 'completed' AND p.settlement_status = 'settled'"
+_NO_BANK_ROW = (
+    "FROM payments p WHERE NOT EXISTS (SELECT 1 FROM bank_transactions b "
+    "WHERE b.payment_reference = p.reference_number "
+    "AND b.transaction_type <> 'bank fee')"
+)
+
+
+def _dangling(child: str, col: str, parent: str, pcol: str) -> tuple[str, str]:
+    return (
+        f'FROM "{child}" c WHERE c."{col}" IS NOT NULL AND NOT EXISTS '
+        f'(SELECT 1 FROM "{parent}" t WHERE t."{pcol}" = c."{col}")',
+        f'c."{col}"',
+    )
+
+
+_GAPS: dict[str, tuple[str, str]] = {
+    "allocation_payment_missing": _dangling(
+        "payment_allocations", "payment_id", "payments", "payment_id"
+    ),
+    "allocation_invoice_missing": _dangling(
+        "payment_allocations", "invoice_id", "invoices", "invoice_id"
+    ),
+    "bank_payment_reference_unmatched": _dangling(
+        "bank_transactions", "payment_reference", "payments", "reference_number"
+    ),
+    "bank_without_payment_reference": (
+        "FROM bank_transactions c WHERE c.payment_reference IS NULL",
+        "c.bank_transaction_id",
+    ),
+    "payment_without_bank_row": (_NO_BANK_ROW, "p.payment_id"),
+    "effective_payment_without_bank_row": (
+        f"{_NO_BANK_ROW} AND {_EFFECTIVE}",
+        "p.payment_id",
+    ),
+    "payment_shares_reference": (
+        "FROM payments p WHERE (SELECT COUNT(*) FROM payments q "
+        "WHERE q.reference_number = p.reference_number) > 1",
+        "p.payment_id",
+    ),
+    "payment_without_allocation": (
+        "FROM payments p WHERE NOT EXISTS (SELECT 1 FROM payment_allocations a "
+        "WHERE a.payment_id = p.payment_id)",
+        "p.payment_id",
+    ),
+    "invoice_without_allocation": (
+        "FROM invoices i WHERE NOT EXISTS (SELECT 1 FROM payment_allocations a "
+        "WHERE a.invoice_id = i.invoice_id)",
+        "i.invoice_id",
+    ),
+    "gl_source_unresolved": (
+        "FROM gl_entries g WHERE NOT EXISTS (SELECT 1 FROM invoices t "
+        "WHERE t.invoice_id = g.source_transaction_id) AND NOT EXISTS "
+        "(SELECT 1 FROM payments t WHERE t.payment_id = g.source_transaction_id) "
+        "AND NOT EXISTS (SELECT 1 FROM bank_transactions t "
+        "WHERE t.bank_transaction_id = g.source_transaction_id)",
+        "g.source_transaction_id",
+    ),
+    "invoice_line_po_line_unresolved": _dangling(
+        "invoice_lines", "po_line_id", "po_lines", "po_line_id"
+    ),
+    "invoice_line_invoice_missing": _dangling(
+        "invoice_lines", "invoice_id", "invoices", "invoice_id"
+    ),
+    "po_line_po_missing": _dangling("po_lines", "po_id", "purchase_orders", "po_id"),
+    "invoice_po_unresolved": _dangling("invoices", "po_id", "purchase_orders", "po_id"),
+    "invoice_vendor_unresolved": _dangling(
+        "invoices", "vendor_id", "vendors", "vendor_id"
+    ),
+    "payment_vendor_unresolved": _dangling(
+        "payments", "vendor_id", "vendors", "vendor_id"
+    ),
+    "approval_invoice_unresolved": _dangling(
+        "approval_events", "invoice_id", "invoices", "invoice_id"
+    ),
+    "currency_allocation_vs_invoice": (
+        "FROM payment_allocations a JOIN payments p ON p.payment_id = a.payment_id "
+        "JOIN invoices i ON i.invoice_id = a.invoice_id "
+        "WHERE p.payment_currency <> i.currency",
+        "a.payment_id",
+    ),
+    "currency_bank_vs_payment": (
+        "FROM bank_transactions b JOIN payments p "
+        "ON p.reference_number = b.payment_reference "
+        "WHERE b.transaction_type <> 'bank fee' AND b.currency <> p.payment_currency",
+        "b.bank_transaction_id",
+    ),
+    "currency_invoice_vs_po": (
+        "FROM invoices i JOIN purchase_orders o ON o.po_id = i.po_id "
+        "WHERE i.currency <> o.currency",
+        "i.invoice_id",
+    ),
+}
+
+
+def quality_report(snapshot: Path) -> dict[str, Any]:
+    """Relationship gaps in a prepared snapshot, from its contents alone.
+
+    Rows after the cutoff are already absent from the snapshot, so "no bank
+    row" means none by the cutoff.
+    """
+    con = sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True)
+    try:
+        counts = {
+            name: con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
+            for name in TABLES
+        }
+        gaps: dict[str, Any] = {}
+        for name, (tail, sample) in _GAPS.items():
+            count = con.execute(f"SELECT COUNT(*) {tail}").fetchone()[0]
+            samples = [
+                r[0]
+                for r in con.execute(
+                    f"SELECT DISTINCT {sample} {tail} ORDER BY 1 LIMIT {SAMPLE_LIMIT}"
+                )
+            ]
+            gaps[name] = {"count": count, "sample_tokens": samples}
+    finally:
+        con.close()
+    return {"quality_version": QUALITY_VERSION, "row_counts": counts, "gaps": gaps}
+
+
+def _write_quality(out_dir: Path) -> str:
+    path = out_dir / QUALITY_FILE
+    path.write_text(
+        json.dumps(quality_report(out_dir / SNAPSHOT_FILE), indent=2, sort_keys=True)
+        + "\n"
+    )
+    os.chmod(path, 0o444)
+    return _sha256_file(path)
