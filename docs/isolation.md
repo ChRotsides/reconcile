@@ -1,6 +1,6 @@
 # Inference and evaluator isolation
 
-Status at M1. Rationale: `PLAN.md` section 2, "Input and label separation". Directory names below are chosen by the caller of the preparation functions; the paths are the project's convention, not enforced.
+Status at M2. Rationale: `PLAN.md` section 2, "Input and label separation". Directory names below are chosen by the caller of the preparation functions; the paths are the project's convention, not enforced.
 
 ## Zones and where they live
 
@@ -18,9 +18,37 @@ Read-only, and only these two: the prepared snapshot directory and the requests 
 
 Inference must never see: the key file, the links directory, the upstream checkout, `evaluation/` code, or anything under `challenge_test`. The key can re-derive tokens; the links map requests to cases; the upstream files hold answers.
 
-## Planned (M2, not implemented)
+## Implemented (M2): container with three mounts
 
-Run the investigator in a container started like the M0 baseline runner (`evaluation/baselines/finrca_upstream/run_docker.sh`): no network, read-only root, explicit read-only mounts, with only the two directories above mounted. Nothing like this exists for `src/reconcile/` yet, because there is no investigator.
+`deploy/inference/run_inference.sh` runs `python -m reconcile.runs.batch` in the image built from `deploy/inference/Dockerfile`:
+
+```bash
+deploy/inference/run_inference.sh --build        # context is src/ only
+deploy/inference/run_inference.sh SNAPSHOT_DIR REQUESTS_DIR OUT_DIR   # OUT_DIR must not exist
+```
+
+which executes
+
+```bash
+docker run --rm --network none --read-only --user "$(id -u):$(id -g)" --cap-drop ALL \
+  --security-opt no-new-privileges --tmpfs /tmp:size=64m -e HOME=/tmp \
+  -v SNAPSHOT_DIR:/in/snapshot:ro -v REQUESTS_DIR:/in/requests:ro -v OUT_DIR:/out \
+  reconcile-inference:dev /in/snapshot /in/requests/requests.jsonl /out
+```
+
+- Mounts: the snapshot directory (read-only), the requests directory (read-only), one fresh output directory (writable). Nothing else. The script creates `OUT_DIR` with `mkdir` and fails if it exists.
+- Image: `python:3.12-slim` plus the `reconcile` package copied from `src/` (no runtime dependencies), with `reconcile/adapters/` deleted. No dev tools, `evaluation/`, tests, fixtures, key handling or upstream readers. The build context is `src/`, so nothing else can be copied in.
+- Output: `packets.jsonl`, one packet per request sorted by `request_id`, written atomically. An unexpected exception on one request becomes a `failed` packet with the exception type name only. A malformed or duplicate-ID requests file stops the run before anything is written.
+- Check mode: `ABSENT_PATHS=<colon-separated host paths> run_inference.sh --check SNAPSHOT_DIR REQUESTS_DIR OUT_DIR` runs `test -e` inside the container (same mounts) on a fixed list (links, `evaluation/`, tests, fixtures, `/src`, `/data`, the adapters) plus the caller's paths, and on the mounted files as a positive control.
+- `tests/integration/test_inference_container.py` (skipped without Docker) runs the check with the key file, `links.jsonl`, the upstream checkout, `challenge_test`, `evaluation/`, `tests/`, `fixtures/` and `src/` host paths, requires every one to be absent and the snapshot and requests present, confirms `reconcile.adapters` is not importable in the image, and requires the container's `packets.jsonl` to be byte-identical to an in-process `run_requests` on the same inputs.
+
+What the absence check proves: in a container started by this script, those paths do not exist at the paths tested, so code in the container cannot open them there. It does not prove that nothing else sensitive is reachable, only that the listed paths and the image contents are as stated.
+
+## Still an assumption
+
+- The operator passes the right directories. The script checks only that `snapshot.sqlite` and `requests.jsonl` exist in them; it cannot know that a directory does not also hold a key or links file. Preparation refuses to put the key or links inside those directories, but a hand-made directory is not checked.
+- The container runtime enforces `--network none`, `--read-only` and the mount modes as documented; this was not independently tested beyond the check above.
+- The image is built from `python:3.12-slim` pulled at build time; its digest is not pinned.
 
 ## Enforced today
 
@@ -30,6 +58,6 @@ Run the investigator in a container started like the M0 baseline runner (`evalua
   - no inference module imports the preparation adapters (`adapters/finrca.py`, `adapters/finrca_requests.py`), which hold key handling and read upstream files.
 - Preparation refusals: the `challenge_test` split is refused before any file is touched; the key file may not lie inside the output directories (snapshot, requests, links); the snapshot `out_dir` must not already exist; request outputs refuse to overwrite existing files.
 
-## Still an assumption (A024)
+## Still an assumption: in-process tests (A024)
 
-The tests are a guard against accidents. They do not stop dynamic imports, strings built at runtime, or a process that simply opens a path it can reach. Until M2 runs inference with only the two mounts, isolation of the real process rests on the operator mounting correctly (A024: unverified).
+The tests are a guard against accidents. They do not stop dynamic imports, strings built at runtime, or a process that simply opens a path it can reach. Isolation of a real run rests on the container above and on the operator passing the right directories (A024: partly verified, see above).
