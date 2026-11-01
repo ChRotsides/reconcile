@@ -46,16 +46,19 @@ Section numbers refer to `docs/evidence-contract.md`. Clearing days use Monday t
 |---|---|---|
 | `real_identical_distinct_payments` | Two payments with the same amount, date and vendor, on two invoices, each with its own debit. Both must survive preparation; no duplicate finding. Disposition `out_of_scope` (no in-scope class applies) | 2 principle 4 |
 | `real_bank_batch_debit` | One 1500.00 debit settles three payments (400, 600, 500) and carries a reference no payment has. **Current contract answers F12 for all three, wrongly**, because it has no batch concept. Target: abstain | `docs/input-mapping.md` G2 |
+| `real_truncated_bank_reference` | Payment reference `VENDOR-PAY-2026-0001`; the bank row carries only its first 16 characters (as MT940 :61: does), so exact matching fails. A1 is empty, but A3 finds the debit (same amount, currency, counterparty), so the **current contract is not gradable, which is the right answer**; no contract gap. Target: abstain `reference_unmatched_candidate_bank_row`. A wrong answer is F12 | 4.2 A3; `docs/export-formats.md` 3.3; G1 |
+| `real_truncated_reference_netted_fee` | The truncated reference of the case above plus a debit 12.50 below the payment and no fee journal. A3 requires an equal amount, so it finds no candidate. **Current contract answers F12 wrongly** (false positive: the debit exists). Target: abstain `reference_unmatched_nearby_debit` | 4.2 A3; G1, G4 |
+| `real_free_text_reference` | Bank reference is free text containing the payment reference (`PAYMENT REF_1 INV 123`). Same shape and outcome as the truncated case. The contract would answer F12 wrongly only if the debit amount also differed (A3 empty); not exercised | 4.2 A3; G1 |
 | `real_partial_payment` | Invoice 1000.00 (status `approved`, see below) paid 400.00, debit 400.00. Not F06, not F14, not a missing settlement. Disposition `out_of_scope` | 4.1 (instalments; no partial variant exists) |
 | `real_netted_fee_no_journal` | Debit 12.50 below the payment and no fee journal for it; a fee journal for another payment's debit must not explain it. F14 "unexplained shortfall"; the fee is unobservable and must not be asserted | 4.3 |
 | `real_reversal_then_repayment` | Reversed payment (debit, credit, journal), then a second payment settles the same invoice. Not a duplicate. **The reversal contract requires the invoice not to be `paid`, so the current contract does not confirm it** | 5 reversal; 4.1 |
 
-## Needs the M5 generic CSV adapter (not faked here)
+## Deferred (no scenario yet)
 
-The ISO-only FinRCA layout cannot express these, so they have no scenario:
+Truncated and free-text references are covered above, because the adapter hashes any reference string. Not covered:
 
-- free-text, truncated or differently formatted payment references (input-mapping G1);
-- mixed date formats and bank-statement dates that differ from booking dates (G6);
+- mixed date formats and bank-statement dates that differ from booking dates (G6): deferred, pending a plan decision (the adapter requires ISO dates by design);
+- other messy reference shapes, such as case or spacing differences, which need normalisation rules that do not exist yet (G1);
 - bank rows without a stable ID, or repeated statement overlaps (G9);
 - batch ID and member count columns on the bank side (G2 beyond the amount sum shown above).
 

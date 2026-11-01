@@ -71,6 +71,26 @@ CHECKS: dict[str, tuple[str, str, str, str]] = {
     "pending_settlement": ("pending", "PAY_1", G, "absent_inside_window"),
     # Documented contract gap: the checker answers F12 for each batched payment.
     "real_bank_batch_debit": ("f12", "PAY_1", G, "absent_beyond_window"),
+    # Not a gap: A3 finds the mis-referenced debit, so F12 is not gradable.
+    "real_free_text_reference": (
+        "f12",
+        "PAY_1",
+        NG,
+        "unreferenced_bank_candidate",
+    ),
+    "real_truncated_bank_reference": (
+        "f12",
+        "PAY_1",
+        NG,
+        "unreferenced_bank_candidate",
+    ),
+    # Documented contract gap: A3 needs an equal amount; a netted fee hides it.
+    "real_truncated_reference_netted_fee": (
+        "f12",
+        "PAY_1",
+        G,
+        "absent_beyond_window",
+    ),
     # Out of scope: the checker must refute F06 and must not confirm a shortfall.
     "real_identical_distinct_payments": (
         "f14",
@@ -139,6 +159,33 @@ def test_checker_agrees_with_expected_disposition(name: str) -> None:
         assert status == C
         s = ecc.load_dir(FIXTURES / name)
         assert ecc.fired(s, set(s.payments) | set(s.invoices)) == set()
+
+
+@pytest.mark.parametrize(
+    "name", ["real_truncated_bank_reference", "real_free_text_reference"]
+)
+def test_mangled_reference_is_not_gradable_and_not_a_gap(name: str) -> None:
+    e = EXPECTED[name]
+    assert e["known_contract_gap"] is None
+    assert e["abstention_reason"] == "reference_unmatched_candidate_bank_row"
+    s = ecc.load_dir(FIXTURES / name)
+    res = ecc.check_absence(s, "PAY_1", want_old=True)
+    assert (res.status, res.reason) == (NG, "unreferenced_bank_candidate")
+    # The window and the missing exact match alone would be F12; only A3 stops it.
+    assert [x["count"] for x in e["absence_searches"]] == [0, 1, 1]
+
+
+def test_truncated_reference_with_netted_fee_is_a_documented_gap() -> None:
+    e = EXPECTED["real_truncated_reference_netted_fee"]
+    assert e["known_contract_gap"]["gap"]
+    assert (e["disposition"], e["abstention_reason"]) == (
+        "abstained",
+        "reference_unmatched_nearby_debit",
+    )
+    assert [x["count"] for x in e["absence_searches"]] == [0, 1, 0]
+    s = ecc.load_dir(FIXTURES / "real_truncated_reference_netted_fee")
+    res = ecc.check_absence(s, "PAY_1", want_old=True)
+    assert (res.status, res.reason) == (G, "absent_beyond_window")  # wrong answer
 
 
 # --- regression tests: hand-edited fixtures --------------------------------

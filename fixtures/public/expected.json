@@ -915,6 +915,88 @@
     },
     "snapshot_rows": {}
   },
+  "real_free_text_reference": {
+    "absence_searches": [
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "A1",
+        "predicate": "payment_reference = PAY_1.reference_number AND transaction_type <> 'bank fee'",
+        "table": "bank_transactions"
+      },
+      {
+        "count": 1,
+        "cutoff": "2026-06-30",
+        "id": "A2",
+        "predicate": "reference_number = PAY_1.reference_number",
+        "table": "payments"
+      },
+      {
+        "count": 1,
+        "cutoff": "2026-06-30",
+        "id": "A3",
+        "predicate": "non-fee debit, payment_reference matches no payment, same currency, same amount, counterparty_token = payment.bank_account_id",
+        "table": "bank_transactions"
+      }
+    ],
+    "abstention_reason": "reference_unmatched_candidate_bank_row",
+    "calculations": [
+      {
+        "name": "business_day_age",
+        "unit": "business_days",
+        "value": "21"
+      },
+      {
+        "name": "clearing_limit_ach",
+        "unit": "business_days",
+        "value": "3"
+      }
+    ],
+    "category": null,
+    "contract_note": "The bank reference is free text containing the payment reference ('PAYMENT REF_1 INV 123'). Exact matching fails; A3 catches the debit by amount, currency and counterparty, so the current contract abstains correctly. It would answer wrongly if the amount also differed: see `real_truncated_reference_netted_fee`.",
+    "contract_section": "4.2 A3 (not gradable: unreferenced candidate bank row)",
+    "disposition": "abstained",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "candidate debit whose reference does not match exactly",
+        "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "J_PAY_1",
+        "role": "payment journal (by journal_id)",
+        "table": "gl_entries"
+      }
+    ],
+    "family": "realistic_shape",
+    "known_contract_gap": null,
+    "must_not": [
+      "answer F12 (a debit of the same amount and counterparty exists)",
+      "claim BT_1 settles PAY_1 as a fact from a reference that does not match exactly"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {
+      "bank_payment_reference_unmatched": 1,
+      "effective_payment_without_bank_row": 1,
+      "payment_without_bank_row": 1
+    },
+    "snapshot_rows": {}
+  },
   "real_identical_distinct_payments": {
     "absence_searches": [],
     "calculations": [
@@ -1146,6 +1228,180 @@
       "table": "payments"
     },
     "quality_gaps": {},
+    "snapshot_rows": {}
+  },
+  "real_truncated_bank_reference": {
+    "absence_searches": [
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "A1",
+        "predicate": "payment_reference = PAY_1.reference_number AND transaction_type <> 'bank fee'",
+        "table": "bank_transactions"
+      },
+      {
+        "count": 1,
+        "cutoff": "2026-06-30",
+        "id": "A2",
+        "predicate": "reference_number = PAY_1.reference_number",
+        "table": "payments"
+      },
+      {
+        "count": 1,
+        "cutoff": "2026-06-30",
+        "id": "A3",
+        "predicate": "non-fee debit, payment_reference matches no payment, same currency, same amount, counterparty_token = payment.bank_account_id",
+        "table": "bank_transactions"
+      }
+    ],
+    "abstention_reason": "reference_unmatched_candidate_bank_row",
+    "calculations": [
+      {
+        "name": "business_day_age",
+        "unit": "business_days",
+        "value": "21"
+      },
+      {
+        "name": "clearing_limit_ach",
+        "unit": "business_days",
+        "value": "3"
+      }
+    ],
+    "category": null,
+    "contract_note": "The bank row carries the first 16 characters of the 20-character payment reference (as MT940 :61: does). The current contract is not wrong here: A1 finds nothing, but A3 finds one unreferenced debit with equal amount, currency and counterparty, so F12 is not gradable. The contract does not decide whether the row belongs to the payment; a reference-matching rule would be a contract change.",
+    "contract_section": "4.2 A3 (not gradable: unreferenced candidate bank row)",
+    "disposition": "abstained",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "candidate debit whose reference does not match exactly",
+        "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "J_PAY_1",
+        "role": "payment journal (by journal_id)",
+        "table": "gl_entries"
+      }
+    ],
+    "family": "realistic_shape",
+    "known_contract_gap": null,
+    "must_not": [
+      "answer F12 (a debit of the same amount and counterparty exists)",
+      "claim BT_1 settles PAY_1 as a fact from a reference that does not match exactly"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {
+      "bank_payment_reference_unmatched": 1,
+      "effective_payment_without_bank_row": 1,
+      "payment_without_bank_row": 1
+    },
+    "snapshot_rows": {}
+  },
+  "real_truncated_reference_netted_fee": {
+    "absence_searches": [
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "A1",
+        "predicate": "payment_reference = PAY_1.reference_number AND transaction_type <> 'bank fee'",
+        "table": "bank_transactions"
+      },
+      {
+        "count": 1,
+        "cutoff": "2026-06-30",
+        "id": "A2",
+        "predicate": "reference_number = PAY_1.reference_number",
+        "table": "payments"
+      },
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "A3",
+        "predicate": "non-fee debit, payment_reference matches no payment, same currency, same amount, counterparty_token = payment.bank_account_id",
+        "table": "bank_transactions"
+      }
+    ],
+    "abstention_reason": "reference_unmatched_nearby_debit",
+    "calculations": [
+      {
+        "name": "business_day_age",
+        "unit": "business_days",
+        "value": "21"
+      },
+      {
+        "name": "clearing_limit_ach",
+        "unit": "business_days",
+        "value": "3"
+      },
+      {
+        "name": "nearby_debit_amount_difference",
+        "unit": "EUR",
+        "value": "12.50"
+      }
+    ],
+    "category": null,
+    "contract_section": "4.2 (F12 A1 to A3 all empty) versus an unexplained nearby debit; docs/input-mapping.md G1, G4",
+    "disposition": "abstained",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "candidate debit whose reference does not match exactly",
+        "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "J_PAY_1",
+        "role": "payment journal (by journal_id)",
+        "table": "gl_entries"
+      }
+    ],
+    "family": "realistic_shape",
+    "known_contract_gap": {
+      "current_contract_outcome": "answered F12 for PAY_1 (A1 empty because the 16-character bank reference does not match exactly; A2 is 1; A3 empty because the debit amount differs from the payment by 12.50). False positive: a debit for this payment exists.",
+      "gap": "G1 with a netted fee",
+      "target": "abstain: reference unmatched and an unexplained nearby debit exists; do not change the contract here",
+      "why": "A3 requires an equal amount. A truncated reference together with a netted fee defeats both the exact reference search and the candidate search."
+    },
+    "must_not": [
+      "answer F12 (a posted debit 12.50 below the payment, same counterparty, exists)",
+      "claim BT_1 settles PAY_1 as a fact",
+      "name the 12.50 as a fee"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {
+      "bank_payment_reference_unmatched": 1,
+      "effective_payment_without_bank_row": 1,
+      "payment_without_bank_row": 1
+    },
     "snapshot_rows": {}
   },
   "split_payment": {
