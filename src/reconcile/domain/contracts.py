@@ -548,6 +548,10 @@ class Finding:
         )
 
 
+def _is_legitimate(category: str) -> bool:
+    return category == LEGITIMATE or category.startswith(LEGITIMATE + "_")
+
+
 @dataclass(frozen=True, slots=True)
 class Diagnosis:
     """Execution outcome (`disposition`) is separate from the conclusion
@@ -580,7 +584,7 @@ class Diagnosis:
                 raise ValueError("an answered diagnosis needs a supported finding")
             if self.category in self.alternatives:
                 raise ValueError("category repeated in alternatives")
-            if self.category == LEGITIMATE and (
+            if _is_legitimate(self.category) and (
                 any(f.state is not FindingState.SUPPORTED for f in self.findings)
                 or self.missing_information
             ):
