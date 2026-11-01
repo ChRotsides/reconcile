@@ -99,6 +99,8 @@ CHECKS: dict[str, tuple[str, str, str, str]] = {
         "matched_no_exception",
     ),
     "real_netted_fee_no_journal": ("f14", "PAY_1", G, "unexplained_shortfall"),
+    # No invoice, no all-clear (contract section 5): clearing without an allocation.
+    "real_payment_without_allocation": ("clearing", "PAY_1", NG, "no_allocation"),
     "real_partial_payment": ("no_exception", "PAY_1", G, "matched_no_exception"),
     # Documented contract gap: re-payment leaves the invoice paid.
     "real_reversal_then_repayment": ("reversal", "PAY_1", C, "invoice_still_paid"),

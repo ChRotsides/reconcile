@@ -21,6 +21,7 @@ from reconcile.adapters.finrca import (
 from reconcile.diagnosis import pipeline
 from reconcile.diagnosis.invoice import diagnose_invoice
 from reconcile.diagnosis.pipeline import investigate
+from reconcile.diagnosis.policy import SCOPE_LIMITATION
 from reconcile.domain.contracts import (
     Disposition,
     EvidencePacket,
@@ -678,7 +679,7 @@ def run_clone(p: Prepared, tmp_path: Path) -> EvidencePacket:
 
 def test_policy_is_declared_in_every_packet(prepared: dict[str, Prepared]) -> None:
     prov = dict(run(prepared, "weekend_clearing").provenance)
-    assert prov["policy_version"] == "evidence-contract-0.1"
+    assert prov["policy_version"] == "evidence-contract-0.2"
     assert [
         prov[f"clearing_limit_{m}"] for m in ("ach", "wire", "check", "virtual_card")
     ] == [
@@ -723,3 +724,80 @@ def test_every_select_avoids_invoice_dates() -> None:
     ]
     assert len(sql) >= 15
     assert not any("invoice_date" in q or "received_date" in q for q in sql)
+
+
+# --- no invoice, no all-clear; scope statement; variant overlap --------------
+
+ALL_CLEAR_PRIMARIES = [
+    ("weekend_clearing", "payments", "PAY_1"),
+    ("check_clearing", "payments", "PAY_1"),
+    ("net_fee_accounting", "payments", "PAY_1"),
+    ("accounted_bank_fee", "bank_transactions", "BT_2"),
+    ("real_partial_payment", "payments", "PAY_1"),  # no_exception
+]
+
+
+@pytest.mark.parametrize(("name", "table", "raw"), ALL_CLEAR_PRIMARIES)
+def test_payment_without_allocation_is_never_an_all_clear(
+    prepared: dict[str, Prepared], tmp_path: Path, name: str, table: str, raw: str
+) -> None:
+    p = prepared[name]
+    copy = clone(p, tmp_path, "DELETE FROM payment_allocations")
+    packet = investigate(copy, p.request(table, raw))
+    assert reason(packet) == ("abstained", "payment_without_invoice_allocation")
+    (finding,) = packet.diagnosis.findings
+    assert finding.check_id == "payment_without_invoice_allocation"
+    assert finding.state.value == "supported"
+    cited = {e.evidence_id: e for e in packet.evidence}
+    searches = [
+        (s.table, s.observed_count)
+        for i in finding.evidence_ids
+        if (s := cited[i].search) is not None
+    ]
+    assert searches == [("payment_allocations", 0)]
+    assert "allocation" in packet.diagnosis.missing_information[0]
+
+
+def test_allocation_to_an_invoice_in_another_currency_is_not_an_all_clear(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    p = prepared["weekend_clearing"]
+    copy = clone(p, tmp_path, "UPDATE invoices SET currency = 'USD'")
+    packet = investigate(copy, p.request("payments", "PAY_1"))
+    assert reason(packet) == ("abstained", "unsupported_fx")
+
+
+@pytest.mark.parametrize("name", ALL_SCENARIOS)
+def test_every_all_clear_states_its_scope(
+    prepared: dict[str, Prepared], name: str
+) -> None:
+    packet = run(prepared, name)
+    category = packet.diagnosis.category or ""
+    all_clear = category.startswith("legitimate_") or category == "no_exception"
+    assert (SCOPE_LIMITATION in packet.limitations) == all_clear
+
+
+@pytest.mark.parametrize(
+    ("sql", "alternative"),
+    [
+        ("UPDATE payments SET payment_method = 'check'", "legitimate_check_clearing"),
+        (
+            "UPDATE payments SET payment_date = '2026-06-05'",
+            "legitimate_weekend_clearing",
+        ),
+    ],
+)
+def test_batch_lists_the_clearing_variant_that_also_holds(
+    prepared: dict[str, Prepared], tmp_path: Path, sql: str, alternative: str
+) -> None:
+    p = prepared["batch_payment"]
+    posted = "UPDATE bank_transactions SET posted_date = '2026-06-08'"
+    packet = payment_packet(p, tmp_path, sql, posted)
+    assert reason(packet) == ("answered", "legitimate_batch_payment")
+    assert packet.diagnosis.alternatives == (alternative,)
+
+
+def test_batch_without_clearing_overlap_lists_no_alternative(
+    prepared: dict[str, Prepared],
+) -> None:
+    assert run(prepared, "batch_payment").diagnosis.alternatives == ()

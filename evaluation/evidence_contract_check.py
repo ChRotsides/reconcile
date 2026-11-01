@@ -344,6 +344,20 @@ def check_absence(s: Snapshot, pid: str, *, want_old: bool) -> Result:
     return ok("absent_inside_window", ids)
 
 
+def allocation_gap(s: Snapshot, p: dict[str, str], ids: set[str]) -> Result | None:
+    """Contract section 5: no all-clear without an allocation of the payment to
+    an invoice in its own currency. None when the allocation is present."""
+    allocs = s.alloc_by_pay.get(p["payment_id"], [])
+    if not allocs:
+        return ng("no_allocation", ids)
+    invoices = [s.invoices.get(a["invoice_id"]) for a in allocs]
+    if any(i is not None and i["currency"] == p["payment_currency"] for i in invoices):
+        return None
+    if all(i is None for i in invoices):
+        return ng("invoice_missing", ids)
+    return cross_currency(ids)
+
+
 def check_f14(s: Snapshot, pid: str, *, variant: str) -> Result:
     p = s.payments.get(pid)
     if p is None:
@@ -384,7 +398,7 @@ def check_f14(s: Snapshot, pid: str, *, variant: str) -> Result:
         return bad("no_amount_difference", ids)
     if unexplained:
         return bad("fee_journal_does_not_explain_difference", ids)
-    return ok("difference_explained_by_fee_journal", ids)
+    return allocation_gap(s, p, ids) or ok("difference_explained_by_fee_journal", ids)
 
 
 def check_bank_fee(s: Snapshot, bank_id: str) -> Result:
@@ -413,7 +427,9 @@ def check_bank_fee(s: Snapshot, bank_id: str) -> Result:
     total = sum((j[1] for j in fee_j), Decimal(0))
     if abs(total - money(row["amount"])) > quantum(row["currency"]):
         return bad("fee_journal_amount_differs", ids)
-    return ok("fee_journal_equals_fee_row", ids)
+    return allocation_gap(s, s.payments[refs[0]], ids) or ok(
+        "fee_journal_equals_fee_row", ids
+    )
 
 
 def check_clearing(s: Snapshot, pid: str, method: str) -> Result:
@@ -436,7 +452,7 @@ def check_clearing(s: Snapshot, pid: str, method: str) -> Result:
         date.fromisoformat(p["payment_date"]), date.fromisoformat(b["posted_date"])
     )
     if lag <= CLEARING_BDAYS[method]:
-        return ok("within_clearing_window", ids)
+        return allocation_gap(s, p, ids) or ok("within_clearing_window", ids)
     return bad("beyond_clearing_window", ids)
 
 

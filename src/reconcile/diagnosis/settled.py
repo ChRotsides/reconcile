@@ -33,6 +33,7 @@ CHECK = "legitimate_check_clearing"
 BATCH = "legitimate_batch_payment"
 REVERSAL = "legitimate_payment_reversal"
 NO_EXCEPTION = "no_exception"
+NO_ALLOCATION = "payment_without_invoice_allocation"
 
 
 def _supported(
@@ -88,7 +89,7 @@ def diagnose_settled(
             "an explanation of a bank amount above the payment",
         )
     if delta.result.amount > q.amount:
-        return _shortfall(request, reader, led, pay_ev, d_ev, d_id, cur)
+        return _shortfall(request, reader, led, pay, pay_ev, d_ev, d_id, cur)
     return _matched(request, reader, led, pay, pay_ev, d, d_ev)
 
 
@@ -96,6 +97,7 @@ def _shortfall(
     request: InvestigationRequest,
     reader: Reader,
     led: Ledger,
+    pay: Row,
     pay_ev: str,
     d_ev: str,
     d_id: str,
@@ -142,12 +144,21 @@ def _shortfall(
             "fee_journal_does_not_match_difference",
             "an explanation of the part of the shortfall the fee journal leaves",
         )
+    allocs = require_allocation(led, reader, pay, cutoff)
+    if isinstance(allocs, EvidencePacket):
+        return allocs
     finding = _supported(
         "fee_explains_shortfall",
         (pay_ev, d_ev, *evs),
         ("delta", "explained", "unexplained"),
     )
-    return led.packet(Diagnosis(Disposition.ANSWERED, NET_FEE, (finding,)))
+    return led.packet(
+        Diagnosis(
+            Disposition.ANSWERED,
+            NET_FEE,
+            (finding, allocated_finding(led, pay, allocs)),
+        )
+    )
 
 
 @dataclass
@@ -243,6 +254,51 @@ def _alloc_evs(led: Ledger, pid: str, allocs: list[Row], cur: str) -> list[str]:
     ]
 
 
+def require_allocation(
+    led: Ledger, reader: Reader, pay: Row, cutoff: date
+) -> list[Row] | EvidencePacket:
+    """No invoice, no all-clear (docs/evidence-contract.md section 5): a payment
+    must have an allocation to an invoice in its own currency. Returns the cited
+    allocation rows, or an abstention that keeps the missing allocation visible."""
+    pid, cur = req(pay, "payment_id"), req(pay, "payment_currency")
+    pay_ev = led.payment(pay, pid, "primary")
+    allocs = rt.allocations_of_payment(reader, pid, cutoff)
+    if not allocs:
+        search = led.search(
+            "payment_allocations",
+            f"payment_id = '{pid}' AND allocation_date <= '{cutoff.isoformat()}'",
+            0,
+            "allocation_search",
+        )
+        finding = _supported(NO_ALLOCATION, (pay_ev, search))
+        return led.abstain(
+            NO_ALLOCATION,
+            "an allocation of the payment to an invoice in the payment's currency",
+            (finding,),
+        )
+    _alloc_evs(led, pid, allocs, cur)
+    currencies = [
+        reader.rows(
+            "SELECT currency FROM invoices WHERE invoice_id = ?",
+            (req(a, "invoice_id"),),
+        )
+        for a in allocs
+    ]
+    if not any(r and r[0]["currency"] == cur for r in currencies):
+        return led.abstain(
+            "unsupported_fx", "a documented conversion path between currencies"
+        )
+    return allocs
+
+
+def allocated_finding(led: Ledger, pay: Row, allocs: list[Row]) -> Finding:
+    pid, cur = req(pay, "payment_id"), req(pay, "payment_currency")
+    return _supported(
+        "payment_allocated_to_invoice",
+        (f"pay:{pid}", *_alloc_evs(led, pid, allocs, cur)),
+    )
+
+
 def _batch(
     led: Ledger,
     reader: Reader,
@@ -252,6 +308,7 @@ def _batch(
     allocs: list[Row],
     invoices: list[str],
     cutoff: date,
+    alternatives: tuple[str, ...],
 ) -> EvidencePacket:
     pid, cur = req(pay, "payment_id"), req(pay, "payment_currency")
     q = quantum(cur)
@@ -286,7 +343,9 @@ def _batch(
             tuple(b.calc_id for b in bals if b.calc_id),
         ),
     )
-    return led.packet(Diagnosis(Disposition.ANSWERED, BATCH, findings))
+    return led.packet(
+        Diagnosis(Disposition.ANSWERED, BATCH, findings, alternatives=alternatives)
+    )
 
 
 def _no_exception(
@@ -300,10 +359,6 @@ def _no_exception(
     cutoff: date,
 ) -> EvidencePacket:
     pid, cur = req(pay, "payment_id"), req(pay, "payment_currency")
-    if not allocs:
-        return led.abstain(
-            "required_records_missing", "an allocation of the payment to an invoice"
-        )
     alloc_evs = _alloc_evs(led, pid, allocs, cur)
     led.calc("allocated", "sum", [(e, "allocated_amount") for e in alloc_evs])
     bals = _balances(led, reader, invoices, cur, cutoff, pid)
@@ -436,7 +491,6 @@ def _matched(
 ) -> EvidencePacket:
     """Debit equals payment: batch, clearing variants, or no exception."""
     cutoff = request.cutoff
-    pid = req(pay, "payment_id")
     method = req(pay, "payment_method")
     policy = clearing_policy(method)
     if policy is None:
@@ -465,16 +519,33 @@ def _matched(
             "clearing_lag_exceeds_limit",
             "an explanation of a debit posted beyond the clearing limit",
         )
-    allocs = rt.allocations_of_payment(reader, pid, cutoff)
+    allocs = require_allocation(led, reader, pay, cutoff)
+    if isinstance(allocs, EvidencePacket):
+        return allocs
     invoices = sorted({req(a, "invoice_id") for a in allocs})
-    if len(invoices) >= 2:
-        return _batch(led, reader, pay, pay_ev, d_ev, allocs, invoices, cutoff)
     base = (pay_ev, d_ev)
     calcs = ("delta", "business_day_lag")
+    # Every variant whose contract holds on these records; the first one wins.
+    holds = []
+    if len(invoices) >= 2:
+        holds.append(BATCH)
     if method == "check":
-        finding = _supported("cleared_within_check_limit", base, calcs)
-        return led.packet(Diagnosis(Disposition.ANSWERED, CHECK, (finding,)))
+        holds.append(CHECK)
     if method == "ACH" and spans_weekend(paid, posted):
-        finding = _supported("cleared_across_weekend", base, calcs)
-        return led.packet(Diagnosis(Disposition.ANSWERED, WEEKEND, (finding,)))
+        holds.append(WEEKEND)
+    if holds and holds[0] == BATCH:
+        return _batch(
+            led, reader, pay, pay_ev, d_ev, allocs, invoices, cutoff, tuple(holds[1:])
+        )
+    if holds:
+        check_id = (
+            "cleared_within_check_limit"
+            if holds[0] == CHECK
+            else "cleared_across_weekend"
+        )
+        findings = (
+            _supported(check_id, base, calcs),
+            allocated_finding(led, pay, allocs),
+        )
+        return led.packet(Diagnosis(Disposition.ANSWERED, holds[0], findings))
     return _no_exception(led, reader, pay, pay_ev, d_ev, allocs, invoices, cutoff)

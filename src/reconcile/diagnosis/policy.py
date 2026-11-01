@@ -8,7 +8,16 @@ from decimal import Decimal
 
 from reconcile.domain.money import Money
 
-POLICY_VERSION = "evidence-contract-0.1"
+POLICY_VERSION = "evidence-contract-0.2"
+
+# Stated in every answered legitimate_* and no_exception packet, so an all-clear
+# cannot be read as a general clean bill (docs/evidence-contract.md section 5.1).
+# Changing the wording or the lists needs a new POLICY_VERSION.
+SCOPE_LIMITATION = (
+    "Scope of this all-clear. Checked: settlement and bank match, amounts, "
+    "allocations and invoice totals, duplicates, cutoff. Not checked: approval "
+    "workflow, GL posting against the payment, vendor master data, PO matching."
+)
 
 # P1: clearing limit in business days, keyed by payments.payment_method.
 # P2: no grace; a failure needs age > limit, a clearing variant lag <= limit.

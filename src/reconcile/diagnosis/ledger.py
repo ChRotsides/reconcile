@@ -3,6 +3,7 @@ calculations and day counts, with amounts read back from the cited records."""
 
 from functools import reduce
 
+from reconcile.diagnosis.policy import SCOPE_LIMITATION
 from reconcile.domain.contracts import (
     AbsenceSearch,
     Calculation,
@@ -193,6 +194,10 @@ class Ledger:
         recommendations: tuple[Recommendation, ...] = (),
         limitations: tuple[str, ...] = (),
     ) -> EvidencePacket:
+        category = diagnosis.category or ""
+        all_clear = category.startswith("legitimate_") or category == "no_exception"
+        if diagnosis.disposition is Disposition.ANSWERED and all_clear:
+            limitations = (*limitations, SCOPE_LIMITATION)
         return EvidencePacket(
             self.request,
             diagnosis,

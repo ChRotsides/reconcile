@@ -32,6 +32,11 @@
         "table": "payments"
       },
       {
+        "id": "PAY_1|INV_1",
+        "role": "allocation of the payment to an invoice in its currency (section 5)",
+        "table": "payment_allocations"
+      },
+      {
         "id": "J_FEE_1",
         "role": "bank_fee journal (by journal_id)",
         "table": "gl_entries"
@@ -145,6 +150,11 @@
         "id": "BT_1",
         "role": "unique posted debit",
         "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation of the payment to an invoice in its currency (section 5)",
+        "table": "payment_allocations"
       }
     ],
     "family": "legitimate_check_clearing",
@@ -696,6 +706,11 @@
         "table": "bank_transactions"
       },
       {
+        "id": "PAY_1|INV_1",
+        "role": "allocation of the payment to an invoice in its currency (section 5)",
+        "table": "payment_allocations"
+      },
+      {
         "id": "J_FEE_1",
         "role": "bank_fee journal (by journal_id)",
         "table": "gl_entries"
@@ -1224,6 +1239,51 @@
     "quality_gaps": {},
     "snapshot_rows": {}
   },
+  "real_payment_without_allocation": {
+    "absence_searches": [
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "AL",
+        "predicate": "payment_id = PAY_1 AND allocation_date <= cutoff",
+        "table": "payment_allocations"
+      }
+    ],
+    "abstention_reason": "payment_without_invoice_allocation",
+    "calculations": [],
+    "category": null,
+    "contract_section": "5 (no invoice, no all-clear)",
+    "disposition": "abstained",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "bank row carrying the payment reference",
+        "table": "bank_transactions"
+      }
+    ],
+    "family": "realistic_shape",
+    "known_contract_gap": null,
+    "must_not": [
+      "legitimate_weekend_clearing",
+      "no_exception"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {
+      "invoice_without_allocation": 1,
+      "payment_without_allocation": 1
+    },
+    "snapshot_rows": {}
+  },
   "real_reversal_then_repayment": {
     "absence_searches": [],
     "abstention_reason": "reversal_followed_by_repayment",
@@ -1580,6 +1640,11 @@
         "id": "BT_1",
         "role": "unique posted debit",
         "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation of the payment to an invoice in its currency (section 5)",
+        "table": "payment_allocations"
       }
     ],
     "family": "legitimate_weekend_clearing",

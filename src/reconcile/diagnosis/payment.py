@@ -12,7 +12,11 @@ from itertools import combinations
 
 from reconcile.diagnosis.ledger import Ledger, is_effective, req, val
 from reconcile.diagnosis.policy import CLEARING_LIMITS, clearing_policy, quantum
-from reconcile.diagnosis.settled import diagnose_settled
+from reconcile.diagnosis.settled import (
+    allocated_finding,
+    diagnose_settled,
+    require_allocation,
+)
 from reconcile.domain.calendar import business_days
 from reconcile.domain.contracts import (
     Diagnosis,
@@ -352,10 +356,19 @@ def diagnose_bank_row(
         return led.abstain(
             "fee_journal_amount_differs", "an explanation of the fee journal difference"
         )
+    allocs = require_allocation(led, reader, resolved[0], cutoff)
+    if isinstance(allocs, EvidencePacket):
+        return allocs
     finding = Finding(
         "fee_booked_in_ledger",
         FindingState.SUPPORTED,
         (fee_ev, pay_ev, *evs),
         ("fee_row_minus_journals",),
     )
-    return led.packet(Diagnosis(Disposition.ANSWERED, ACCOUNTED_FEE, (finding,)))
+    return led.packet(
+        Diagnosis(
+            Disposition.ANSWERED,
+            ACCOUNTED_FEE,
+            (finding, allocated_finding(led, resolved[0], allocs)),
+        )
+    )
