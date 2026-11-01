@@ -19,23 +19,32 @@ Groups of a request, from its label:
     oos_failure     failure family the investigator does not check
     oos_legit       legitimate variant outside the payment contract
 
-Label conflict (rule tightened after review finding 12). A legitimate-labelled
-cohort case C conflicts with a failure case D of a checked family when a record
-that is where D's defect is lies in C's own records. "Where D's defect is":
-D's primary entity or a payment or invoice named in D's upstream evidence
-IDs. "C's own records": the payments and invoices C names (primary entity,
-affected entities, evidence IDs) plus, for each payment, the invoices it is
-allocated to and, for each invoice, its allocating payments. The same record
-cannot be both clean in C and defective in D.
+Label conflicts. The headline view scores EVERY gradable in-scope case, with no
+exclusion. A second, sensitivity view leaves out only the label conflicts that
+were verified by hand and are recorded with their evidence in the tracked file
+`evaluation/verified_label_conflicts.json` (5 pairs on train and validation). A
+rule over the labels never excludes a case; it only proposes:
 
-Every other overlap with a checked family (a record D only lists as an
-affected entity, or one that D reaches only through allocations, or that both
-cases only reach through allocations) is a review candidate: reported, never
-excluded.
+- *Conflict candidate*: a legitimate-labelled cohort case C and a failure case D
+  of a checked family such that a record that is where D's defect is lies in C's
+  own records. "Where D's defect is": D's primary entity or a payment or invoice
+  named in D's upstream evidence IDs (whether that record is really defective
+  has to be checked by hand). "C's own records": the payments and invoices C
+  names (primary entity, affected entities, evidence IDs) plus, for each payment,
+  the invoices it is allocated to and, for each invoice, its allocating
+  payments.
+- *Review candidate*: any other pair whose own-record sets intersect, i.e. a
+  payment or invoice that both cases name or reach through allocations (on
+  either or both sides: C names payment B, D names payment A, both allocated to
+  invoice I). Review candidates are reported only.
+
+`conflict_report` also checks that every verified pair is among the conflict
+candidates, so the file cannot drift from the labels.
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import NamedTuple
@@ -67,12 +76,13 @@ VARIANT_CATEGORY: dict[str, str | None] = {
 CONTRADICTED = frozenset({"RCA_001631", "RCA_001791", "RCA_002223", "RCA_002127"})
 NOT_GRADABLE = frozenset({"RCA_000588"})
 
-# The two scored views of the cohort. Every system reports both.
+# The two views of the cohort. Every system reports both; the first is the headline.
 COHORT_VIEWS: dict[str, tuple[str, ...]] = {
-    "without_label_conflicts": ("cohort",),
-    "with_label_conflicts": ("cohort", "label_conflict"),
+    "all_cases": ("cohort", "label_conflict"),
+    "sensitivity_without_verified_conflicts": ("cohort",),
 }
-COHORT_GROUPS = COHORT_VIEWS["with_label_conflicts"]  # every in-scope gradable case
+COHORT_GROUPS = COHORT_VIEWS["all_cases"]  # every in-scope gradable case
+VERIFIED_FILE = Path(__file__).with_name("verified_label_conflicts.json")
 
 # Failure families whose defect the investigator checks (the "Checked" list of
 # SCOPE_LIMITATION in src/reconcile/diagnosis/policy.py): F05 allocation to an
@@ -112,10 +122,11 @@ def group_of(
     failure_type: str,
     variant: str,
     case_id: str,
-    conflicts: frozenset[str] | set[str] | dict[str, object] = frozenset(),
+    verified: frozenset[str] | set[str] | dict[str, object] = frozenset(),
 ) -> str:
-    """The group of one case (module docstring). `conflicts` holds the case IDs
-    that `label_conflicts` flagged; they leave the "cohort" group only."""
+    """The group of one case (module docstring). `verified` holds the case IDs of
+    the hand-verified label conflicts; they move from "cohort" to "label_conflict"
+    (still scored in the headline view)."""
     in_cohort = failure_type in FAMILY_KEYS or (
         failure_type == "NO_FAILURE" and variant in VARIANT_CATEGORY
     )
@@ -127,24 +138,42 @@ def group_of(
         return "not_gradable"
     if variant == "legitimate_fx_settlement":
         return "fx"
-    return "label_conflict" if case_id in conflicts else "cohort"
+    return "label_conflict" if case_id in verified else "cohort"
+
+
+Entries = dict[str, list[dict[str, object]]]
 
 
 class Conflicts(NamedTuple):
-    """Legitimate case -> failure cases, each `{failure_case, failure_type,
-    shared}` (`shared` lists raw record IDs). `conflicts` excludes from the
-    scored cohort; `review` only reports."""
+    """Each mapping is legitimate case -> list of `{failure_case, failure_type,
+    shared, ...}`. `verified` (from the tracked file) leaves the sensitivity view;
+    `candidates` and `review` are proposals and exclude nothing."""
 
-    conflicts: dict[str, list[dict[str, object]]]
-    review: dict[str, list[dict[str, object]]]
+    verified: Entries
+    candidates: Entries
+    review: Entries
 
 
-def label_conflicts(
+def verified_conflicts(path: Path = VERIFIED_FILE) -> Entries:
+    out: Entries = {}
+    for v in json.loads(path.read_text())["verified"]:
+        out.setdefault(v["legitimate_case"], []).append(
+            {
+                "failure_case": v["failure_case"],
+                "failure_type": v["failure_type"],
+                "shared": [v["shared_record"]],
+                "defect": v["defect"],
+            }
+        )
+    return out
+
+
+def label_candidates(
     labels: dict[str, dict], con: sqlite3.Connection, key: Path
-) -> Conflicts:
-    """Apply the rule of the module docstring to the pooled train and
-    validation labels. `con` is the prepared snapshot (allocations, by token),
-    `key` the run's token key."""
+) -> tuple[Entries, Entries]:
+    """(conflict candidates, review candidates) from the rule of the module
+    docstring, over the pooled train and validation labels. `con` is the prepared
+    snapshot (allocations, by token), `key` the run's token key."""
     tokens = _Tokens(bytes.fromhex(key.read_text().strip()))
     raw_of: dict[str, str] = {}
 
@@ -175,8 +204,9 @@ def label_conflicts(
                 out |= {a[0], a[1]}
         return out
 
-    names = {c: named(lab) for c, lab in labels.items()}
-    recs = {c: records(n) for c, n in names.items()}
+    for lab in labels.values():  # so that reached-only records print as raw IDs
+        named(lab)
+    recs = {c: records(named(lab)) for c, lab in labels.items()}
     defects = {c: defect(lab) for c, lab in labels.items()}
 
     def entry(d: str, dl: dict, shared: set[str]) -> dict[str, object]:
@@ -186,8 +216,8 @@ def label_conflicts(
             "shared": sorted(raw_of.get(t, t) for t in shared),
         }
 
-    strict: dict[str, list[dict[str, object]]] = {}
-    review: dict[str, list[dict[str, object]]] = {}
+    candidates: Entries = {}
+    review: Entries = {}
     for c, lab in labels.items():
         if lab["failure_type"] != "NO_FAILURE":
             continue
@@ -196,9 +226,25 @@ def label_conflicts(
                 continue
             hit = defects[d] & recs[c]
             if hit:
-                strict.setdefault(c, []).append(entry(d, dl, hit))
-                continue
-            loose = (names[c] & recs[d]) | (recs[c] & names[d])
-            if loose:
-                review.setdefault(c, []).append(entry(d, dl, loose))
-    return Conflicts(strict, review)
+                candidates.setdefault(c, []).append(entry(d, dl, hit))
+            elif both := recs[c] & recs[d]:
+                review.setdefault(c, []).append(entry(d, dl, both))
+    return candidates, review
+
+
+def conflict_report(
+    labels: dict[str, dict], con: sqlite3.Connection, key: Path
+) -> Conflicts:
+    """Verified conflicts plus the rule's proposals; fails if a verified pair is
+    not among the candidates (the file and the labels disagree)."""
+    candidates, review = label_candidates(labels, con, key)
+    verified = verified_conflicts()
+    for c, entries in verified.items():
+        found = {e["failure_case"] for e in candidates.get(c, [])}
+        wanted = {e["failure_case"] for e in entries}
+        if c not in labels or not wanted <= found:
+            raise ValueError(
+                f"verified conflict {c} {sorted(wanted)} is not a candidate"
+                f" ({sorted(found)}): {VERIFIED_FILE.name} and the labels disagree"
+            )
+    return Conflicts(verified, candidates, review)

@@ -33,6 +33,7 @@ import subprocess
 import sys
 import time
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -43,7 +44,7 @@ import cohort as C  # noqa: E402  (shared cohort, groups and label conflicts)
 
 from reconcile.adapters.finrca import create_key_file, prepare_finrca_snapshot  # noqa: E402
 from reconcile.adapters.finrca_requests import prepare_finrca_requests  # noqa: E402
-from reconcile.diagnosis.policy import POLICY_VERSION  # noqa: E402
+from reconcile.diagnosis.policy import POLICY_VERSION, SCOPE_LIMITATION, quantum  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_UPSTREAM = Path(
@@ -310,9 +311,12 @@ class View:
                 f["check_id"],
                 f["state"],
                 {self._key(i) for i in f["evidence_ids"]},
+                set(f["calculation_ids"]),
             )
             for f in packet["diagnosis"]["findings"]
         ]
+        self.limitations = list(packet["limitations"])
+        self.calc_by_id = {c["calculation_id"]: c for c in packet["calculations"]}
         self.day_counts = [
             (
                 d["calculation_id"],
@@ -342,12 +346,35 @@ class View:
             for s in self.searches
         )
 
-    def finding_over(self, check_id: str, *keys: tuple[str, str]) -> bool:
-        """A supported finding `check_id` that cites every record in `keys`."""
+    def finding_over(
+        self, check_id: str, *keys: tuple[str, str], calcs: tuple[str, ...] = ()
+    ) -> bool:
+        """A supported finding `check_id` that cites every record in `keys` and
+        every calculation id in `calcs`."""
         return any(
-            c == check_id and state == "supported" and set(keys) <= cited
-            for c, state, cited in self.findings
+            c == check_id
+            and state == "supported"
+            and set(keys) <= cited
+            and set(calcs) <= cids
+            for c, state, cited, cids in self.findings
         )
+
+    def calculation(
+        self, calc_id: str, operation: str
+    ) -> (
+        tuple[list[tuple[tuple[str, str] | None, str, Decimal]], Decimal, Decimal]
+        | None
+    ):
+        """(operands as (record, field, amount), result, tolerance) of the
+        calculation `calc_id` when its operation is `operation`, else None."""
+        c = self.calc_by_id.get(calc_id)
+        if c is None or c["operation"] != operation or not c["tolerance"]:
+            return None
+        ops = [
+            (self._key(o["evidence_id"]), o["field"], Decimal(o["amount"].split()[0]))
+            for o in c["operands"]
+        ]
+        return ops, Decimal(c["result"].split()[0]), Decimal(c["tolerance"].split()[0])
 
     def calc_over(self, *keys: tuple[str, str]) -> bool:
         return any(set(keys) <= cited for _, cited in self.calcs)
@@ -583,6 +610,8 @@ def _category_requirements(
 # (docs/evidence-contract.md section 5, "All-clear prerequisites").
 APPROVAL_FINDING = "final_approval_before_payment"
 JOURNAL_FINDING = "payment_journal_matches_payment"
+TOTALS_FINDING = "invoice_totals_not_exceeded"
+PAYMENT_ALLOCATION_FINDING = "payment_not_over_allocated"
 TERMINAL_ACTIONS = ("approved", "auto_approved")
 
 
@@ -612,53 +641,248 @@ def guarded_payments(
     return [p for p in pays if p and effective(p)]
 
 
-def guard_requirements(pays: list[dict], s: Snap, v: View) -> list[tuple[str, bool]]:
-    """Contract 0.3 prerequisites of every all-clear, per payment: the
-    allocations that name the invoices, a terminal approval event of each such
-    invoice and the supported approval finding that cites it, the payment
-    journals, the calculation payment minus journals, and the supported journal
-    finding. Which approval event the investigator selects is not checked."""
-    names = (
-        "guard_allocations",
-        "approval_event",
-        "approval_finding",
-        "payment_journal",
-        "payment_journal_calculation",
-        "payment_journal_finding",
+def effective_approval(s: Snap, invoice: str, paid: str) -> list[str] | None:
+    """The approval events that make `invoice`'s approval effective on the
+    payment date `paid`, from the snapshot alone: among the events dated on or
+    before `paid`, the ones with the newest timestamp, when every one of them is
+    a final approval (action approved or auto_approved, new_status approved) at
+    the highest level reached by then. None when the approval is not effective
+    (none, a later revocation or reopening, a lower level). Events after `paid`
+    do not matter."""
+    events = [
+        e
+        for e in s.q(
+            "SELECT * FROM approval_events WHERE invoice_id = ?"
+            " AND substr(event_timestamp, 1, 10) <= ?",
+            invoice,
+            paid,
+        )
+    ]
+    if not events:
+        return None
+    top = max(int(e["approval_level"]) for e in events)
+    newest = max(datetime.fromisoformat(e["event_timestamp"]) for e in events)
+    latest = [
+        e for e in events if datetime.fromisoformat(e["event_timestamp"]) == newest
+    ]
+    if all(
+        e["action"] in TERMINAL_ACTIONS
+        and e["new_status"] == "approved"
+        and int(e["approval_level"]) >= top
+        for e in latest
+    ):
+        return [e["approval_event_id"] for e in latest]
+    return None
+
+
+def _invoices_of(s: Snap, p: dict) -> list[str]:
+    return sorted({a["invoice_id"] for a in s.allocs_of_payment(p["payment_id"])})
+
+
+def _quantum(p: dict) -> Decimal:
+    return quantum(p["payment_currency"]).amount
+
+
+def _journal_keys(s: Snap, p: dict) -> list[tuple[str, str]]:
+    return [("gl_entries", j) for j in s.balanced_journals(p["payment_id"], "payment")]
+
+
+def chk_allocations(s: Snap, v: View, p: dict) -> bool:
+    allocs = s.allocs_of_payment(p["payment_id"])
+    return bool(allocs) and v.cites("payment_allocations", alloc_ids(allocs))
+
+
+def chk_approval_event(s: Snap, v: View, p: dict) -> bool:
+    """Every event that makes each allocated invoice's approval effective on the
+    payment date is cited (a post-payment or revoked approval does not match)."""
+    paid = p["payment_date"][:10]
+    for inv in _invoices_of(s, p):
+        ids = effective_approval(s, inv, paid)
+        if not ids or not v.cites("approval_events", ids):
+            return False
+    return bool(_invoices_of(s, p))
+
+
+def chk_approval_finding(s: Snap, v: View, p: dict) -> bool:
+    paid, pkey = p["payment_date"][:10], ("payments", p["payment_id"])
+    for inv in _invoices_of(s, p):
+        ids = effective_approval(s, inv, paid)
+        keys = [("approval_events", i) for i in ids or []]
+        if not keys or not v.finding_over(APPROVAL_FINDING, pkey, *keys):
+            return False
+    return bool(_invoices_of(s, p))
+
+
+def chk_payment_journal(s: Snap, v: View, p: dict) -> bool:
+    keys = _journal_keys(s, p)
+    return bool(keys) and v.cites("gl_entries", [k[1] for k in keys])
+
+
+def _journal_calc_id(p: dict) -> str:
+    return f"payment_minus_payment_journals:{p['payment_id']}"
+
+
+def chk_journal_calculation(s: Snap, v: View, p: dict) -> bool:
+    """The journal comparison is payment amount minus the payment journals'
+    amounts (operation `difference`, first operand the payment amount, the others
+    exactly the payment's journals), recomputed, and within one quantum."""
+    keys = _journal_keys(s, p)
+    got = v.calculation(_journal_calc_id(p), "difference")
+    if not keys or got is None:
+        return False
+    ops, result, tol = got
+    if not ops or ops[0][:2] != (("payments", p["payment_id"]), "payment_amount"):
+        return False
+    if ops[0][2] != Decimal(p["payment_amount"]):
+        return False
+    rest = ops[1:]
+    if sorted(k for k, _, _ in rest if k) != sorted(keys) or any(
+        f != "amount" for _, f, _ in rest
+    ):
+        return False
+    return (
+        result == ops[0][2] - sum((a for _, _, a in rest), Decimal(0))
+        and tol == _quantum(p)
+        and abs(result) <= tol
     )
-    ok = dict.fromkeys(names, bool(pays))
-    for p in pays:
-        pid = p["payment_id"]
-        pkey = ("payments", pid)
-        allocs = s.allocs_of_payment(pid)
-        ok["guard_allocations"] &= bool(allocs) and v.cites(
-            "payment_allocations", alloc_ids(allocs)
-        )
-        for inv in sorted({a["invoice_id"] for a in allocs}):
-            finals = s.q(
-                "SELECT approval_event_id FROM approval_events WHERE invoice_id = ?"
-                " AND action IN (?, ?) AND new_status = 'approved'",
-                inv,
-                *TERMINAL_ACTIONS,
-            )
-            cited = [
-                ("approval_events", e["approval_event_id"])
-                for e in finals
-                if ("approval_events", e["approval_event_id"]) in v.records
-            ]
-            ok["approval_event"] &= bool(cited)
-            ok["approval_finding"] &= any(
-                v.finding_over(APPROVAL_FINDING, pkey, c) for c in cited
-            )
-        jkeys = [("gl_entries", j) for j in s.balanced_journals(pid, "payment")]
-        ok["payment_journal"] &= bool(jkeys) and v.cites(
-            "gl_entries", [k[1] for k in jkeys]
-        )
-        ok["payment_journal_calculation"] &= bool(jkeys) and v.calc_over(pkey, *jkeys)
-        ok["payment_journal_finding"] &= bool(jkeys) and v.finding_over(
-            JOURNAL_FINDING, pkey, *jkeys
-        )
-    return list(ok.items())
+
+
+def chk_journal_finding(s: Snap, v: View, p: dict) -> bool:
+    keys = _journal_keys(s, p)
+    return bool(keys) and v.finding_over(
+        JOURNAL_FINDING,
+        ("payments", p["payment_id"]),
+        *keys,
+        calcs=(_journal_calc_id(p),),
+    )
+
+
+def _balance_parts(s: Snap, inv: str) -> tuple[list[dict], list[dict]]:
+    """(effective payments, their allocations) of an invoice."""
+    pays, allocs = [], []
+    for a in s.allocs_of_invoice(inv):
+        other = s.payment(a["payment_id"])
+        if other and effective(other):
+            pays.append(other)
+            allocs.append(a)
+    return pays, allocs
+
+
+def chk_totals_calculation(s: Snap, v: View, p: dict) -> bool:
+    """For each allocated invoice that has effective allocations (a pending or
+    reversed payment contributes none): the invoice, every effective allocating
+    payment and every effective allocation are cited, and
+    `invoice_open_balance:<invoice>` is invoice total minus those allocations
+    (operation `difference`), not below minus one quantum."""
+    invoices = _invoices_of(s, p)
+    for inv in invoices:
+        pays, allocs = _balance_parts(s, inv)
+        if not allocs:
+            continue
+        got = v.calculation(f"invoice_open_balance:{inv}", "difference")
+        row = s.invoice(inv)
+        if got is None or row is None:
+            return False
+        ops, result, tol = got
+        first = ops[0] if ops else None
+        keys = [("payment_allocations", i) for i in alloc_ids(allocs)]
+        rest = ops[1:]
+        if not (
+            first
+            and first[:2] == (("invoices", inv), "invoice_total")
+            and first[2] == Decimal(row["invoice_total"])
+            and sorted(k for k, _, _ in rest if k) == sorted(keys)
+            and all(f == "allocated_amount" for _, f, _ in rest)
+            and result == first[2] - sum((a for _, _, a in rest), Decimal(0))
+            and tol == _quantum(p)
+            and result >= -tol
+            and v.cites("payments", [x["payment_id"] for x in pays])
+        ):
+            return False
+    return bool(invoices)
+
+
+def chk_totals_finding(s: Snap, v: View, p: dict) -> bool:
+    """The supported `invoice_totals_not_exceeded` finding cites the payment, its
+    allocations, its invoices and the open-balance calculation of each invoice
+    that has effective allocations."""
+    pid = p["payment_id"]
+    allocs = s.allocs_of_payment(pid)
+    invoices = _invoices_of(s, p)
+    keys = [
+        ("payments", pid),
+        *[("payment_allocations", i) for i in alloc_ids(allocs)],
+        *[("invoices", i) for i in invoices],
+    ]
+    calcs = tuple(
+        f"invoice_open_balance:{i}" for i in invoices if _balance_parts(s, i)[1]
+    )
+    return bool(allocs) and v.finding_over(TOTALS_FINDING, *keys, calcs=calcs)
+
+
+def _over_alloc_calc_id(p: dict) -> str:
+    return f"payment_minus_allocations:{p['payment_id']}"
+
+
+def chk_payment_allocation_calculation(s: Snap, v: View, p: dict) -> bool:
+    """`payment_minus_allocations:<payment>` is the payment amount minus all of
+    the payment's allocations (operation `difference`), recomputed, and not
+    below minus one quantum (the payment is not allocated beyond its amount)."""
+    pid = p["payment_id"]
+    keys = [("payment_allocations", i) for i in alloc_ids(s.allocs_of_payment(pid))]
+    got = v.calculation(_over_alloc_calc_id(p), "difference")
+    if not keys or got is None:
+        return False
+    ops, result, tol = got
+    rest = ops[1:]
+    return bool(
+        ops
+        and ops[0][:2] == (("payments", pid), "payment_amount")
+        and ops[0][2] == Decimal(p["payment_amount"])
+        and sorted(k for k, _, _ in rest if k) == sorted(keys)
+        and all(f == "allocated_amount" for _, f, _ in rest)
+        and result == ops[0][2] - sum((a for _, _, a in rest), Decimal(0))
+        and tol == _quantum(p)
+        and result >= -tol
+    )
+
+
+def chk_payment_allocation_finding(s: Snap, v: View, p: dict) -> bool:
+    pid = p["payment_id"]
+    keys = [("payments", pid)] + [
+        ("payment_allocations", i) for i in alloc_ids(s.allocs_of_payment(pid))
+    ]
+    return len(keys) > 1 and v.finding_over(
+        PAYMENT_ALLOCATION_FINDING, *keys, calcs=(_over_alloc_calc_id(p),)
+    )
+
+
+# The all-clear prerequisites (docs/evidence-contract.md section 5). Each check
+# is evaluated for every payment the packet rests on. Adding a prerequisite is
+# one line here (plus its check function above).
+PAYMENT_CHECKS: list[tuple[str, Callable[[Snap, View, dict], bool]]] = [
+    ("guard_allocations", chk_allocations),
+    ("invoice_totals_calculation", chk_totals_calculation),
+    ("invoice_totals_finding", chk_totals_finding),
+    ("payment_allocation_calculation", chk_payment_allocation_calculation),
+    ("payment_allocation_finding", chk_payment_allocation_finding),
+    ("approval_event", chk_approval_event),
+    ("approval_finding", chk_approval_finding),
+    ("payment_journal", chk_payment_journal),
+    ("payment_journal_calculation", chk_journal_calculation),
+    ("payment_journal_finding", chk_journal_finding),
+]
+# Checks of the packet as a whole, on every all-clear.
+PACKET_CHECKS: list[tuple[str, Callable[[View], bool]]] = [
+    ("scope_statement", lambda v: SCOPE_LIMITATION in v.limitations),
+]
+
+
+def guard_requirements(pays: list[dict], s: Snap, v: View) -> list[tuple[str, bool]]:
+    """Contract prerequisites of every all-clear: `PAYMENT_CHECKS` for each
+    payment the packet rests on (all must hold) and `PACKET_CHECKS` once."""
+    out = [(n, bool(pays) and all(f(s, v, p) for p in pays)) for n, f in PAYMENT_CHECKS]
+    return [*out, *[(n, f(v)) for n, f in PACKET_CHECKS]]
 
 
 def required(
@@ -827,7 +1051,7 @@ def load_split(
         d = p["diagnosis"]
         ent = requests[rid]["primary_entity"]
         group = C.group_of(
-            lab["failure_type"], lab["scenario_variant"], case_id, conflicts.conflicts
+            lab["failure_type"], lab["scenario_variant"], case_id, conflicts.verified
         )
         row = {
             "split": split,
@@ -838,7 +1062,8 @@ def load_split(
             "disposition": d["disposition"],
             "category": d["category"],
             "reason": d["reason"],
-            "label_conflict_with": conflicts.conflicts.get(case_id, []),
+            "label_conflict_with": conflicts.verified.get(case_id, []),
+            "conflict_candidate_with": conflicts.candidates.get(case_id, []),
             "review_candidate_with": conflicts.review.get(case_id, []),
             "entity_table": ent["table"],
             "expected_category": C.expected_category(
@@ -864,11 +1089,12 @@ def frac(n: int, d: int) -> dict:
 
 def cohort_metrics(
     rows: list[dict],
-    groups: tuple[str, ...] = C.COHORT_VIEWS["without_label_conflicts"],
+    groups: tuple[str, ...] = C.COHORT_VIEWS["all_cases"],
 ) -> dict:
-    """Metrics over the gradable in-scope cohort (default: without the label
-    conflicts; pass C.COHORT_VIEWS["with_label_conflicts"] for the view with
-    them). The baseline reports the same two views from the same module."""
+    """Metrics over the gradable in-scope cohort. Default: the headline view,
+    every such case. C.COHORT_VIEWS["sensitivity_without_verified_conflicts"]
+    leaves out the hand-verified label conflicts; the baseline reports the same
+    two views from the same module."""
     c = [r for r in rows if r["group"] in groups]
     answered = [r for r in c if r["disposition"] == "answered"]
     correct = [r for r in answered if r["outcome"] == "correct"]
@@ -977,8 +1203,8 @@ def all_metrics(rows: list[dict]) -> dict:
     return {
         "dispositions_all": dict(Counter(r["disposition"] for r in rows)),
         "cohort": cohort_metrics(rows),
-        "cohort_with_label_conflicts": cohort_metrics(
-            rows, C.COHORT_VIEWS["with_label_conflicts"]
+        "cohort_sensitivity_without_verified_conflicts": cohort_metrics(
+            rows, C.COHORT_VIEWS["sensitivity_without_verified_conflicts"]
         ),
         "review_candidates": [
             {k: r.get(k) for k in ("split", "case_id", "group", "variant", "outcome")}
@@ -1003,16 +1229,16 @@ def all_metrics(rows: list[dict]) -> dict:
             for r in sorted(rows, key=lambda r: r["case_id"])
             if r["group"] == "label_conflict"
         ],
-        "flagged_outside_scored_cohort": [
+        "conflict_candidates_unverified": [
             {
                 "split": r["split"],
                 "case_id": r["case_id"],
                 "group": r["group"],
                 "variant": r["variant"],
-                "label_conflict_with": r["label_conflict_with"],
+                "conflict_candidate_with": r["conflict_candidate_with"],
             }
             for r in sorted(rows, key=lambda r: r["case_id"])
-            if r["label_conflict_with"] and r["group"] != "label_conflict"
+            if r["conflict_candidate_with"] and r["group"] != "label_conflict"
         ],
         "cohort_per_label": per_label(rows, (*C.COHORT_GROUPS, "fx")),
         "cohort_confusion": confusion(rows, (*C.COHORT_GROUPS, "fx")),
@@ -1125,7 +1351,7 @@ def all_metrics(rows: list[dict]) -> dict:
             Counter(
                 m
                 for r in rows
-                if r["group"] == "cohort" and r["disposition"] == "answered"
+                if r["group"] in C.COHORT_GROUPS and r["disposition"] == "answered"
                 for m in r.get("missing", [])
             )
         ),
@@ -1150,7 +1376,10 @@ def render(m: dict) -> str:
         fx = a["fx_slice"]
         fa = a["false_alarms_all_legitimate"]
         lines += ["", f"== {name} ==", f"all requests: {a['dispositions_all']}"]
-        lines.append(f"cohort (gradable, excl. FX and special): {c['cases']} cases")
+        lines.append(
+            f"cohort, HEADLINE view: all gradable in-scope cases, no exclusions"
+            f" (excl. FX and special): {c['cases']} cases"
+        )
         line("dispositions", c["dispositions"])
         line("answered (coverage)", pct(c["answered"]))
         line("abstained", pct(c["abstained"]))
@@ -1170,9 +1399,12 @@ def render(m: dict) -> str:
         line("false alarms (cohort legit)", pct(c["false_alarms"]))
         line("wrong by kind", c["wrong_by_kind"])
         line("non-answer reasons", c["abstain_or_nonanswer_reasons"])
-        w = a["cohort_with_label_conflicts"]
+        w = a["cohort_sensitivity_without_verified_conflicts"]
         n_conf = len(a["label_conflicts"])
-        lines.append(f"cohort WITH the {n_conf} label conflicts: {w['cases']} cases")
+        lines.append(
+            f"SENSITIVITY view without the {n_conf} verified label conflicts:"
+            f" {w['cases']} cases"
+        )
         line("answered (coverage)", pct(w["answered"]))
         line("answer precision (exact category)", pct(w["answer_precision"]))
         line("correct and complete / cases", pct(w["correct_and_evidence_complete"]))
@@ -1180,20 +1412,21 @@ def render(m: dict) -> str:
         line("non-answer reasons", w["abstain_or_nonanswer_reasons"])
         for r in a["label_conflicts"]:
             lines.append(
-                f"  label conflict {r['case_id']} {r['variant']}: {r['outcome']}"
+                f"  verified label conflict {r['case_id']} {r['variant']}:"
+                f" {r['outcome']}"
                 f" {r['reason'] or r['category']} <- "
                 + ", ".join(
                     f"{x['failure_case']} {x['failure_type'][:3]} {x['shared']}"
                     for x in r["label_conflict_with"]
                 )
             )
-        for r in a["flagged_outside_scored_cohort"]:
+        for r in a["conflict_candidates_unverified"]:
             lines.append(
-                f"  flagged, not in scored cohort {r['case_id']} ({r['group']},"
-                f" {r['variant']}) <- "
+                f"  conflict candidate, unverified, not excluded {r['case_id']}"
+                f" ({r['group']}, {r['variant']}) <- "
                 + ", ".join(
                     f"{x['failure_case']} {x['failure_type'][:3]} {x['shared']}"
-                    for x in r["label_conflict_with"]
+                    for x in r["conflict_candidate_with"]
                 )
             )
         for r in a["review_candidates"]:
@@ -1275,7 +1508,7 @@ def evaluate(tag: str, upstream: Path = DEFAULT_UPSTREAM) -> None:
         for split in SPLITS
     }
     all_labels = {c: lab for ls in labels_by_split.values() for c, lab in ls.items()}
-    conflicts = C.label_conflicts(
+    conflicts = C.conflict_report(
         all_labels, snap.con, REPO / "data/private" / tag / "key"
     )
     for split in SPLITS:

@@ -67,10 +67,10 @@ Run manifest (`m2-dev-1`): code commit `c4479a2352d24d536177f3f781a0b231ee3f8dd0
 | Answered (coverage) | 379/380 = 0.997 | 123/123 = 1.000 | 502/503 = 0.998 |
 | Abstained | 1/380 | 0/123 | 1/503 |
 | Out-of-scope or failed | 0 | 0 | 0 |
-| Answer precision (exact category) | 366/379 = 0.966 | 119/123 = 0.968 | 485/502 = 0.966 |
+| Answer precision (exact category) | 366/379 = 0.966 | 119/123 = 0.967 | 485/502 = 0.966 |
 | Failure vs no-failure accuracy, answered | 379/379 | 123/123 | 502/502 |
 | Evidence-complete among answered | 379/379 | 123/123 | 502/502 |
-| Correct and evidence-complete / cohort | 366/380 = 0.963 | 119/123 = 0.968 | 485/503 = 0.964 |
+| Correct and evidence-complete / cohort | 366/380 = 0.963 | 119/123 = 0.967 | 485/503 = 0.964 |
 | False alarms, cohort legitimate cases (gradable) | 0/210 | 0/71 | 0/281 |
 | False alarms, cohort legitimate incl. FX and the 4 contradicted | 0/235 | 0/80 | 0/315 |
 | False alarms, AP-side legitimate (out of scope) | 0/152 | 0/59 | 0/211 |
@@ -328,22 +328,22 @@ Reproduce: `uv run python evaluation/dev_run.py evaluate m2-dev-4`.
 
 Fresh inference run (`artifacts/dev-runs/m2-dev-5/`, `run-manifest.json`: policy `evidence-contract-0.4`) after the M2 review fixes, scored by the run 4 evaluator (`evaluation/dev_run.py`): evidence-complete means the category's requirements plus the contract 0.3 guard items (allocations, terminal approval event and finding, payment journal, journal calculation and finding) for every all-clear, and every stated search must reproduce on the snapshot (section 10, "Run 4"). The cohort and label-conflict code is the shared `evaluation/cohort.py`. All numbers below are from `artifacts/dev-runs/m2-dev-5/report.txt`. Dispositions over the 1,608 requests: answered 587, out_of_scope 720, abstained 301.
 
-**What changed against the run 4 re-evaluation of `m2-dev-4`.** The stricter evaluator, applied to the old packets, found 15 answered packets incomplete on `guard_allocations` (6 in the scored cohort: correct and complete 475/498, evidence-complete among answered 491/497). In `m2-dev-5` those are gone after the investigator citation fix (commit f7fffcc, policy 0.4): evidence-complete 497/497 and correct and complete 481/498, the same count as the pre-guard run 3 evaluator. Exact-category precision (481/497), the 16 wrong variants, the 5 label conflicts, the 5 label conflicts (0 review candidates) and the FX slice are unchanged.
+**What changed against the run 4 re-evaluation of `m2-dev-4`.** The stricter evaluator, applied to the old packets, found 15 answered packets incomplete on `guard_allocations` (6 in the scored cohort: correct and complete 475/498, evidence-complete among answered 491/497). In `m2-dev-5` those are gone after the investigator citation fix (commit f7fffcc, policy 0.4): evidence-complete 497/497 and correct and complete 481/498, the same count as the pre-guard run 3 evaluator. Exact-category precision (481/497), the 16 wrong variants, the 5 label conflicts, the 5 label conflicts and the FX slice are unchanged.
 
-**Cohort metrics, both views.** Train / validation / both.
+**Cohort metrics, both views (from review round 2 the headline is all cases).** Train / validation / both.
 
-| Metric | Without the 5 label conflicts (scored) | With the 5 |
+| Metric | All cases (headline) | Sensitivity: without the 5 verified label conflicts |
 |---|---|---|
-| Cohort cases | 376 / 122 / 498 | 380 / 123 / 503 |
-| Answered (coverage) | 375/376, 122/122, 497/498 = 0.998 | 375/380, 122/123, 497/503 = 0.988 |
+| Cohort cases | 380 / 123 / 503 | 376 / 122 / 498 |
+| Answered (coverage) | 375/380 = 0.987, 122/123 = 0.992, 497/503 = 0.988 | 375/376 = 0.997, 122/122 = 1.000, 497/498 = 0.998 |
 | Exact-category precision (correct / answered) | 362/375 = 0.965, 119/122 = 0.975, 481/497 = 0.968 | same |
 | Failure vs no-failure accuracy, answered | 497/497 | 497/497 |
-| Evidence-complete among answered | 375/375, 122/122, 497/497 | 375/375, 122/122, 497/497 (same answered set) |
-| Correct and complete / cases | 362/376 = 0.963, 119/122 = 0.975, 481/498 = 0.966 | 362/380 = 0.953, 119/123 = 0.968, 481/503 = 0.956 |
+| Evidence-complete among answered | 375/375, 122/122, 497/497 | same |
+| Correct and complete / cases | 362/380 = 0.953, 119/123 = 0.967, 481/503 = 0.956 | 362/376 = 0.963, 119/122 = 0.975, 481/498 = 0.966 |
 | Search counts reproduce, among answered | 375/375, 122/122, 497/497 | same |
-| False alarms, cohort legitimate | 0/206, 0/70, 0/276 | 0/210, 0/71, 0/281 |
+| False alarms, cohort legitimate | 0/210, 0/71, 0/281 | 0/206, 0/70, 0/276 |
 | Wrong by kind | `wrong_legit_variant` 13 / 3 / 16 | same |
-| Non-answer reasons | `unsupported_fx` 1 (RCA_000568) | plus `payment_journal_amount_differs` 4 and `invoice_approval_not_completed` 1 (the five label conflicts, all abstentions) |
+| Non-answer reasons | `unsupported_fx` 1 (RCA_000568), `payment_journal_amount_differs` 4 and `invoice_approval_not_completed` 1 (the five verified conflicts, all abstentions) | `unsupported_fx` 1 |
 
 **Safety metrics (all splits, validation in brackets).** False alarms on all legitimate cases 0/526 (0/139); cohort variants including FX 0/315 (0/80); AP-side variants 0/211 (0/59). **All-clear on out-of-scope failures (the risk metric): 0/859 (0/225)**, zero in every one of the 12 out-of-scope failure families. FX: 30/30 correct abstentions (9/9), 30/30 citing the payment and the other-currency bank row (9/9).
 
@@ -364,4 +364,33 @@ These are wrong-variant answers of the same kinds as in earlier runs (weekend an
 **Out of scope.** 859 failure cases from 12 families: out_of_scope 574, abstained 256, answered 29 (all F15 cases answered `F14`: a failure class, not an all-clear). 211 AP-side legitimate cases: answered 61 (`legitimate_due_date_payment` 37, `legitimate_split_payment` 24, none a false alarm), out_of_scope 143, abstained 7. Special cases: contradicted RCA_001631, RCA_001791, RCA_002223 out_of_scope, RCA_002127 abstained `debit_differs_from_payment`; not gradable RCA_000588 abstained `commitment_not_proven_at_cutoff`.
 
 Reproduce: `uv run python evaluation/dev_run.py run m2-dev-5` (new tag); the re-evaluation of an existing run is `evaluate TAG`.
+
+## 12. Review round 2 fixes (evaluator and cohort, 2026-11-01)
+
+These change `evaluation/` and the docs, not the investigator. Section 11 was computed with the evaluator of the start of this round: the figures are `m2-dev-5/report.txt` as re-evaluated after the headline change below but before the two items that depend on policy 0.5 (`payment_not_over_allocated`; journal `amount` = payment-attributable total). The parent re-runs the development run and the baseline with policy `evidence-contract-0.5`, and those numbers replace section 11.
+
+**Completeness now follows the all-clear contract (review finding 3).** For every all-clear (`legitimate_*`, `no_exception`), `required` adds these items, each evaluated for every payment the packet rests on (`PAYMENT_CHECKS` in `evaluation/dev_run.py`) or once per packet (`PACKET_CHECKS`):
+
+| Item | What the evaluator checks, from the snapshot and the packet |
+|---|---|
+| `guard_allocations` | every allocation of the payment is cited |
+| `invoice_totals_calculation` | for each allocated invoice that has effective allocations: the invoice, every effective allocating payment and every effective allocation are cited, and `invoice_open_balance:<invoice>` is operation `difference` over the invoice total and exactly those allocations, recomputed, not below minus one quantum |
+| `invoice_totals_finding` | supported `invoice_totals_not_exceeded` citing the payment, its allocations, its invoices and those calculations |
+| `payment_allocation_calculation`, `payment_allocation_finding` | (policy 0.5) `payment_minus_allocations:<payment>` is the payment amount minus all its allocations, recomputed, not below minus one quantum; supported `payment_not_over_allocated` citing it |
+| `approval_event` | the events that make the approval effective on the payment date are cited. Effective is computed from the snapshot alone: among events dated on or before the payment date, the newest-timestamp events, all final (approved or auto_approved, new_status approved) at the highest level reached by then. A later revocation, a later re-approval (the cited event is no longer the latest) or an event after the payment date does not satisfy it |
+| `approval_finding` | supported `final_approval_before_payment` citing the payment and those events |
+| `payment_journal` | the payment's balanced journals are cited |
+| `payment_journal_calculation` | `payment_minus_payment_journals:<payment>` is operation `difference`, first operand the payment amount, the others exactly those journals, recomputed, with the tolerance one quantum and |result| within it. A `sum` over the same records, a wrong result or a dropped operand does not satisfy it |
+| `payment_journal_finding` | supported `payment_journal_matches_payment` citing the payment, the journals and that calculation |
+| `scope_statement` | `SCOPE_LIMITATION` (`src/reconcile/diagnosis/policy.py`) is in `limitations` |
+
+Adding a prerequisite is one entry in `PAYMENT_CHECKS` or `PACKET_CHECKS` plus its check function. The old control that accepted deleting all limitations is replaced by one that removes only unrequired content (recommendations, provenance).
+
+**Negative controls (`tests/unit/test_dev_run_completeness.py`, 266 passed, 8 skipped).** Deletion of each item above; and substitutions: a post-payment approval (the cited event moved after the payment date), a revoked approval (a rejection inserted after the cited event), a superseded approval (a later re-approval inserted), a wrong-operation, wrong-result and dropped-operand journal, invoice-balance and payment-allocation calculation, a missing and an altered scope statement. The 8 skips are controls with nothing to substitute (a pending or reversed payment has no invoice balance). **Failing before:** with the round-1 requirements restored (any terminal approval cited, any calculation citing the records, no invoice-totals item, no scope statement), 113 of the 219 tests (then 98 passed, 8 skipped) failed: scope statement 11, post-payment approval 11, revoked approval 11, superseded approval 11, invoice-balance calculation substitutions 27, journal calculation substitutions 22, invoice-totals calculation deletion 9, invoice-totals finding deletion 11. All 266 pass with the new requirements (the payment-allocation controls were added after that measurement).
+
+**Cohort policy (findings 4 and 12).** The headline cohort view scores every gradable in-scope case; no case is excluded. The sensitivity view leaves out only the five conflicts verified by hand and recorded with their shared record and defect in `evaluation/verified_label_conflicts.json` (RCA_001679/000857, 001759/000874, 002175/000889, 002212/000832 on F09; 002182/000722 on F08). The generic rule only proposes candidates (`evaluation/cohort.py`): a *conflict candidate* is a failure case of a checked family whose primary entity or evidence-named record lies in the legitimate case's own records (the payments and invoices it names plus those one allocation away); a *review candidate* is any other pair of cases that name or reach a common payment or invoice through allocations, on either or both sides. On `m2-dev-5`: 5 verified; 19 conflict candidates (the 5 plus 14 unverified, all outside the headline cohort: 12 AP-side legitimate, 1 contradicted, 1 FX); 6 review candidates (3 weekend-clearing and 1 accounted-fee cohort case, and 2 FX cases; none excluded). The review candidates are new in this round: they are the overlaps reached through allocations on both sides, which the earlier rule dropped silently (finding 5). `conflict_report` fails if a verified pair is not a candidate.
+
+**Rounding.** All `a/b = x` figures in this file and `baseline-observable.md` were recomputed programmatically; 119/123 is 0.967 (it read 0.968 in the section 4 headline table; corrected there).
+
+Reproduce: `uv run python evaluation/dev_run.py evaluate TAG`.
 

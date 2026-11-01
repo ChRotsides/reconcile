@@ -11,9 +11,12 @@ evidence-complete".
 import copy
 import importlib
 import json
+import shutil
+import sqlite3
 import sys
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -246,13 +249,233 @@ def test_a_false_absence_claim_makes_the_packet_incomplete(
     assert result["searches_mismatch"]
 
 
-def test_deleting_unrequired_text_keeps_a_complete_packet_complete(
+@pytest.mark.parametrize("name", ALL_CLEAR)
+def test_deleting_the_invoice_totals_finding_makes_an_all_clear_incomplete(
+    packets: dict[str, tuple[Packet, Any]], name: str
+) -> None:
+    packet, snap = packets[name]
+    result = check(without_findings(packet, dev_run.TOTALS_FINDING), snap)
+    assert not result["complete"] and "invoice_totals_finding" in result["missing"]
+
+
+@pytest.mark.parametrize("name", ALL_CLEAR)
+def test_deleting_the_invoice_totals_calculations_makes_an_all_clear_incomplete(
+    packets: dict[str, tuple[Packet, Any]], name: str
+) -> None:
+    packet, snap = packets[name]
+    p = copy.deepcopy(packet)
+    gone = [
+        c["calculation_id"]
+        for c in p["calculations"]
+        if c["calculation_id"].startswith("invoice_open_balance:")
+    ]
+    if not gone:  # a pending or reversed payment has no effective allocation
+        pytest.skip("no invoice balance in this packet")
+    p["calculations"] = [
+        c for c in p["calculations"] if c["calculation_id"] not in gone
+    ]
+    result = check(p, snap)
+    assert not result["complete"]
+    assert "invoice_totals_calculation" in result["missing"]
+
+
+@pytest.mark.parametrize("name", ALL_CLEAR)
+def test_deleting_the_payment_allocation_finding_makes_an_all_clear_incomplete(
+    packets: dict[str, tuple[Packet, Any]], name: str
+) -> None:
+    packet, snap = packets[name]
+    result = check(without_findings(packet, dev_run.PAYMENT_ALLOCATION_FINDING), snap)
+    assert not result["complete"]
+    assert "payment_allocation_finding" in result["missing"]
+
+
+@pytest.mark.parametrize("name", ALL_CLEAR)
+def test_deleting_the_payment_allocation_calculation_makes_an_all_clear_incomplete(
+    packets: dict[str, tuple[Packet, Any]], name: str
+) -> None:
+    packet, snap = packets[name]
+    p = copy.deepcopy(packet)
+    p["calculations"] = [
+        c
+        for c in p["calculations"]
+        if not c["calculation_id"].startswith("payment_minus_allocations:")
+    ]
+    result = check(p, snap)
+    assert not result["complete"]
+    assert "payment_allocation_calculation" in result["missing"]
+
+
+@pytest.mark.parametrize("name", ALL_CLEAR)
+def test_a_missing_or_altered_scope_statement_makes_an_all_clear_incomplete(
+    packets: dict[str, tuple[Packet, Any]], name: str
+) -> None:
+    packet, snap = packets[name]
+    assert dev_run.SCOPE_LIMITATION in packet["limitations"]
+    for limitations in ([], ["Scope of this all-clear. Checked: everything."]):
+        p = copy.deepcopy(packet)
+        p["limitations"] = limitations
+        result = check(p, snap)
+        assert not result["complete"] and result["missing"] == ["scope_statement"]
+
+
+# ---- substitutions: the right kind of item is present but is the wrong one
+
+
+def with_calc(packet: Packet, prefix: str, change: Callable[[Packet], None]) -> Packet:
+    p = copy.deepcopy(packet)
+    hit = [c for c in p["calculations"] if c["calculation_id"].startswith(prefix)]
+    assert hit, prefix
+    for c in hit:
+        change(c)
+    return p
+
+
+def wrong_operation(c: Packet) -> None:
+    """A valid sum over the same operands stands in for the difference."""
+    c["operation"] = "sum"
+    c["result"] = f"{sum(Decimal(o['amount'].split()[0]) for o in c['operands'])} USD"
+
+
+def result_beyond_tolerance(c: Packet) -> None:
+    c["result"] = "5.00 USD"
+
+
+def operand_dropped(c: Packet) -> None:
+    c["operands"] = c["operands"][:-1]
+
+
+JOURNAL = "payment_minus_payment_journals:"
+SUBSTITUTIONS = [wrong_operation, result_beyond_tolerance, operand_dropped]
+
+
+@pytest.mark.parametrize("change", SUBSTITUTIONS, ids=lambda f: f.__name__)
+@pytest.mark.parametrize("name", ALL_CLEAR)
+def test_a_wrong_journal_calculation_makes_an_all_clear_incomplete(
+    packets: dict[str, tuple[Packet, Any]], name: str, change: Callable[[Packet], None]
+) -> None:
+    packet, snap = packets[name]
+    result = check(with_calc(packet, JOURNAL, change), snap)
+    assert not result["complete"]
+    assert "payment_journal_calculation" in result["missing"]
+
+
+@pytest.mark.parametrize("change", SUBSTITUTIONS, ids=lambda f: f.__name__)
+@pytest.mark.parametrize("name", ALL_CLEAR)
+def test_a_wrong_invoice_balance_calculation_makes_an_all_clear_incomplete(
+    packets: dict[str, tuple[Packet, Any]], name: str, change: Callable[[Packet], None]
+) -> None:
+    packet, snap = packets[name]
+    if not any(
+        c["calculation_id"].startswith("invoice_open_balance:")
+        for c in packet["calculations"]
+    ):
+        pytest.skip("no invoice balance in this packet")
+    result = check(with_calc(packet, "invoice_open_balance:", change), snap)
+    assert not result["complete"]
+    assert "invoice_totals_calculation" in result["missing"]
+
+
+@pytest.mark.parametrize("change", SUBSTITUTIONS, ids=lambda f: f.__name__)
+@pytest.mark.parametrize("name", ALL_CLEAR)
+def test_a_wrong_payment_allocation_calculation_makes_an_all_clear_incomplete(
+    packets: dict[str, tuple[Packet, Any]], name: str, change: Callable[[Packet], None]
+) -> None:
+    packet, snap = packets[name]
+    result = check(with_calc(packet, "payment_minus_allocations:", change), snap)
+    assert not result["complete"]
+    assert "payment_allocation_calculation" in result["missing"]
+
+
+def mutated(snap: Any, tmp_path: Path, *sql: str) -> Any:
+    """A copy of the snapshot with hand-written SQL applied, as a Snap."""
+    source = Path(snap.con.execute("PRAGMA database_list").fetchone()[2])
+    copy_ = tmp_path / "mutated.sqlite"
+    shutil.copy(source, copy_)
+    copy_.chmod(0o644)
+    con = sqlite3.connect(copy_)
+    for statement in sql:
+        con.execute(statement)
+    con.commit()
+    con.close()
+    return dev_run.Snap(copy_)
+
+
+def cited_approval(packet: Packet, snap: Any) -> dict[str, Any]:
+    ids = [
+        e["record"]["record_id"]
+        for e in packet["evidence"]
+        if e["record"] and e["record"]["table"] == "approval_events"
+    ]
+    assert ids
+    return dict(
+        snap.one("SELECT * FROM approval_events WHERE approval_event_id = ?", ids[0])
+    )
+
+
+def next_second(timestamp: str) -> str:
+    moved = datetime.fromisoformat(timestamp) + timedelta(seconds=1)
+    assert moved.date() == datetime.fromisoformat(timestamp).date()
+    return moved.isoformat()
+
+
+def add_event(e: dict[str, Any], action: str, status: str) -> str:
+    return (
+        "INSERT INTO approval_events VALUES ('x_new', "
+        f"'{e['invoice_id']}', '{e['approval_level']}', 'manager', '{action}', "
+        f"'{next_second(e['event_timestamp'])}', 'approved', '{status}')"
+    )
+
+
+@pytest.mark.parametrize("name", ALL_CLEAR)
+def test_an_approval_dated_after_the_payment_does_not_complete_an_all_clear(
+    packets: dict[str, tuple[Packet, Any]], name: str, tmp_path: Path
+) -> None:
+    packet, snap = packets[name]
+    e = cited_approval(packet, snap)
+    late = mutated(
+        snap,
+        tmp_path,
+        "UPDATE approval_events SET event_timestamp = '2099-01-01T00:00:00'"
+        f" WHERE approval_event_id = '{e['approval_event_id']}'",
+    )
+    result = check(packet, late)
+    assert not result["complete"]
+    assert {"approval_event", "approval_finding"} <= set(result["missing"])
+
+
+@pytest.mark.parametrize("name", ALL_CLEAR)
+def test_a_revoked_approval_does_not_complete_an_all_clear(
+    packets: dict[str, tuple[Packet, Any]], name: str, tmp_path: Path
+) -> None:
+    packet, snap = packets[name]
+    e = cited_approval(packet, snap)
+    revoked = mutated(snap, tmp_path, add_event(e, "rejected", "rejected"))
+    result = check(packet, revoked)
+    assert not result["complete"]
+    assert {"approval_event", "approval_finding"} <= set(result["missing"])
+
+
+@pytest.mark.parametrize("name", ALL_CLEAR)
+def test_a_superseded_approval_does_not_complete_an_all_clear(
+    packets: dict[str, tuple[Packet, Any]], name: str, tmp_path: Path
+) -> None:
+    """A later re-approval exists: the packet cites the older event, which is no
+    longer the latest, so it does not show the approval in force."""
+    packet, snap = packets[name]
+    e = cited_approval(packet, snap)
+    newer = mutated(snap, tmp_path, add_event(e, "approved", "approved"))
+    result = check(packet, newer)
+    assert not result["complete"] and "approval_event" in result["missing"]
+
+
+def test_deleting_unrequired_content_keeps_a_complete_packet_complete(
     packets: dict[str, tuple[Packet, Any]],
 ) -> None:
-    """Control for the controls: removing something the contract does not
-    require (the limitations text) changes nothing, so the failures above come
-    from the deleted requirement."""
+    """Control for the controls: removing things the contract does not require
+    (recommendations, provenance) changes nothing, so the failures above come
+    from the deleted or substituted requirement."""
     packet, snap = packets["weekend_clearing"]
     p = copy.deepcopy(packet)
-    p["limitations"] = []
+    p["recommendations"] = []
+    p["provenance"] = {}
     assert check(p, snap)["complete"]

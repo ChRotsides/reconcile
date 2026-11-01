@@ -10,10 +10,11 @@ docs/baseline-observable.md.
 
 Cohort, groups, label conflicts and category mapping come from the shared
 `evaluation/cohort.py`, the same module `evaluation/dev_run.py` uses, so both
-systems are scored on identical cohorts, in two views (with and without the
-label-conflict cases). The metric definitions (outcome kinds, false-alarm and
-precision, all-clear risk) are replicated from `dev_run.py` (`classify`,
-`cohort_metrics`, `all_clear_risk`).
+systems are scored on identical cohorts, in two views: the headline (all
+cases) and a sensitivity view without the hand-verified label conflicts. The
+metric definitions (outcome kinds, false-alarm and precision, all-clear risk)
+are replicated from `dev_run.py` (`classify`, `cohort_metrics`,
+`all_clear_risk`).
 """
 
 import argparse
@@ -210,7 +211,7 @@ def build_rows(
     for case_id, (table, rid), p, c in zip(case_ids, ents, pred, conf, strict=True):
         lab = labels[case_id]
         group = C.group_of(
-            lab["failure_type"], lab["scenario_variant"], case_id, conflicts.conflicts
+            lab["failure_type"], lab["scenario_variant"], case_id, conflicts.verified
         )
         cat = category_of(p)
         reqs = evidence.retrieve(snap, cat, table, rid)
@@ -226,7 +227,8 @@ def build_rows(
             "expected_category": C.expected_category(
                 lab["failure_type"], lab["scenario_variant"]
             ),
-            "label_conflict_with": conflicts.conflicts.get(case_id, []),
+            "label_conflict_with": conflicts.verified.get(case_id, []),
+            "conflict_candidate_with": conflicts.candidates.get(case_id, []),
             "review_candidate_with": conflicts.review.get(case_id, []),
             "contract_defined": bool(reqs),
             "complete": bool(reqs) and all(ok for _, ok in reqs),
@@ -251,7 +253,7 @@ def frac(n: int, d: int) -> dict[str, Any]:
 def metrics(
     rows: list[dict[str, Any]],
     answered_fn: Any = lambda r: True,
-    groups: tuple[str, ...] = VIEWS["without_label_conflicts"],
+    groups: tuple[str, ...] = VIEWS["all_cases"],
 ) -> dict[str, Any]:
     """Same definitions as dev_run.cohort_metrics, with `answered_fn` deciding
     abstention (default: the classifier always answers) and `groups` the view."""
@@ -376,7 +378,7 @@ def investigator_rows(tag: str, conflicts: C.Conflicts) -> list[dict[str, Any]]:
     ours = {
         r["case_id"]
         for r in rows
-        if r["group"] in C.COHORT_GROUPS and r["case_id"] in conflicts.conflicts
+        if r["group"] in C.COHORT_GROUPS and r["case_id"] in conflicts.verified
     }
     if recorded != ours:
         sys.exit(
@@ -385,7 +387,7 @@ def investigator_rows(tag: str, conflicts: C.Conflicts) -> list[dict[str, Any]]:
         )
     for r in rows:
         r["group"] = C.group_of(
-            r["failure_type"], r["variant"], r["case_id"], conflicts.conflicts
+            r["failure_type"], r["variant"], r["case_id"], conflicts.verified
         )
         ans = r["disposition"] == "answered"
         r["answered"] = ans
@@ -407,7 +409,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("tag")
     ap.add_argument("--upstream", type=Path, default=DEFAULT_UPSTREAM)
-    ap.add_argument("--investigator-run", default="m2-dev-4")
+    ap.add_argument(
+        "--investigator-run",
+        required=True,
+        help="tag of the investigator run to compare with (artifacts/dev-runs/TAG)",
+    )
     ap.add_argument("--cv-precision-target", type=float, default=0.99)
     args = ap.parse_args()
     warnings.filterwarnings("ignore")
@@ -441,7 +447,7 @@ def main() -> None:
     con = sqlite3.connect(
         (snap_dir / "snapshot.sqlite").resolve().as_uri() + "?mode=ro", uri=True
     )
-    conflicts = C.label_conflicts(
+    conflicts = C.conflict_report(
         {r["case_id"]: r for r in (*ltr, *lva)},
         con,
         REPO / "data/private" / args.tag / "key",
@@ -498,7 +504,7 @@ def main() -> None:
         (fine_label(r), p, c)
         for r, p, c in zip(ltr, cvp, cvc, strict=True)
         if C.group_of(
-            r["failure_type"], r["scenario_variant"], r["case_id"], conflicts.conflicts
+            r["failure_type"], r["scenario_variant"], r["case_id"], conflicts.verified
         )
         in C.COHORT_GROUPS
     ]
@@ -604,7 +610,7 @@ def main() -> None:
         for i, r in enumerate(ltr)
         if data["train"][1][i][0] == "invoices"
         and C.group_of(
-            r["failure_type"], r["scenario_variant"], r["case_id"], conflicts.conflicts
+            r["failure_type"], r["scenario_variant"], r["case_id"], conflicts.verified
         )
         in C.COHORT_GROUPS
     ]
@@ -613,7 +619,7 @@ def main() -> None:
         for i, r in enumerate(lva)
         if ent_va[i][0] == "invoices"
         and C.group_of(
-            r["failure_type"], r["scenario_variant"], r["case_id"], conflicts.conflicts
+            r["failure_type"], r["scenario_variant"], r["case_id"], conflicts.verified
         )
         in C.COHORT_GROUPS
     ]
@@ -675,8 +681,11 @@ def main() -> None:
             **investigator_validation(inv_rows),
         },
         "identical_cohorts_checked": True,
-        "label_conflicts": {
-            c: v for c, v in conflicts.conflicts.items() if c in lab_va
+        "verified_label_conflicts": {
+            c: v for c, v in conflicts.verified.items() if c in lab_va
+        },
+        "conflict_candidates": {
+            c: v for c, v in conflicts.candidates.items() if c in lab_va
         },
         "review_candidates": {c: v for c, v in conflicts.review.items() if c in lab_va},
         "evidence_complete_meaning": (
