@@ -2,6 +2,8 @@
 
 Status: M2 task "run training/validation end-to-end and inspect error slices". Run tag `m2-dev-1`, code commit `c4479a2` (branch `m2-investigator`), evidence contract `evidence-contract-0.1`.
 
+**Layout.** Sections 1 to 8 are **run 1** (tag `m2-dev-1`, 2026-11-01), kept as recorded. Section 9 onward is **run 2** (tag `m2-dev-3`, 2026-11-01), made after fixing the false all-clears that run 1 found (findings F1 to F3 in section 7). Where run 1 says "no limitation statement" or "clearing variants need no allocation", that describes `evidence-contract-0.1`.
+
 ## 1. What this is and is not
 
 - These are **development-set numbers on a synthetic benchmark** (FinRCA, revision `76c93ec`). The train and validation splits were used to write the evidence contract and the investigator, so they are reproduction and development data, not unseen data. Nothing here predicts performance on the test split, on `challenge_test`, or on real exports.
@@ -168,3 +170,34 @@ uv run python evaluation/dev_run.py evaluate TAG     # recompute metrics from ex
 ```
 
 Outputs under `artifacts/dev-runs/TAG/` (untracked): `run-manifest.json`, `absence-check.txt`, `metrics.json`, `report.txt`, `cases.jsonl` (one row per case), `errors.json`, `prepared/`, `inference/`, `evaluator/`. The key is at `data/private/TAG/key`. Upstream checkout default: `/home/charalambos/Documents/fin-tech-projects/reconcile/data/upstream/FinRCA-AI-Bench` (`--upstream` to change).
+
+## 9. Run 2 (`m2-dev-3`, 2026-11-01): after the all-clear fixes
+
+Run tag `m2-dev-3`, policy `evidence-contract-0.2`, code commit `38b7bf2` plus the uncommitted working-tree changes described below (hash of `src/reconcile/**/*.py` `a9caef0b53839d841edce8049f41f3881136c9fe2f843ce1a808faa4355af3aa`), same method as section 2 (fresh key, in-container absence check, labels opened only after the packets were sealed). The snapshot content digest differs from run 1 (`3b060ddc...` against `ba9611b9...`) because the token key is new; the data are the same. `m2-dev-2` was run 1's key-independence re-run, so the next free tag was used. Same caveats as section 1: development data on a synthetic benchmark.
+
+**What changed in the investigator** (all in `src/reconcile/diagnosis/`):
+1. No invoice, no all-clear. Every `legitimate_*` payment variant and `no_exception` needs an allocation of the payment to an invoice in its own currency, and the allocations are cited. Weekend clearing, check clearing, net-fee accounting and accounted bank fee did not require it before. A completed, settled payment without an allocation now abstains with `payment_without_invoice_allocation` and a supported finding of that name (payment plus a count-0 search on `payment_allocations`). Pending, batch, reversal, split and due-date already required allocations (confirmed by test and by reading the code).
+2. Every answered `legitimate_*` and `no_exception` packet carries one shared scope statement (`SCOPE_LIMITATION` in `policy.py`) saying what was checked and what was not (approval workflow, GL posting against the payment, vendor master data, PO matching).
+3. When batch and a clearing variant both hold, the clearing variant is listed in `alternatives` (split already listed due-date). The winner is unchanged.
+
+**New headline risk metric: out-of-scope failures given an all-clear** (`evaluation/dev_run.py`, `all_clear_on_out_of_scope_failures`): cases whose upstream label is a failure family outside the cohort and which the tool answered `legitimate_*` or `no_exception`. It sits next to the false-alarm rate in `report.txt`. Run 1's value was computed from its `cases.jsonl` with the same definition.
+
+| Out-of-scope failure family | Run 1 train | Run 1 validation | Run 1 both | Run 2 train | Run 2 validation | Run 2 both |
+|---|---:|---:|---:|---:|---:|---:|
+| F05 payment without valid invoice | 28/53 | 11/18 | 39/71 | 0/53 | 0/18 | 0/71 |
+| F08 approval workflow failure | 53/53 | 17/17 | 70/70 | 53/53 | 17/17 | 70/70 |
+| F09 GL posting mismatch | 54/54 | 21/21 | 75/75 | 54/54 | 21/21 | 75/75 |
+| the nine other outside families (F01 to F04, F07, F10, F11, F13, F15) | 0 | 0 | 0/564 | 0 | 0 | 0/564 |
+| **All out-of-scope failures** | 135/634 = 0.213 | 49/225 = 0.218 | **184/859 = 0.214** | 107/634 = 0.169 | 38/225 = 0.169 | **145/859 = 0.169** |
+
+All 71 F05 cases now abstain with `payment_without_invoice_allocation` (39 that were answered legitimate, plus the 32 that abstained as `required_records_missing`).
+
+**Cohort metrics did not regress.** Every cohort figure in section 4 is identical in run 2: answered 502/503, exact-category precision 485/502 = 0.966 (train 366/379, validation 119/123), failure versus no-failure 502/502, evidence-complete 502/502, correct and complete 485/503 = 0.964, search counts reproduce 502/502, false alarms 0/281 (0/526 over all legitimate cases), FX abstentions 30/30, the same 17 wrong-variant answers, the same one abstention (`unsupported_fx`, RCA_000568). The evaluator's evidence-completeness check now also requires the allocations for weekend and check clearing, net-fee accounting and accounted bank fee (the 0.2 contract); all 502 answered cohort packets still pass it. Dispositions over the 1,608 requests: run 1 answered 778, out_of_scope 720, abstained 110; run 2 answered 739, out_of_scope 720, abstained 149 (the 39 former F05 answers). The false-alarm rate is still 0 in both runs.
+
+**Scope statement and overlap, measured on the packets.** Of 489 answered all-clear packets, 489 carry the scope statement (run 1: 0 of 528, with 306 having no limitation at all). Batch packets now list the overlapping clearing variant: 29 with weekend clearing and 8 with check clearing; the 62 split packets list due-date as before.
+
+**Remaining all-clears on out-of-scope failures: 145, all F08 (70) and F09 (75).** Their records are internally clean on what this tool checks (matched debit, within the clearing limit, allocations and invoice totals consistent). An approval-workflow failure and a GL-posting mismatch are not visible in the records the investigator reads (it does not read `approval_events`, and it compares no GL entry with the payment other than the journals a variant names). The answers are the same as in run 1 (`no_exception` 28 and 29, batch 21 and 19, weekend 19 and 22, check 2 and 5) but each now states in `limitations` that approval workflow and GL posting were not checked. This lowers the chance that the answer is read as a general clean bill; it does not remove the false all-clear. Closing it needs approval and GL checks, which belong to a later milestone (`PLAN.md` section 6), or an abstention for payments touched by those families, which would need signals the contract does not define. F15 (29 answered F14) remains a failure called another failure class, not an all-clear (section 7 F5).
+
+**Status of the run 1 findings.** F1 (clearing variants without an invoice): fixed. F2 (no limitation statement): fixed. F3 (overlap inconsistently listed): fixed. F4, F5, F6: unchanged.
+
+Reproduce: `uv run python evaluation/dev_run.py run m2-dev-3` (tag must be new), artifacts under `artifacts/dev-runs/m2-dev-3/` (untracked).

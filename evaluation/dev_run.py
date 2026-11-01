@@ -413,6 +413,13 @@ def required(category: str, entity: tuple[str, str], s: Snap, v: View):
             len(pays) == 1 and v.cites("payments", [pays[0]["payment_id"]]),
         )
         add("fee_journal", v.cites("gl_entries", s.balanced_journals(rid, "bank_fee")))
+        fee_allocs = (
+            s.allocs_of_payment(pays[0]["payment_id"]) if len(pays) == 1 else []
+        )
+        add(
+            "payment_allocations",
+            bool(fee_allocs) and v.cites("payment_allocations", alloc_ids(fee_allocs)),
+        )
         return out
 
     if table == "invoices":
@@ -523,6 +530,10 @@ def required(category: str, entity: tuple[str, str], s: Snap, v: View):
             deb_key is not None and v.calc_over(pkey, deb_key),
         )
         add("business_day_lag", v.day_count_from(pkey) is not None)
+        add(
+            "allocations",
+            bool(allocs) and v.cites("payment_allocations", alloc_ids(allocs)),
+        )
     elif category == "legitimate_batch_payment":
         add("allocations", v.cites("payment_allocations", alloc_ids(allocs)))
         add(
@@ -554,6 +565,10 @@ def required(category: str, entity: tuple[str, str], s: Snap, v: View):
             else []
         )
         add("fee_journals", v.cites("gl_entries", fee))
+        add(
+            "allocations",
+            bool(allocs) and v.cites("payment_allocations", alloc_ids(allocs)),
+        )
     elif category == "no_exception":
         add(
             "posted_debit", one_debit and v.cites("bank_transactions", bank_ids(debits))
@@ -844,6 +859,26 @@ def confusion(rows: list[dict], groups: tuple[str, ...]) -> dict:
     return {k: dict(v) for k, v in sorted(out.items())}
 
 
+def all_clear_risk(rows: list[dict]) -> dict:
+    """Headline risk: failures outside the cohort that the tool answered
+    legitimate_* or no_exception, i.e. a false all-clear. Per upstream family."""
+    oos = [r for r in rows if r["group"] == "oos_failure"]
+
+    def given(r: dict) -> bool:
+        return r["disposition"] == "answered" and is_no_failure(r["category"])
+
+    return {
+        "overall": frac(sum(map(given, oos)), len(oos)),
+        "per_family": {
+            f: frac(
+                sum(given(r) for r in oos if r["failure_type"] == f),
+                sum(r["failure_type"] == f for r in oos),
+            )
+            for f in sorted({r["failure_type"] for r in oos})
+        },
+    }
+
+
 def all_metrics(rows: list[dict]) -> dict:
     fx = [r for r in rows if r["group"] == "fx"]
     legit_all = [r for r in rows if r["failure_type"] == "NO_FAILURE"]
@@ -906,6 +941,7 @@ def all_metrics(rows: list[dict]) -> dict:
                 sum(r["group"] == "oos_legit" for r in legit_all),
             ),
         },
+        "all_clear_on_out_of_scope_failures": all_clear_risk(rows),
         "out_of_scope_families": {
             "failure_families": {
                 "cases": sum(r["group"] == "oos_failure" for r in rows),
@@ -1010,6 +1046,11 @@ def render(m: dict) -> str:
         line("false alarms, all legit", pct(fa["any_legitimate"]))
         line("  cohort variants incl. FX", pct(fa["in_cohort_variants_incl_fx"]))
         line("  AP-side variants", pct(fa["ap_side_variants_out_of_scope"]))
+        risk = a["all_clear_on_out_of_scope_failures"]
+        line("RISK all-clear on out-of-scope failures", pct(risk["overall"]))
+        for fam, frc in risk["per_family"].items():
+            if frc["d"]:
+                line(f"  {fam}", pct(frc))
         lines.append("per label: cases answered correct complete abstained oos failed")
         for k, v in a["cohort_per_label"].items():
             nums = [
