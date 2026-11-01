@@ -119,3 +119,36 @@ uv run pytest
 - Subagents do not write `DECISIONS.local.md`. They return proposed decision and assumption entries in their final report. The parent checks the evidence and records them. This avoids conflicting writes, and an untracked file does not exist in other worktrees or clones.
 - Agents without access to `DECISIONS.local.md` (for example a cloud session) include their entries in their final report for the user to add.
 - Parallel agents work on separate branches or worktrees. The parent reviews and merges their work after checks pass.
+
+## 9. Build, review and fix workflow
+
+Roles:
+
+- **Builders and fixers:** Claude Sonnet subagents. They write files and run checks, but do not commit, do not edit `DECISIONS.local.md`, and touch only the paths their task names.
+- **Parent (orchestrator):** splits work into tasks, reviews each builder's output against `PLAN.md` and these rules, records decisions, and makes every commit. Only the parent runs git write commands.
+- **Reviewer:** Codex with model `gpt-6-astra` at high reasoning effort, run at the end of each milestone before the gate.
+
+Loop for each milestone:
+
+1. Parent creates the milestone branch from `main`.
+2. Builders complete tasks. After each task the parent verifies the output and commits it with a clear message.
+3. Parent runs the review against `main`, saving the output under `artifacts/reviews/` (untracked):
+   ```bash
+   codex review --base main -c model="gpt-6-astra" -c model_reasoning_effort="high" \
+     "Review against AGENTS.md, PLAN.md and SCOPE.md: correctness, simplicity, label isolation, financial exactness and unsupported claims." \
+     > artifacts/reviews/m<N>-review-1.md
+   ```
+4. Parent sorts the findings into "fix" and "reject", and records the reason for each rejection in `DECISIONS.local.md`.
+5. Fixers address the accepted findings. The parent checks each fix against the original finding by reading the change and running the relevant checks, never by trusting the fixer's report, then commits it.
+6. Repeat the review until no accepted findings remain, at most three rounds. Anything still open is listed for the user at the gate.
+7. **Gate.** Parent runs the purpose review below, then presents the gate evidence, review history and open items to the user. Merge to `main` only after the user approves.
+
+Purpose review questions at every gate:
+
+1. Does this help an analyst investigate a real accounts-payable-to-bank exception?
+2. Would it work on a real export format, not just the FinRCA benchmark?
+3. Is it the simplest thing that achieves that?
+4. Is every claim backed by recorded evidence?
+5. Did anything creep in that `SCOPE.md` defers?
+
+Extra reviews: a mid-milestone code review in M1 after the money type and data definitions, and in M2 after the first exception type works end-to-end; an independent evaluator and protocol review before the M3 freeze; security reviews in M4 and M6. Tag the M3 protocol freeze and the M7 release freeze.
