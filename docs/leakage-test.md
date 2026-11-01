@@ -67,7 +67,7 @@ Subgroup test (inserted payments that have an allocation, 100, against the 6000 
 | All payment fields | 0.579 | `rel.pay_n_alloc` 0.590 (100/100 found, 4920/6000 organic flagged, precision 0.020 vs base rate 0.016; FLAG), `own.pay_age` 0.550, `own.pay_amount_mag` 0.548 (not flagged) |
 | Own row only | 0.485 | `own.pay_age` 0.550, `own.pay_amount_mag` 0.548 (nothing above null95) |
 
-Findings: from the payment's own row (and vendor data) these 100 are not separable. With joined fields the only flag is `rel.pay_n_alloc`, which the inserted payments all have as exactly one allocation while about 18% of organic payments (1080 of 6000) have two or more; precision 0.020 against a 0.016 base rate is a lift of about 1.2, so no usable signal. Bank-row and GL-line features were tested only in the pooled 200-payment runs above (best balanced accuracy 0.564 and 0.561), not re-run on this subgroup. No additional signal detected by these experiments; untested: interactions beyond depth 3, and bank-row and ledger features restricted to the 100-payment subgroup. The other 100 inserted payments are marked only by the genuine absence of an allocation.
+Findings: no own-row signal was detected by these experiments (payment row and vendor data; nothing above null95 in single fields, tree 0.485). With joined fields the only flag is `rel.pay_n_alloc`, a measured weak residual: all 100 inserted payments have exactly one allocation, against 4920 of 6000 organic payments (about 18% of organic payments have a different count), so the rule flags 100/100 inserted and 4920/6000 organic; precision 0.020 against a 0.016 base rate, a lift of about 1.2, balanced accuracy 0.590 against null95 0.563. No usefulness criterion was declared in advance, so it is reported as a residual rather than dismissed. Limits: 100 positives, 5-fold cross-validation, hand-chosen coarse features, single fields and a depth-3 tree only. Bank-row and GL-line features were tested only in the pooled 200-payment runs above (best balanced accuracy 0.564 and 0.561), not re-run on this subgroup. Untested: interactions beyond depth 3, and bank-row and ledger features restricted to the 100-payment subgroup. The other 100 inserted payments are marked only by the genuine absence of an allocation.
 
 **Invoices** (inserted = raw ID above `INV_0428000`): 147 of 8147, base rate 0.018, null95 0.554.
 
@@ -175,7 +175,7 @@ Other class-pure ledger codes, from the same output (payment-primary dev cases):
 ## 4. What the tests did not show
 
 - No field of the primary payment (own row, vendor data) predicts F12, F14 or legitimate class. Nothing is flagged in the payment stratum.
-- No snapshot row or token order reveals raw order. No column is a usable proxy for the inserted/organic boundary.
+- No snapshot row or token order reveals raw order. No column was found to be a proxy for the inserted/organic boundary by these experiments (weakest residual: allocation count, section 3.1).
 - None of the old audit leaks in section 4 (L1 case IDs, L3 anomaly audit events, L4/L5 audit timestamps, L12 references and order) reappears through the allowed fields. L12 specifically: no field separates payments above reference 6042 (section 3.1). The order of the `payment_ref` tokens themselves was not tested separately; the `payments` row above covers the `payment_id` token.
 
 ## 5. Classification of each signal
