@@ -135,10 +135,11 @@ Loop for each milestone:
 2. Builders complete tasks. After each task the parent verifies the output and commits it with a clear message.
 3. Parent runs the review against `main`, saving the output under `artifacts/reviews/` (untracked):
    ```bash
-   codex review --base main -c model="gpt-6-astra" -c model_reasoning_effort="high" \
-     "Review against AGENTS.md, PLAN.md and SCOPE.md: correctness, simplicity, label isolation, financial exactness and unsupported claims." \
-     > artifacts/reviews/m<N>-review-1.md
+   codex exec -s read-only -c model="gpt-6-astra" -c model_reasoning_effort="high" \
+     -o artifacts/reviews/m<N>-review-<round>.md \
+     "Review the changes in 'git diff main...HEAD' against AGENTS.md, PLAN.md and SCOPE.md: correctness, simplicity, label isolation, financial exactness and unsupported claims. Never open anything under challenge_test/. Report each finding with file, line, severity and a concrete failure scenario."
    ```
+   (`codex review --base` cannot be combined with custom instructions in codex-cli 0.166.0, so use `codex exec` in a read-only sandbox.)
 4. Parent sorts the findings into "fix" and "reject", and records the reason for each rejection in `DECISIONS.local.md`.
 5. Fixers address the accepted findings. The parent checks each fix against the original finding by reading the change and running the relevant checks, never by trusting the fixer's report, then commits it.
 6. Repeat the review until no accepted findings remain, at most three rounds. Anything still open is listed for the user at the gate.
