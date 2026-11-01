@@ -1,14 +1,16 @@
 # Baseline reproduction: FinRCA Rules/SQL and classical ML
 
-Status: M0 reproduction, run 2026-11-01. Engineering reproduction of upstream code, not an operational comparison.
+Status: M0 reproduction, runs of 2026-11-01. Engineering reproduction of upstream code, not an operational comparison.
+
+Two runs exist. Run `20261101` used the first runner, which over-exposed answer files (see "Exposure in run 20261101"). Run `20261101b` used the fixed runner with an explicit mount allowlist and per-run log directories; it is the run to cite. The metric tables below are from `20261101`; section "Rerun 20261101b" shows its outputs are identical.
 
 ## Environment
 
 - Upstream: https://github.com/PratikGhawate/FinRCA-AI-Bench, revision `76c93ec32536e29826e2ab9e68b58e0351410bc7` (MIT licence), cloned to `data/upstream/finrca-baseline` (ignored by git), checked out and verified with `git rev-parse HEAD`.
-- Image `finrca-upstream-baselines:76c93ec` (id `sha256:608ec7538aff1b713807635ba3dbedf998808de530b734c979fb8fabbc7f795e`), built from `evaluation/baselines/finrca_upstream/Dockerfile`: `python:3.11.3-slim`, numpy 1.26.0, pandas 2.1.1, scikit-learn 1.4.1.post1, joblib 1.3.2, PyYAML 6.0.1, pytest 8.4.2. These match the versions recorded in the upstream run manifests (`results/*/run_manifest.json`). The base image tag was not pinned by digest.
+- Image `finrca-upstream-baselines:76c93ec` (run 20261101: id `sha256:608ec7538aff1b713807635ba3dbedf998808de530b734c979fb8fabbc7f795e`; rebuilt for run 20261101b after the runner scripts changed: id `sha256:23587ac0d15b8457c58fea01f2ee56bb95a655cdf67e190d94fb7ee4253c72e9`; only the two copied scripts differ), built from `evaluation/baselines/finrca_upstream/Dockerfile`: `python:3.11.3-slim`, numpy 1.26.0, pandas 2.1.1, scikit-learn 1.4.1.post1, joblib 1.3.2, PyYAML 6.0.1, pytest 8.4.2. These match the versions recorded in the upstream run manifests (`results/*/run_manifest.json`). The base image tag was not pinned by digest.
 - `requirements.txt` upstream uses ranges (and lists openai, pydantic, tiktoken, used only by the LLM baselines, which were not run and not installed).
 - Hardware: Intel Core i7-5820K, 12 logical CPUs, 46 GB RAM, Linux 6.8.0-79 x86_64, Docker 29.2.1. Upstream published runs were on macOS 15.7.4 arm64, Python 3.11.3.
-- Isolation: `--network none`, `--read-only` root, `--cap-drop ALL`, `no-new-privileges`, non-root user, checkout mounted read-only at `/src`, only `artifacts/m0-baselines/` writable at `/out`. No home directory or credentials mounted. The pip install happened at image build time (network); the runs had no network.
+- Isolation (run 20261101b): `--network none`, `--read-only` root, `--cap-drop ALL`, `no-new-privileges`, non-root user, only an allowlist of read-only subpaths of the checkout mounted under `/src` (see Commands), only `artifacts/m0-baselines/` writable at `/out`. No home directory or credentials mounted. The whole checkout is no longer mounted. The pip install happened at image build time (network); the runs had no network.
 
 ## Pre-run review of upstream code
 
@@ -27,22 +29,27 @@ cd /home/charalambos/Documents/fin-tech-projects/reconcile
 git clone https://github.com/PratikGhawate/FinRCA-AI-Bench data/upstream/finrca-baseline
 git -C data/upstream/finrca-baseline checkout 76c93ec32536e29826e2ab9e68b58e0351410bc7
 docker build -t finrca-upstream-baselines:76c93ec evaluation/baselines/finrca_upstream
-mkdir -p artifacts/m0-baselines
-docker run --rm --network none --read-only --user $(id -u):$(id -g) --cap-drop ALL \
-  --security-opt no-new-privileges --tmpfs /work:exec,uid=$(id -u),size=3g --tmpfs /tmp:size=512m \
-  -e HOME=/tmp -e RUN_TAG=20261101 \
-  -v "$PWD/data/upstream/finrca-baseline:/src:ro" -v "$PWD/artifacts/m0-baselines:/out" \
-  finrca-upstream-baselines:76c93ec
+RUN_TAG=20261101b evaluation/baselines/finrca_upstream/run_docker.sh
 ```
 
-`run_baselines.sh` (in the image) copies `/src` into `/work`, excluding `.git`, `data/benchmark/challenge_test`, `data/benchmark/internal` (mutation log), `data/raw_clean` and the Direct-LLM/RAG/GraphRAG results; then runs the upstream commands unchanged except for output paths:
+`run_docker.sh` runs `docker run` with the isolation flags above and mounts only these paths of `data/upstream/finrca-baseline`, each read-only at `/src/<path>`:
+
+- `src`, `tests`, `docs` (code, the tests the CLIs run, frozen specs and checksums);
+- `data/benchmark/{full,train,validation,test}` and `data/benchmark/dataset_quality_report.json` (the only data paths in the read logs of run 20261101);
+- `results/rules_sql/phase2_rules_sql_v1_0_20260808T185000Z_auditfix1` (the upstream Rules/SQL run that the ML runner reads for its comparison; `RULES_RUN_NAME` in upstream `classical_ml/cli.py`).
+
+Not mounted, so unreachable from the container: `data/benchmark/challenge_test`, the combined top-level `data/benchmark/{benchmark_questions.jsonl,rca_ground_truth.jsonl,failure_manifest.csv,causal_edges.csv}`, `data/benchmark/internal`, `data/raw_clean`, other `results/` directories, `config.yaml`, and `.git`. The allowlist was derived from the run-20261101 read logs plus a grep of the upstream code for `docs/`, `results/` and `ROOT` paths (`src/rules_sql/cli.py`, `src/classical_ml/cli.py`, `tests/classical_ml`, `tests/rules_sql`). The script fails if an allowlisted path is missing.
+
+`run_baselines.sh` (in the image) first runs `mkdir /out/$RUN_TAG` (no `-p`) and refuses to start with exit 2 if it exists. It then copies `/src` into `/work` and runs the upstream commands unchanged except for output paths:
 
 ```bash
-python -m src.rules_sql.cli run --data-root data/benchmark --output-root /out/rules_sql --run-id rules_sql_repro_$RUN_TAG
-python -m src.classical_ml.cli run --data-root data/benchmark --output-root /out/classical_ml --run-id classical_ml_repro_$RUN_TAG
+python -m src.rules_sql.cli run --data-root data/benchmark --output-root /out/$RUN_TAG/rules_sql --run-id rules_sql_repro_$RUN_TAG
+python -m src.classical_ml.cli run --data-root data/benchmark --output-root /out/$RUN_TAG/classical_ml --run-id classical_ml_repro_$RUN_TAG
 ```
 
-`PYTHONHASHSEED=314159` was set globally (the upstream ML test subprocess sets it). `STAGES="classical_ml"` selects one stage. `audit_run.py` wraps each CLI with a Python audit hook that logs every file opened under `data/` (`files_read_*.txt`). The hook does not see the pytest subprocesses (they use synthetic fixtures).
+Every log of a run lives in `artifacts/m0-baselines/$RUN_TAG/`: `run.stdout.txt` (combined stdout/stderr of both stages), `files_read_rules_sql.txt`, `files_read_classical_ml.txt`, and the run outputs. `audit_run.py` opens its read log with mode `"x"`, so it cannot overwrite one either. `STAGES="classical_ml"` selects one stage. Arguments to `run_docker.sh` replace the entrypoint, used for the absence check below.
+
+`PYTHONHASHSEED=314159` was set globally (the upstream ML test subprocess sets it). `audit_run.py` wraps each CLI with a Python audit hook that logs every file opened under `data/` (`files_read_*.txt`). The hook does not see the pytest subprocesses (they use synthetic fixtures).
 
 ## Experiments run
 
@@ -87,17 +94,26 @@ Hidden confusions are in `confusion_matrix.csv` and `error_analysis.csv` in the 
 - Unexplained small difference: validation metrics for 7 of 22 candidates (2 logistic regression: 03, 05; 5 random forest: 01, 03, 04, 05, 08) differ from upstream by up to about 0.005 macro F1 (e.g. random_forest_08 0.9306 vs 0.9258; logistic_regression_03 0.8849 vs 0.8837). None changes the selection, and all 8 HistGB candidates match. Plausible cause: different BLAS/solver/threading numerics on x86 versus arm64 (unverified; not tested further). Test predictions are unaffected because only the winner is applied to test.
 - The agreement is with upstream's own recorded results on the same dataset snapshot (same `data/benchmark` in the checkout), not an independent regeneration; the dataset generator was not run, so generation determinism is not tested here.
 
+## Exposure in run 20261101
+
+The first runner did two things it should not have done:
+
+- `run_baselines.sh` copied the combined top-level files `data/benchmark/{benchmark_questions.jsonl, rca_ground_truth.jsonl, failure_manifest.csv, causal_edges.csv}` into the container's `/work`. These contain answers for all splits, including the sealed `challenge_test` split. Only the `challenge_test` directory itself and `internal` were excluded from the copy.
+- `docker run` mounted the whole checkout read-only at `/src`, so `data/benchmark/challenge_test/` was reachable inside the container (the copy step excluded it, but nothing prevented a process from reading `/src` directly).
+
+The evidence that upstream code did not read them is weaker than the exposure: the audit hook (`artifacts/m0-baselines/files_read_*.txt`) shows the upstream Python processes opened none of the combined top-level files and nothing under `challenge_test`, and a grep of `src/rules_sql` and `src/classical_ml` finds no reference to `challenge_test`. The hook starts after the shell copy, so its log cannot vouch for the copy step itself, and it does not cover the pytest subprocesses or non-Python processes (`tar`, `bash`). So: the files were copied into the container (exposed), upstream Python did not open them (observed), and no challenge answer is known to have influenced any output. The sealed split's status is not established by that run, so run 20261101 is superseded by 20261101b for citation. Run 20261101 data on the host is unchanged and remains in `artifacts/m0-baselines/` (ignored).
+
 ## Label and answer files read
 
-From the audit hook (`artifacts/m0-baselines/files_read_*.txt`), all under `data/benchmark/` of the checkout copy:
+From the audit hook (`artifacts/m0-baselines/20261101b/files_read_*.txt`; identical file set to run 20261101), all under `data/benchmark/` of the container's copy:
 
 - Both runs: `full/*.csv` (14 operational tables), `{validation,test}/case_ids.txt`, `{validation,test}/benchmark_questions.jsonl`, `{validation,test}/failure_manifest.csv`.
 - Rules/SQL additionally: `test/rca_ground_truth.jsonl` (evidence ID scoring), and its F01 grid selection reads validation labels.
 - ML additionally: `train/case_ids.txt`, `train/benchmark_questions.jsonl`, `train/failure_manifest.csv`, `dataset_quality_report.json`.
-- Not present/read: `challenge_test/` (excluded from the copy; the checkout was mounted read-only and `git status` of the checkout is clean), `internal/mutation_log.jsonl`, `causal_edges.csv`, `raw_clean/`.
+- Not present in run 20261101b, so not readable: `challenge_test/`, the combined top-level `benchmark_questions.jsonl`, `rca_ground_truth.jsonl`, `failure_manifest.csv`, `causal_edges.csv`, `internal/`, `raw_clean/` (never mounted; see the absence check below). `git status` of the checkout is clean.
 - The `benchmark_questions.jsonl` files contain expected answers; the upstream code extracts only `case_id` and `primary_entity.{type,id}`.
 
-Consequence (PLAN.md section 2): the upstream `test` split (439 cases, `data/benchmark/test/`), and the train and validation splits, are now a reproduction set and must not be called unseen. The challenge split `data/benchmark/challenge_test/` (203 cases, files `case_ids.txt`, `benchmark_questions.jsonl`, `case_entity_records.jsonl`, `failure_manifest.csv`, `rca_ground_truth.jsonl`) was not touched.
+Consequence (PLAN.md section 2): the upstream `test` split (439 cases, `data/benchmark/test/`), and the train and validation splits, are now a reproduction set and must not be called unseen. The challenge split `data/benchmark/challenge_test/` (203 cases, files `case_ids.txt`, `benchmark_questions.jsonl`, `case_entity_records.jsonl`, `failure_manifest.csv`, `rca_ground_truth.jsonl`) was not touched by run 20261101b. For run 20261101 see "Exposure in run 20261101".
 
 ## Privileged or oracle inputs
 
@@ -120,7 +136,44 @@ An observable-input counterpart (neutral request, no entity-type routing) is not
 - Per-class numbers for 12-21 cases have wide uncertainty; no confidence intervals computed for the subset.
 - Rules/SQL single run; no repeated-seed variance (rules are deterministic).
 - Upstream's own docs were overwritten only inside the container copy; the checkout is unmodified.
+- The 20261101b absence check proves unreachability by path existence only; it does not inspect anything about the sealed files.
+
+## Rerun 20261101b (fixed runner)
+
+Same checkout (`git rev-parse HEAD` = `76c93ec3...`, clean), same inputs; wall time 8m36s. Both pytest suites passed in the run (40 and 20 tests).
+
+(a) Predictions vs upstream's saved runs (comparison run on the host against `results/` of the checkout):
+
+- Rules/SQL `predictions.jsonl`, 439 cases, vs `results/rules_sql/phase2_rules_sql_v1_0_20260808T185000Z_auditfix1/`: identical after dropping `latency_ns`; `metrics.json` byte-identical.
+- ML vs `results/classical_ml/phase3_classical_ml_v1_0_20260808T213000Z_auditfix1/`: `predicted_failure_type` identical for all 439 cases (same case order); `confusion_matrix.csv` and `metrics.json` byte-identical.
+
+(b) Absence check from inside the container, using path existence only (`test -e`); `challenge_test` contents were not opened, listed or counted:
+
+```
+$ evaluation/baselines/finrca_upstream/run_docker.sh bash -c 'for p in <paths>; do if test -e "$p"; then echo "EXISTS  $p"; else echo "ABSENT  $p"; fi; done'
+ABSENT  /src/data/benchmark/challenge_test
+ABSENT  /src/data/benchmark/benchmark_questions.jsonl
+ABSENT  /src/data/benchmark/rca_ground_truth.jsonl
+ABSENT  /src/data/benchmark/failure_manifest.csv
+ABSENT  /src/data/benchmark/causal_edges.csv
+ABSENT  /src/data/benchmark/internal
+ABSENT  /src/data/raw_clean
+EXISTS  /src/data/benchmark/test
+```
+
+The last line is a positive control (an allowlisted path). The container's `/work` copy is made from `/src`, so it cannot contain these either.
+
+(c) Rerun with the same tag:
+
+```
+$ RUN_TAG=20261101b evaluation/baselines/finrca_upstream/run_docker.sh
+mkdir: cannot create directory '/out/20261101b': File exists
+refusing to start: /out/20261101b already exists
+exit=2
+```
+
+SHA-256 of all 72 files under `artifacts/m0-baselines/20261101b/` was identical before and after.
 
 ## Artifacts
 
-`artifacts/m0-baselines/` (ignored): `rules_sql/rules_sql_repro_20261101/`, `classical_ml/classical_ml_repro_20261101/` (predictions, metrics, locked model files, manifests), `files_read_*.txt`, `*.stdout.txt`, `docker_run*.log`.
+`artifacts/m0-baselines/` (ignored). Run 20261101b (cite this): `20261101b/{rules_sql/rules_sql_repro_20261101b, classical_ml/classical_ml_repro_20261101b, files_read_*.txt, run.stdout.txt}`. Run 20261101 (superseded, old flat layout): `rules_sql/`, `classical_ml/`, `files_read_*.txt`, `*.stdout.txt`, `docker_run*.log`.
