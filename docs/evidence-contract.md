@@ -19,7 +19,7 @@ What the validation does and does not show. The contract is written from the ups
 ## 2. Principles
 
 1. **Observable only.** Required records come from the section 3.1 allowlist. `audit_log` is not an input. Bank rows posted after 2026-06-30 and GL lines posted after 2026-06-30 do not exist for the investigator (section 6 rule; `PLAN.md` section 4: every accepted citation resolves under the cutoff policy).
-2. **Exact money.** `Decimal` amounts with an explicit currency. Compare only within one currency. A difference is `ERP amount minus bank amount` (positive means the bank is short). Equality tolerance is one minor unit of the currency (JPY 1, others 0.01; `src/utils/money.py:11`), not a percentage.
+2. **Exact money.** `Decimal` amounts with an explicit currency. Compare only within one currency. A difference is `ERP amount minus bank amount` (positive means the bank is short). Equality tolerance is one minor unit of the currency (JPY 1, others 0.01; `src/utils/money.py:11`), not a percentage. Journal amounts carry their own currency: a journal is compared only with an amount in the same currency, and a journal whose lines mix currencies is in no currency. Any comparison across currencies (invoice, payment, bank row, journal) is not gradable (checker reason `cross_currency_unsupported`), except the FX variant, which is a detection of the mismatch (section 5).
 3. **Absence is a bounded search, not a missing ID.** An absence claim cites a search record: table, key, predicate, cutoff and the observed count (0). It is evidence only when the search scope is stated, the snapshot is declared complete for that table, and re-running the query on the snapshot returns the stated count. The snapshot-completeness assumption is declared, not proven (spec lines 19 and 1046; open question 1).
 4. **Distinct payments stay distinct.** No de-duplication by amount or date (`PLAN.md` section 4; audit section 10, item 3). Two equal-amount payments are a duplicate only if cumulative committed allocations exceed the invoice.
 5. **Missing counterparts remain visible.** A payment without a bank row is a finding in every packet that touches it, even when the primary diagnosis is another class (RCA_000512, section 4.1).
@@ -70,7 +70,7 @@ Absence evidence: none required for the diagnosis. A payment that is allocated b
 
 Evidence-complete (diagnosis "duplicate disbursement"): the invoice, every allocation, every allocating payment and the posted debit of every payment counted in `committed` are cited, and `committed_overpayment` is greater than one currency quantum. Citing only two of three payments, as upstream does in 11 of 76 cases, is incomplete.
 
-Not gradable: `allocated - invoice_total` exceeds the quantum but `committed_overpayment` does not (the proof that the extra payment left the bank is missing or not yet posted at the cutoff). RCA_000588 is this case: the second check's debit `BT_0426251` posts 2026-07-01. Also not gradable: allocations or an allocating payment missing from the snapshot.
+Not gradable: `allocated - invoice_total` exceeds the quantum but `committed_overpayment` does not (the proof that the extra payment left the bank is missing or not yet posted at the cutoff). RCA_000588 is this case: the second check's debit `BT_0426251` posts 2026-07-01. Also not gradable: allocations or an allocating payment missing from the snapshot; and an effective same-currency allocating payment that has a posted debit by a reference that another payment also uses (the debit cannot be attributed to one payment, section 2 principle 7; `reference_shared_by_payments`).
 
 Contradiction (label says F06, records do not): `allocated` does not exceed the invoice total by more than the quantum.
 
@@ -124,7 +124,9 @@ Absence evidence: the search record "observable `gl_entries` with `transaction_t
 
 Evidence-complete: payment, bank row, the delta calculation and the GL absence search record. The fee size (15 to 35) is not evidence either way (L7).
 
-Not gradable: reference not unique; no or several posted debits for the reference; bank amount above the ERP amount (a different condition, not covered); bank row posted after the cutoff.
+Not gradable: reference not unique; no or several posted debits for the reference; bank amount above the ERP amount (a different condition, not covered); bank row posted after the cutoff; the bank row or a fee journal in a currency other than the payment's; a partial fee journal (below).
+
+Partial fee journal rule (decision recorded in the build report). The absence search above must return count 0 for an "unexplained shortfall" to be evidence-complete. If any balanced `bank_fee` journal is sourced to the bank row but `|delta - explained|` still exceeds the quantum (for example a 25 shortfall with a 10 fee journal), the search count is not 0 and the diagnosis cannot cite it, so the result is not gradable (`partial_fee_journal`), not F14 and not legitimate. If the journals explain the whole difference it stays a contradiction of the F14 label.
 
 Contradiction: `delta <= quantum` (no mismatch) or a balanced fee journal explains the difference.
 
@@ -148,6 +150,8 @@ Each contract has the same shape: required records, calculations, evidence-compl
 | FX settlement (`:571-617`) | payment | payment and its unique posted debit | `payment_currency != bank currency` (detection only) | none | none; see below |
 
 Boundary rule: failures use a strict test (`age > limit`, spec line 725), legitimate clearing uses the complement (`<= limit`). The two never both hold. In development data all 65 weekend and check clearing cases sit exactly at the limit, and one pending wire payment is exactly at its limit (section 7), so the boundary is exercised.
+
+Currency. Every variant above compares amounts only within one currency; a payment, bank row, invoice or journal in another currency makes the case not gradable, never a contradiction or a pass. A reversal credit must be `direction = credit` and `status = posted`.
 
 Notes. The `payment_reversal`, `bank_fee` and `fx_settlement` journal types are class-correlated ledger structure kept by the section 3.1 allowlist (L6, open residual). The contract uses `payment_reversal` and `bank_fee` as accounting records; it does not use `fx_settlement` or the `799100-FX-SETTLEMENT` account at all. The due-date contract does not check the approval timeline that upstream lists as required (`approval_events`): approval order violates upstream's own invariant checks in 90 cases (audit section 10, item 9). Intent ("scheduled") is not recorded for split, batch and due-date cases; legitimacy rests on arithmetic only.
 
@@ -181,7 +185,7 @@ No parameter was fitted to labels. The values come from the upstream specificati
 
 ## 7. Validation results (train and validation only)
 
-Command: `python3 -I evaluation/evidence_contract_check.py --upstream <checkout>`. The script reads `train/rca_ground_truth.jsonl`, `validation/rca_ground_truth.jsonl` and the raw `data/benchmark/full` tables. It keeps only allowlisted columns, drops 2 bank rows (`BT_0426166`, `BT_0426251`) and 5 GL sources with post-cutoff lines (it applies the cutoff logically, it does not remap). Two runs produced identical output.
+Command: `python3 -I evaluation/evidence_contract_check.py --upstream <checkout>`. The script reads `train/rca_ground_truth.jsonl`, `validation/rca_ground_truth.jsonl` and the raw `data/benchmark/full` tables. It keeps only allowlisted columns, drops 2 bank rows (`BT_0426166`, `BT_0426251`) and 5 GL sources with post-cutoff lines (it applies the cutoff logically, it does not remap). Two runs produced identical output. The cohort is 538 cases: 76 F06, 71 F12, 76 F14 and 315 cases in the ten legitimate variants (23+26+27+34+30+33+32+33+39+38). After the round-1 review fixes (shared references in F06, currency checks, posted-credit reversal, partial fee journals) the output is byte-identical to the earlier run, so none of the numbers below changed. The checker's predicates are pinned to the public fixtures by `tests/unit/test_evidence_contract_check.py`.
 
 "Gradable" means the contract's required records exist, its absence searches are clean and its calculations agree with the label. "Contradiction" means the records are complete but the calculation disagrees with the label. "Not gradable" means a required record or search scope is missing or ambiguous.
 
@@ -211,7 +215,7 @@ Specificity of the failure predicates (cases per predicate that fire on a case's
 | F06 (76) | 75 | 1 | 0 |
 | F12 (71) | 0 | 71 | 0 |
 | F14 (76) | 0 | 0 | 76 |
-| any legitimate variant (462 cases) | 0 | 0 | 1 |
+| any of the ten legitimate variants (315 cases) | 0 | 0 | 1 |
 
 The one F06 case that also fires F12 is RCA_000512, whose third payment has no bank row (visible by design). The one legitimate case that fires F14 is RCA_002127 (section 8).
 
