@@ -11,7 +11,7 @@
     ],
     "calculations": [
       {
-        "name": "journal_minus_fee_row",
+        "name": "fee_row_minus_journals",
         "unit": "EUR",
         "value": "0.00"
       }
@@ -56,12 +56,12 @@
         "value": "3000.00"
       },
       {
-        "name": "allocated_minus_payment",
+        "name": "payment_minus_allocated",
         "unit": "EUR",
         "value": "0.00"
       },
       {
-        "name": "bank_minus_payment",
+        "name": "delta",
         "unit": "EUR",
         "value": "0.00"
       }
@@ -116,7 +116,7 @@
     "absence_searches": [],
     "calculations": [
       {
-        "name": "amount_difference",
+        "name": "delta",
         "unit": "EUR",
         "value": "0.00"
       },
@@ -444,16 +444,6 @@
     "calculations": [
       {
         "name": "delta",
-        "unit": "EUR",
-        "value": "25.00"
-      },
-      {
-        "name": "explained",
-        "unit": "EUR",
-        "value": "0.00"
-      },
-      {
-        "name": "unexplained",
         "unit": "EUR",
         "value": "25.00"
       }
@@ -856,9 +846,41 @@
     "snapshot_rows": {}
   },
   "real_bank_batch_debit": {
-    "absence_searches": [],
+    "absence_searches": [
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "A1",
+        "predicate": "payment_reference = PAY_1.reference_number AND transaction_type <> 'bank fee'",
+        "table": "bank_transactions"
+      },
+      {
+        "count": 1,
+        "cutoff": "2026-06-30",
+        "id": "A2",
+        "predicate": "reference_number = PAY_1.reference_number",
+        "table": "payments"
+      },
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "A3",
+        "predicate": "non-fee debit, payment_reference matches no payment, same currency, same amount, counterparty_token = payment.bank_account_id",
+        "table": "bank_transactions"
+      }
+    ],
     "abstention_reason": "bank_batch_grouping_unmodelled",
     "calculations": [
+      {
+        "name": "business_day_age",
+        "unit": "business_days",
+        "value": "21"
+      },
+      {
+        "name": "clearing_limit_ach",
+        "unit": "business_days",
+        "value": "3"
+      },
       {
         "name": "sum_of_payments",
         "unit": "EUR",
@@ -879,6 +901,16 @@
         "id": "PAY_1",
         "role": "payment",
         "table": "payments"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "J_PAY_1",
+        "role": "payment journal (by journal_id)",
+        "table": "gl_entries"
       },
       {
         "id": "PAY_2",
@@ -1001,14 +1033,34 @@
     "absence_searches": [],
     "calculations": [
       {
-        "name": "committed_overpayment_inv_1",
+        "name": "delta",
         "unit": "EUR",
         "value": "0.00"
+      },
+      {
+        "name": "allocated",
+        "unit": "EUR",
+        "value": "450.00"
+      },
+      {
+        "name": "invoice_open_balance",
+        "unit": "EUR",
+        "value": "0.00"
+      },
+      {
+        "name": "business_day_lag",
+        "unit": "business_days",
+        "value": "2"
+      },
+      {
+        "name": "clearing_limit_ach",
+        "unit": "business_days",
+        "value": "3"
       }
     ],
-    "category": null,
-    "contract_section": "2 principle 4; PLAN.md section 4 (distinct payments stay distinct)",
-    "disposition": "out_of_scope",
+    "category": "no_exception",
+    "contract_section": "5.1 no exception; 2 principle 4; PLAN.md section 4 (distinct payments stay distinct)",
+    "disposition": "answered",
     "dropped_by_cutoff": {},
     "evidence": [
       {
@@ -1025,6 +1077,16 @@
         "id": "BT_1",
         "role": "posted debit",
         "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice",
+        "table": "invoices"
       }
     ],
     "family": "realistic_shape",
@@ -1058,16 +1120,6 @@
     "calculations": [
       {
         "name": "delta",
-        "unit": "EUR",
-        "value": "12.50"
-      },
-      {
-        "name": "explained",
-        "unit": "EUR",
-        "value": "0.00"
-      },
-      {
-        "name": "unexplained",
         "unit": "EUR",
         "value": "12.50"
       }
@@ -1106,6 +1158,11 @@
     "absence_searches": [],
     "calculations": [
       {
+        "name": "delta",
+        "unit": "EUR",
+        "value": "0.00"
+      },
+      {
         "name": "allocated",
         "unit": "EUR",
         "value": "400.00"
@@ -1116,14 +1173,19 @@
         "value": "600.00"
       },
       {
-        "name": "delta",
-        "unit": "EUR",
-        "value": "0.00"
+        "name": "business_day_lag",
+        "unit": "business_days",
+        "value": "2"
+      },
+      {
+        "name": "clearing_limit_ach",
+        "unit": "business_days",
+        "value": "3"
       }
     ],
-    "category": null,
-    "contract_section": "4.1 (instalments; no partial-payment variant is defined)",
-    "disposition": "out_of_scope",
+    "category": "no_exception",
+    "contract_section": "5.1 no exception; 4.1 (instalments: a matched partial payment is not an exception)",
+    "disposition": "answered",
     "dropped_by_cutoff": {},
     "evidence": [
       {
@@ -1132,14 +1194,19 @@
         "table": "payments"
       },
       {
-        "id": "INV_1",
-        "role": "invoice",
-        "table": "invoices"
-      },
-      {
         "id": "BT_1",
         "role": "posted debit",
         "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice (open balance remains)",
+        "table": "invoices"
       }
     ],
     "family": "realistic_shape",
@@ -1159,6 +1226,7 @@
   },
   "real_reversal_then_repayment": {
     "absence_searches": [],
+    "abstention_reason": "reversal_followed_by_repayment",
     "calculations": [
       {
         "name": "debit_minus_credit",
@@ -1176,9 +1244,9 @@
         "value": "0.00"
       }
     ],
-    "category": "legitimate_payment_reversal",
-    "contract_section": "5 (payment reversal); PLAN.md section 4 (distinguish reversals from duplicates)",
-    "disposition": "answered",
+    "category": null,
+    "contract_section": "5 (payment reversal); PLAN.md section 4. Known gap: abstain until practitioner input (user decision 2026-11-01)",
+    "disposition": "abstained",
     "dropped_by_cutoff": {},
     "evidence": [
       {
@@ -1202,21 +1270,31 @@
         "table": "gl_entries"
       },
       {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "invoice, paid again",
+        "table": "invoices"
+      },
+      {
         "id": "PAY_2",
         "role": "re-payment",
         "table": "payments"
       },
       {
-        "id": "INV_1",
-        "role": "invoice",
-        "table": "invoices"
+        "id": "PAY_2|INV_1",
+        "role": "allocation of the re-payment",
+        "table": "payment_allocations"
       }
     ],
     "family": "realistic_shape",
     "known_contract_gap": {
       "current_contract_outcome": "the reversal contract requires the allocated invoices not to be `paid`; here INV_1 is paid by PAY_2, so that condition fails and the contract does not confirm the reversal.",
       "gap": "reversal re-payment",
-      "target": "answer the reversal as legitimate; do not change the contract here",
+      "target": "abstain reversal_followed_by_repayment until practitioner input (user decision 2026-11-01); the contract is not changed here",
       "why": "The contract assumes a reversal leaves the invoice open; re-payment after a reversal is the normal next step."
     },
     "must_not": [
@@ -1473,7 +1551,7 @@
     "absence_searches": [],
     "calculations": [
       {
-        "name": "amount_difference",
+        "name": "delta",
         "unit": "EUR",
         "value": "0.00"
       },

@@ -91,15 +91,15 @@ CHECKS: dict[str, tuple[str, str, str, str]] = {
         G,
         "absent_beyond_window",
     ),
-    # Out of scope: the checker must refute F06 and must not confirm a shortfall.
+    # No exception (contract 5.1): matched, in the window, invoice not over-allocated.
     "real_identical_distinct_payments": (
-        "f14",
+        "no_exception",
         "PAY_1",
-        C,
-        "no_amount_difference",
+        G,
+        "matched_no_exception",
     ),
     "real_netted_fee_no_journal": ("f14", "PAY_1", G, "unexplained_shortfall"),
-    "real_partial_payment": ("f14", "PAY_1", C, "no_amount_difference"),
+    "real_partial_payment": ("no_exception", "PAY_1", G, "matched_no_exception"),
     # Documented contract gap: re-payment leaves the invoice paid.
     "real_reversal_then_repayment": ("reversal", "PAY_1", C, "invoice_still_paid"),
     "split_payment": ("split", "INV_1", G, "allocations_equal_invoice"),
@@ -147,7 +147,7 @@ def test_checker_agrees_with_expected_disposition(name: str) -> None:
     if gap is not None:
         # The contract and the expected outcome differ, as documented.
         assert gap["current_contract_outcome"]
-        assert (e["disposition"], status) in {("abstained", G), ("answered", C)}
+        assert (e["disposition"], status) in {("abstained", G), ("abstained", C)}
     elif name == "fx_settlement":
         # Detection only: the checker finds the mismatch; the answer is an abstention.
         assert (e["disposition"], status) == ("abstained", G)

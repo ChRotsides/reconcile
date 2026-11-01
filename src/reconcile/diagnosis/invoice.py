@@ -8,41 +8,24 @@ never `legitimate`.
 """
 
 from dataclasses import dataclass, field
-from decimal import Decimal
-from functools import reduce
 
+from reconcile.diagnosis.ledger import Ledger, is_effective, req, val
+from reconcile.diagnosis.policy import quantum
 from reconcile.domain.contracts import (
-    AbsenceSearch,
-    Calculation,
     Diagnosis,
     Disposition,
-    EvidenceItem,
     EvidencePacket,
     Finding,
     FindingState,
     InvestigationRequest,
-    Operand,
     Recommendation,
-    RecordRef,
 )
 from reconcile.domain.money import Money
 from reconcile.retrieval.invoice import InvoiceFacts
-from reconcile.retrieval.snapshot import Row
 
 F06 = "F06"
 SPLIT = "legitimate_split_payment"
 DUE_DATE = "legitimate_due_date_payment"
-
-
-def _req(row: Row, key: str) -> str:
-    v = row[key]
-    if v is None:
-        raise ValueError(f"{key} is null")
-    return v
-
-
-def _val(row: Row, key: str) -> str:
-    return row[key] or ""
 
 
 @dataclass
@@ -55,116 +38,26 @@ class _Leg:
     done: bool = False  # bank side fully examined
 
 
-class _Ledger:
-    """Collects evidence and calculations for one packet."""
-
-    def __init__(
-        self, request: InvestigationRequest, provenance: tuple[tuple[str, str], ...]
-    ) -> None:
-        self.request = request
-        self.provenance = provenance
-        self.items: dict[str, EvidenceItem] = {}
-        self.calcs: dict[str, Calculation] = {}
-        self.legs: list[_Leg] = []
-
-    def record(
-        self,
-        evidence_id: str,
-        table: str,
-        record_id: str,
-        relationship: str,
-        values: dict[str, str],
-        timestamps: dict[str, str] | None = None,
-    ) -> str:
-        self.items[evidence_id] = EvidenceItem(
-            evidence_id,
-            RecordRef(self.request.snapshot, table, record_id),
-            None,
-            relationship,
-            tuple(values.items()),
-            tuple((timestamps or {}).items()),
-        )
-        return evidence_id
-
-    def search(self, table: str, predicate: str, count: int, relationship: str) -> str:
-        evidence_id = f"search_{len(self.items)}"
-        self.items[evidence_id] = EvidenceItem(
-            evidence_id,
-            None,
-            AbsenceSearch(
-                self.request.snapshot, table, predicate, self.request.cutoff, count
-            ),
-            relationship,
-        )
-        return evidence_id
-
-    def money(self, evidence_id: str, field_name: str) -> Money:
-        return Money.from_str(dict(self.items[evidence_id].values)[field_name])
-
-    def calc(
-        self,
-        calc_id: str,
-        operation: str,
-        cited: list[tuple[str, str]],
-        tolerance: Money | None = None,
-    ) -> Calculation:
-        operands = tuple(Operand(e, f, self.money(e, f)) for e, f in cited)
-        amounts = [o.amount for o in operands]
-        if operation == "sum":
-            result = reduce(lambda a, b: a + b, amounts)
-        else:
-            result = reduce(lambda a, b: a - b, amounts)
-        self.calcs[calc_id] = Calculation(
-            calc_id, operation, operands, result, tolerance
-        )
-        return self.calcs[calc_id]
-
-    def packet(
-        self,
-        diagnosis: Diagnosis,
-        recommendations: tuple[Recommendation, ...] = (),
-        limitations: tuple[str, ...] = (),
-    ) -> EvidencePacket:
-        return EvidencePacket(
-            self.request,
-            diagnosis,
-            tuple(self.items.values()),
-            tuple(self.calcs.values()),
-            recommendations,
-            limitations,
-            self.provenance,
-        )
-
-    def missing_debit_finding(self) -> Finding | None:
-        """Contract 4.1 / principle 5: an effective payment with no posted debit
-        stays visible, with its bounded search, in every packet that touched it."""
-        unproven = [
-            leg
-            for leg in self.legs
-            if leg.effective and leg.done and leg.debit_ev is None
-        ]
-        if not unproven:
-            return None
-        return Finding(
-            "allocating_payment_without_posted_debit",
-            FindingState.SUPPORTED,
-            tuple(e for leg in unproven for e in (leg.pay_ev, *leg.evidence)),
-        )
-
-    def abstain(self, reason: str, missing: str) -> EvidencePacket:
-        finding = self.missing_debit_finding()
-        diagnosis = Diagnosis(
-            Disposition.ABSTAINED,
-            None,
-            findings=(finding,) if finding else (),
-            reason=reason,
-            missing_information=(missing,),
-        )
-        return self.packet(diagnosis)
+def _missing_debit_finding(legs: list[_Leg]) -> Finding | None:
+    """Contract 4.1 / principle 5: an effective payment with no posted debit
+    stays visible, with its bounded search, in every packet that touched it."""
+    unproven = [
+        leg for leg in legs if leg.effective and leg.done and leg.debit_ev is None
+    ]
+    if not unproven:
+        return None
+    return Finding(
+        "allocating_payment_without_posted_debit",
+        FindingState.SUPPORTED,
+        tuple(e for leg in unproven for e in (leg.pay_ev, *leg.evidence)),
+    )
 
 
-def _quantum(currency: str) -> Money:
-    return Money(Decimal((0, (1,), -Money.parse("0", currency).scale)), currency)
+def _abstain(
+    led: Ledger, legs: list[_Leg], reason: str, missing: str
+) -> EvidencePacket:
+    finding = _missing_debit_finding(legs)
+    return led.abstain(reason, missing, (finding,) if finding else ())
 
 
 def diagnose_invoice(
@@ -172,10 +65,10 @@ def diagnose_invoice(
     facts: InvoiceFacts,
     provenance: tuple[tuple[str, str], ...],
 ) -> EvidencePacket:
-    led = _Ledger(request, provenance)
+    led = Ledger(request, provenance)
     inv_tok = request.primary_entity.record_id
-    cur = _req(facts.invoice, "currency")
-    q = _quantum(cur)
+    cur = req(facts.invoice, "currency")
+    q = quantum(cur)
     # No invoice_date or received_date anywhere (leakage-test residual R4).
     # due_date is a contract term of the due-date variant, not an age.
     inv_ev = led.record(
@@ -184,62 +77,48 @@ def diagnose_invoice(
         inv_tok,
         "primary",
         {
-            "invoice_total": str(
-                Money.parse(_req(facts.invoice, "invoice_total"), cur)
-            ),
+            "invoice_total": str(Money.parse(req(facts.invoice, "invoice_total"), cur)),
             "currency": cur,
-            "due_date": _val(facts.invoice, "due_date"),
-            "status": _val(facts.invoice, "status"),
+            "due_date": val(facts.invoice, "due_date"),
+            "status": val(facts.invoice, "status"),
         },
     )
 
     legs: list[_Leg] = []
     for a in facts.allocations:
-        pid = _req(a, "payment_id")
+        pid = req(a, "payment_id")
         pay = facts.payments.get(pid)
         if pay is None:
-            return led.abstain(
+            return _abstain(
+                led,
+                legs,
                 "required_records_missing",
                 "an allocating payment is not in the snapshot at the cutoff",
             )
-        pcur = _req(pay, "payment_currency")
-        effective = (
-            pay["payment_status"] == "completed"
-            and pay["settlement_status"] == "settled"
-        )
-        pay_ev = led.record(
-            f"pay:{pid}",
-            "payments",
-            pid,
-            "allocating_payment",
-            {
-                "payment_amount": str(Money.parse(_req(pay, "payment_amount"), pcur)),
-                "payment_currency": pcur,
-                "payment_method": _val(pay, "payment_method"),
-                "payment_status": _val(pay, "payment_status"),
-                "settlement_status": _val(pay, "settlement_status"),
-            },
-            {"payment_date": _req(pay, "payment_date")},
-        )
+        pcur = req(pay, "payment_currency")
+        effective = is_effective(pay)
+        pay_ev = led.payment(pay, pid, "allocating_payment")
         if pcur != cur:
-            return led.abstain(
-                "unsupported_fx", "a documented conversion path between currencies"
+            return _abstain(
+                led,
+                legs,
+                "unsupported_fx",
+                "a documented conversion path between currencies",
             )
         alloc_ev = led.record(
             f"alloc:{pid}.{inv_tok}",
             "payment_allocations",
             f"{pid}|{inv_tok}",
             "allocation_of_invoice",
-            {"allocated_amount": str(Money.parse(_req(a, "allocated_amount"), pcur))},
-            {"allocation_date": _req(a, "allocation_date")},
+            {"allocated_amount": str(Money.parse(req(a, "allocated_amount"), pcur))},
+            {"allocation_date": req(a, "allocation_date")},
         )
         leg = _Leg(pay_ev, alloc_ev, effective)
         legs.append(leg)
-        led.legs.append(leg)
         if not effective:
             continue
 
-        ref = _req(pay, "reference_number")
+        ref = req(pay, "reference_number")
         if facts.reference_counts[ref] > 1:
             led.search(
                 "payments",
@@ -247,38 +126,33 @@ def diagnose_invoice(
                 facts.reference_counts[ref],
                 "reference_uniqueness",
             )
-            return led.abstain(
-                "ambiguous_reference", "a payment reference unique to one payment"
+            return _abstain(
+                led,
+                legs,
+                "ambiguous_reference",
+                "a payment reference unique to one payment",
             )
         rows = facts.bank_rows[ref]
         debits: list[str] = []
         for r in rows:
-            bid = _req(r, "bank_transaction_id")
-            bcur = _req(r, "currency")
-            b_ev = led.record(
-                f"bank:{bid}",
-                "bank_transactions",
-                bid,
-                "payment_reference",
-                {
-                    "amount": str(Money.parse(_req(r, "amount"), bcur)),
-                    "currency": bcur,
-                    "direction": _val(r, "direction"),
-                    "status": _val(r, "status"),
-                    "transaction_type": _val(r, "transaction_type"),
-                },
-                {"posted_date": _req(r, "posted_date")},
-            )
+            bcur = req(r, "currency")
+            b_ev = led.bank_row(r, "payment_reference")
             leg.evidence.append(b_ev)
             if bcur != cur:
-                return led.abstain(
-                    "unsupported_fx", "a documented conversion path between currencies"
+                return _abstain(
+                    led,
+                    legs,
+                    "unsupported_fx",
+                    "a documented conversion path between currencies",
                 )
             if r["direction"] == "debit" and r["status"] == "posted":
                 debits.append(b_ev)
         if len(debits) > 1:
-            return led.abstain(
-                "ambiguous_reference", "which one bank debit settles the payment"
+            return _abstain(
+                led,
+                legs,
+                "ambiguous_reference",
+                "which one bank debit settles the payment",
             )
         if not debits:
             # Bounded search for the missing counterpart, also when only
@@ -331,7 +205,9 @@ def diagnose_invoice(
             )
             if -overpaid.result.amount > q.amount:
                 return _f06(led, live, committed_legs)
-        return led.abstain(
+        return _abstain(
+            led,
+            legs,
             "commitment_not_proven_at_cutoff",
             "a posted bank debit for each over-allocating payment at the cutoff",
         )
@@ -341,7 +217,7 @@ def diagnose_invoice(
     # invoice is a partial payment, which no variant covers.
     fully_allocated = abs(total_minus_allocated.result).amount <= q.amount
     is_split = fully_allocated and len(live) >= 2
-    due = _val(facts.invoice, "due_date")
+    due = val(facts.invoice, "due_date")
     on_due = [
         leg
         for leg in live
@@ -352,8 +228,11 @@ def diagnose_invoice(
         return _out_of_scope(led, "no in-scope invoice pattern applies")
 
     if any(leg.debit_ev is None for leg in live):
-        return led.abstain(
-            "required_records_missing", "a posted bank debit for each payment"
+        return _abstain(
+            led,
+            legs,
+            "required_records_missing",
+            "a posted bank debit for each payment",
         )
     debit_calcs: list[str] = []
     for leg in live:
@@ -366,8 +245,11 @@ def diagnose_invoice(
             q,
         )
         if abs(diff.result).amount > q.amount:
-            return led.abstain(
-                "debit_differs_from_payment", "an explanation of the debit difference"
+            return _abstain(
+                led,
+                legs,
+                "debit_differs_from_payment",
+                "an explanation of the debit difference",
             )
         debit_calcs.append(diff.calculation_id)
     debit_ev = [e for leg in live for e in (leg.pay_ev, leg.debit_ev) if e]
@@ -405,7 +287,7 @@ def diagnose_invoice(
     )
 
 
-def _f06(led: _Ledger, live: list[_Leg], committed: list[_Leg]) -> EvidencePacket:
+def _f06(led: Ledger, live: list[_Leg], committed: list[_Leg]) -> EvidencePacket:
     cited = tuple(led.items)
     findings = [
         Finding(
@@ -415,7 +297,7 @@ def _f06(led: _Ledger, live: list[_Leg], committed: list[_Leg]) -> EvidencePacke
             ("allocated", "committed", "invoice_total_minus_committed"),
         )
     ]
-    unproven = led.missing_debit_finding()
+    unproven = _missing_debit_finding(live)
     if unproven:  # contract 4.1: its own finding, not counted as committed
         findings.append(unproven)
     diagnosis = Diagnosis(
@@ -442,7 +324,7 @@ def _f06(led: _Ledger, live: list[_Leg], committed: list[_Leg]) -> EvidencePacke
     )
 
 
-def _out_of_scope(led: _Ledger, why: str) -> EvidencePacket:
+def _out_of_scope(led: Ledger, why: str) -> EvidencePacket:
     diagnosis = Diagnosis(Disposition.OUT_OF_SCOPE, None, reason="no_in_scope_pattern")
     return led.packet(
         diagnosis,

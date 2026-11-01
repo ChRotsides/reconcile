@@ -38,6 +38,7 @@ NAMESPACE = {
     "invoices": "invoice",
     "payments": "payment",
     "bank_transactions": "bank_txn",
+    "gl_entries": "journal",
 }
 # expected.json name -> (our calculation id, sign): our difference operations
 # compute "invoice total minus X", the contract's overpayment is "X minus total".
@@ -45,6 +46,7 @@ ALIASES = {
     "committed_overpayment": ("invoice_total_minus_committed", -1),
     "allocated_minus_invoice_total": ("invoice_total_minus_allocated", -1),
 }
+ALL_SCENARIOS = sorted(EXPECTED)
 INVOICE_SCENARIOS = [
     n for n, e in EXPECTED.items() if e["primary_entity"]["table"] == "invoices"
 ]
@@ -117,19 +119,15 @@ def run(prepared: dict[str, Prepared], name: str, **kw: Any) -> EvidencePacket:
     return investigate(p.snapshot, p.request(e["table"], e["id"]), **kw)
 
 
-def test_scenario_lists_cover_expected() -> None:
-    assert len(TABLES) and sorted(INVOICE_SCENARIOS) == [
-        "due_date_payment",
-        "f06_double_payment",
-        "f06_second_debit_post_cutoff",
-        "split_payment",
-    ]
+def test_every_fixture_scenario_is_run() -> None:
+    assert len(TABLES) and ALL_SCENARIOS == sorted(
+        p.name for p in FIXTURES.iterdir() if p.is_dir()
+    )
+    assert len(INVOICE_SCENARIOS) == 4
 
 
-@pytest.mark.parametrize("name", INVOICE_SCENARIOS)
-def test_invoice_scenario_matches_expected(
-    prepared: dict[str, Prepared], name: str
-) -> None:
+@pytest.mark.parametrize("name", ALL_SCENARIOS)
+def test_scenario_matches_expected(prepared: dict[str, Prepared], name: str) -> None:
     exp, p = EXPECTED[name], prepared[name]
     packet = run(prepared, name)
     d = packet.diagnosis
@@ -148,34 +146,42 @@ def test_invoice_scenario_matches_expected(
     )
     assert searches == sorted((s["table"], s["count"]) for s in exp["absence_searches"])
 
-    # Calculations: every expected value is present, exact, in our sign convention.
     by_id = {c.calculation_id: c for c in packet.calculations}
+    counts = {c.calculation_id: c for c in packet.day_counts}
     for c in exp["calculations"]:
-        if c["unit"] == "days":  # business/calendar days are not a Calculation yet
-            assert c["name"] == "payment_date_minus_due_date"
+        name_ = c["name"]
+        if c["unit"] == "days":  # a calendar-day gap is a finding, not a calculation
+            assert name_ == "payment_date_minus_due_date"
             assert "payment_on_due_date" in {f.check_id for f in d.findings}
-            continue
-        cid, sign = ALIASES.get(c["name"], (c["name"], 1))
-        want = Money.parse(c["value"], c["unit"])
-        # per-payment calculations are named "<name>:<payment token>"
-        got = [r.result for k, r in by_id.items() if k.split(":")[0] == cid]
-        assert got, c["name"]
-        assert all((g if sign == 1 else -g) == want for g in got), c["name"]
+        elif c["unit"] == "business_days" and name_.startswith("clearing_limit_"):
+            assert any(
+                x.limit_policy == name_ and x.limit == int(c["value"])
+                for x in counts.values()
+            ), name_
+        elif c["unit"] == "business_days":
+            assert counts[name_].result == int(c["value"]), name_
+        else:
+            # Money: our difference operations are "total minus X"; a per-item
+            # calculation is named "<name>:<token>".
+            cid, sign = ALIASES.get(name_, (name_, 1))
+            want = Money.parse(c["value"], c["unit"])
+            got = [r.result for k, r in by_id.items() if k.split(":")[0] == cid]
+            assert got, name_
+            assert all((g if sign == 1 else -g) == want for g in got), name_
 
 
-@pytest.mark.parametrize("name", INVOICE_SCENARIOS)
+@pytest.mark.parametrize("name", ALL_SCENARIOS)
 def test_calculations_are_backed_by_cited_evidence(
     prepared: dict[str, Prepared], name: str
 ) -> None:
     packet = run(prepared, name)
     items = {e.evidence_id: dict(e.values) for e in packet.evidence}
-    assert packet.calculations
     for c in packet.calculations:
         for op in c.operands:
             assert items[op.evidence_id][op.field] == str(op.amount)
 
 
-@pytest.mark.parametrize("name", INVOICE_SCENARIOS)
+@pytest.mark.parametrize("name", ALL_SCENARIOS)
 def test_packet_round_trips_json(prepared: dict[str, Prepared], name: str) -> None:
     packet = run(prepared, name)
     assert EvidencePacket.from_json(packet.to_json()) == packet
@@ -189,22 +195,21 @@ def test_missing_primary_entity_abstains(prepared: dict[str, Prepared]) -> None:
     assert packet.evidence == () and packet.calculations == ()
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        n
-        for n, e in EXPECTED.items()
-        if e["primary_entity"]["table"] != "invoices"
-        and e.get("abstention_reason") != "primary_entity_not_in_snapshot"
-    ],
-)
-def test_non_invoice_primary_is_out_of_scope(
-    prepared: dict[str, Prepared], name: str
-) -> None:
-    packet = run(prepared, name)
+def test_journal_primary_is_out_of_scope(prepared: dict[str, Prepared]) -> None:
+    p = prepared["f12_payment_missing_from_bank"]
+    packet = investigate(p.snapshot, p.request("gl_entries", "J_PAY_1"))
     assert packet.diagnosis.disposition is Disposition.OUT_OF_SCOPE
     assert packet.diagnosis.reason == "entity_type_not_supported_yet"
     assert packet.diagnosis.category is None and packet.evidence == ()
+
+
+def test_non_fee_bank_row_primary_is_out_of_scope(
+    prepared: dict[str, Prepared],
+) -> None:
+    p = prepared["accounted_bank_fee"]
+    packet = investigate(p.snapshot, p.request("bank_transactions", "BT_1"))
+    assert packet.diagnosis.disposition is Disposition.OUT_OF_SCOPE
+    assert packet.diagnosis.reason == "bank_row_type_not_supported_yet"
 
 
 def test_partial_payment_on_invoice_is_out_of_scope(
@@ -420,3 +425,301 @@ def test_missing_manifest_fails_explicitly(
     (copy.parent / "manifest.json").unlink()
     packet = investigate(copy, p.request("invoices", "INV_1"))
     assert packet.diagnosis.reason == "snapshot_manifest_unreadable"
+
+
+# --- payment- and bank-row-primary rules -------------------------------------
+
+
+def payment_packet(
+    p: Prepared, tmp_path: Path, *sql: str, raw: str = "PAY_1", **kw: Any
+) -> EvidencePacket:
+    copy = clone(p, tmp_path, *sql)
+    return investigate(copy, p.request("payments", raw), **kw)
+
+
+def reason(packet: EvidencePacket) -> tuple[str, str | None]:
+    return packet.diagnosis.disposition.value, (
+        packet.diagnosis.category or packet.diagnosis.reason
+    )
+
+
+@pytest.mark.parametrize(
+    ("payment_date", "outcome"),
+    [
+        ("2026-06-25", ("answered", "legitimate_pending_settlement")),  # age 3 = limit
+        ("2026-06-24", ("answered", "F12")),  # age 4 > limit
+    ],
+)
+def test_f12_age_versus_limit_boundary(
+    prepared: dict[str, Prepared], tmp_path: Path, payment_date: str, outcome: Any
+) -> None:
+    p = prepared["f12_payment_missing_from_bank"]
+    packet = payment_packet(
+        p, tmp_path, f"UPDATE payments SET payment_date = '{payment_date}'"
+    )
+    assert reason(packet) == outcome
+    (count,) = packet.day_counts
+    assert count.limit == 3 and count.limit_policy == "clearing_limit_ach"
+
+
+def test_a3_candidate_blocks_f12(prepared: dict[str, Prepared], tmp_path: Path) -> None:
+    p = prepared["f12_payment_missing_from_bank"]
+    pay = p.token("payments", "PAY_1")
+    acct = "(SELECT bank_account_id FROM payments WHERE payment_id = '" + pay + "')"
+    packet = payment_packet(
+        p,
+        tmp_path,
+        "INSERT INTO bank_transactions VALUES ('b9', " + acct + ", 'other_ref',"
+        " 'ACC', '2026-05-06', '2026-05-06', 'ACH debit', '500.00', 'EUR',"
+        " 'debit', 'posted')",
+    )
+    assert reason(packet) == ("abstained", "reference_unmatched_candidate_bank_row")
+    a3 = [e.search for e in packet.evidence if e.relationship == "a3"]
+    assert [x.observed_count for x in a3 if x] == [1]
+
+
+@pytest.mark.parametrize(
+    ("fee_lines", "outcome"),
+    [
+        ([("10.00", "10.00")], ("abstained", "fee_journal_does_not_match_difference")),
+        ([("30.00", "30.00")], ("abstained", "fee_journal_does_not_match_difference")),
+        ([("25.00", "20.00")], ("abstained", "fee_journal_invalid")),
+        ([("25.00", "25.00")], ("answered", "legitimate_net_fee_accounting")),
+        ([("24.99", "24.99")], ("answered", "legitimate_net_fee_accounting")),
+        ([("24.98", "24.98")], ("abstained", "fee_journal_does_not_match_difference")),
+    ],
+)
+def test_f14_fee_journal_rules(
+    prepared: dict[str, Prepared],
+    tmp_path: Path,
+    fee_lines: list[tuple[str, str]],
+    outcome: Any,
+) -> None:
+    """Delta is 25.00. Partial or oversized journals are not gradable; so is an
+    unbalanced one; only a journal within one minor unit explains the shortfall."""
+    p = prepared["f14_amount_shortfall"]
+    bt = p.token("bank_transactions", "BT_1")
+    sql = []
+    for n, (debit, credit) in enumerate(fee_lines):
+        sql.append(
+            f"INSERT INTO gl_entries VALUES ('jf{n}', 'jf{n}a', '{bt}', 'bank_fee',"
+            f" '2026-06-03', '2026-06', '650000', '{debit}', '0.00', 'EUR')"
+        )
+        sql.append(
+            f"INSERT INTO gl_entries VALUES ('jf{n}', 'jf{n}b', '{bt}', 'bank_fee',"
+            f" '2026-06-03', '2026-06', '100000', '0.00', '{credit}', 'EUR')"
+        )
+    assert reason(payment_packet(p, tmp_path, *sql)) == outcome
+
+
+def test_bank_amount_above_payment_abstains(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    p = prepared["f14_amount_shortfall"]
+    packet = payment_packet(
+        p, tmp_path, "UPDATE bank_transactions SET amount = '1010.00'"
+    )
+    assert reason(packet) == ("abstained", "bank_amount_above_payment")
+
+
+def test_returned_row_is_not_a_posted_debit(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    p = prepared["f14_amount_shortfall"]
+    packet = payment_packet(
+        p, tmp_path, "UPDATE bank_transactions SET status = 'returned'"
+    )
+    assert reason(packet) == ("abstained", "bank_row_not_a_posted_debit")
+
+
+def test_two_posted_debits_are_ambiguous(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    p = prepared["weekend_clearing"]
+    packet = payment_packet(
+        p,
+        tmp_path,
+        "INSERT INTO bank_transactions SELECT 'b2', counterparty_token,"
+        " payment_reference, bank_account_id, transaction_date, posted_date,"
+        " transaction_type, amount, currency, direction, status FROM bank_transactions",
+    )
+    assert reason(packet) == ("abstained", "ambiguous_reference")
+
+
+@pytest.mark.parametrize(
+    ("posted", "outcome"),
+    [
+        ("2026-06-10", ("answered", "legitimate_weekend_clearing")),  # lag 3
+        ("2026-06-11", ("abstained", "clearing_lag_exceeds_limit")),  # lag 4
+    ],
+)
+def test_clearing_lag_boundary(
+    prepared: dict[str, Prepared], tmp_path: Path, posted: str, outcome: Any
+) -> None:
+    p = prepared["weekend_clearing"]
+    packet = payment_packet(
+        p, tmp_path, f"UPDATE bank_transactions SET posted_date = '{posted}'"
+    )
+    assert reason(packet) == outcome
+
+
+def test_same_day_ach_is_no_exception_not_a_named_variant(
+    prepared: dict[str, Prepared],
+) -> None:
+    packet = run(prepared, "real_partial_payment")
+    assert reason(packet) == ("answered", "no_exception")
+    assert packet.limitations and "not a general clean bill" in packet.limitations[0]
+
+
+def test_twin_on_the_same_invoice_is_not_a_clean_bill(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    """Equal twins stay distinct; two on one invoice over-allocate it."""
+    p = prepared["real_identical_distinct_payments"]
+    inv1 = p.token("invoices", "INV_1")
+    packet = payment_packet(
+        p,
+        tmp_path,
+        f"UPDATE payment_allocations SET invoice_id = '{inv1}'",
+    )
+    assert reason(packet) == ("abstained", "invoice_over_allocated")
+
+
+def test_batch_with_unequal_allocations_abstains(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    p = prepared["batch_payment"]
+    packet = payment_packet(
+        p,
+        tmp_path,
+        "UPDATE payment_allocations SET allocated_amount = '1.00'"
+        " WHERE allocated_amount = '1000.00'",
+    )
+    assert reason(packet) == ("abstained", "allocations_differ_from_payment")
+
+
+def test_reversed_invoice_still_paid_without_repayment_abstains(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    p = prepared["payment_reversal"]
+    packet = payment_packet(p, tmp_path, "UPDATE invoices SET status = 'paid'")
+    assert reason(packet) == ("abstained", "reversal_invoice_still_paid")
+
+
+def test_reversal_credit_before_debit_abstains(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    p = prepared["payment_reversal"]
+    packet = payment_packet(
+        p,
+        tmp_path,
+        "UPDATE bank_transactions SET posted_date = '2026-06-01'"
+        " WHERE transaction_type = 'payment reversal'",
+    )
+    assert reason(packet) == ("abstained", "reversal_credit_before_debit")
+
+
+def test_fee_journal_amount_mismatch_abstains(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    p = prepared["accounted_bank_fee"]
+    copy = clone(
+        p,
+        tmp_path,
+        "UPDATE gl_entries SET debit = '14.00' WHERE debit = '15.00'",
+        "UPDATE gl_entries SET credit = '14.00' WHERE credit = '15.00'",
+    )
+    packet = investigate(copy, p.request("bank_transactions", "BT_2"))
+    assert reason(packet) == ("abstained", "fee_journal_amount_differs")
+
+
+def test_fee_without_journal_abstains(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    p = prepared["accounted_bank_fee"]
+    copy = clone(p, tmp_path, "DELETE FROM gl_entries")
+    packet = investigate(copy, p.request("bank_transactions", "BT_2"))
+    assert reason(packet) == ("abstained", "accounted_fee_journal_missing")
+
+
+def test_non_effective_unknown_status_is_out_of_scope(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    p = prepared["f12_payment_missing_from_bank"]
+    packet = payment_packet(
+        p, tmp_path, "UPDATE payments SET payment_status = 'failed'"
+    )
+    assert reason(packet) == ("out_of_scope", "no_in_scope_pattern")
+
+
+def test_old_pending_payment_abstains(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    p = prepared["f12_payment_missing_from_bank"]
+    packet = payment_packet(
+        p, tmp_path, "UPDATE payments SET settlement_status = 'pending'"
+    )
+    assert reason(packet) == ("abstained", "pending_payment_beyond_clearing_limit")
+
+
+def test_batch_search_over_limit_abstains(
+    prepared: dict[str, Prepared], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reconcile.diagnosis import payment as payment_rules
+
+    monkeypatch.setattr(payment_rules, "MAX_BATCH_CANDIDATES", 1)
+    packet = run_clone(prepared["real_bank_batch_debit"], tmp_path)
+    assert reason(packet) == ("abstained", "batch_search_limit_exceeded")
+
+
+def run_clone(p: Prepared, tmp_path: Path) -> EvidencePacket:
+    return payment_packet(p, tmp_path)
+
+
+def test_policy_is_declared_in_every_packet(prepared: dict[str, Prepared]) -> None:
+    prov = dict(run(prepared, "weekend_clearing").provenance)
+    assert prov["policy_version"] == "evidence-contract-0.1"
+    assert [
+        prov[f"clearing_limit_{m}"] for m in ("ach", "wire", "check", "virtual_card")
+    ] == [
+        "3",
+        "1",
+        "10",
+        "2",
+    ]
+    assert prov["tolerance"] == "one_minor_unit"
+    assert prov["requested_policy_version"] == "policy_test"
+
+
+def test_payment_investigation_ignores_invoice_dates(
+    prepared: dict[str, Prepared], tmp_path: Path
+) -> None:
+    """Residual R4 for payment-primary requests: invoice dates change nothing."""
+    p = prepared["real_partial_payment"]
+    copy = clone(
+        p,
+        tmp_path,
+        "UPDATE invoices SET invoice_date = '2001-01-01', received_date = '2001-01-02'",
+    )
+    request = p.request("payments", "PAY_1")
+    assert investigate(copy, request) == investigate(p.snapshot, request)
+
+
+def test_every_select_avoids_invoice_dates() -> None:
+    modules = [
+        "retrieval/invoice.py",
+        "retrieval/payment.py",
+        "diagnosis/invoice.py",
+        "diagnosis/payment.py",
+        "diagnosis/settled.py",
+    ]
+    sql = [
+        node.value
+        for module in modules
+        for node in ast.walk(ast.parse((ROOT / "src/reconcile" / module).read_text()))
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and "SELECT" in node.value
+    ]
+    assert len(sql) >= 15
+    assert not any("invoice_date" in q or "received_date" in q for q in sql)

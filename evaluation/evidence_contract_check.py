@@ -535,6 +535,49 @@ def check_batch(s: Snapshot, pid: str) -> Result:
     return ok("allocations_equal_payment_and_bank", ids)
 
 
+def check_no_exception(s: Snapshot, pid: str) -> Result:
+    """Contract section 5.1: a matched payment. Not routed from any upstream
+    label (the benchmark has no such class), so the development output is
+    unaffected; the fixtures exercise it."""
+    p = s.payments.get(pid)
+    if p is None:
+        return ng("payment_missing")
+    b = single_bank(s, p)
+    if isinstance(b, Result):
+        return b
+    ids = {pid, b["bank_transaction_id"]}
+    if not effective(p):
+        return bad("payment_not_completed_settled", ids)
+    if b["currency"] != p["payment_currency"]:
+        return cross_currency(ids)
+    if abs(money(b["amount"]) - money(p["payment_amount"])) > quantum(b["currency"]):
+        return bad("amount_differs", ids)
+    limit = CLEARING_BDAYS.get(p["payment_method"])
+    if limit is None:
+        return ng("undeclared_payment_method", ids)
+    lag = bdays(
+        date.fromisoformat(p["payment_date"]), date.fromisoformat(b["posted_date"])
+    )
+    if lag > limit:
+        return bad("beyond_clearing_window", ids)
+    allocs = s.alloc_by_pay.get(pid, [])
+    if not allocs:
+        return ng("no_allocation", ids)
+    for a in allocs:
+        inv = s.invoices.get(a["invoice_id"])
+        if inv is None:
+            return ng("invoice_missing", ids)
+        if inv["currency"] != p["payment_currency"]:
+            return cross_currency(ids)
+        paid = sum(
+            (money(x["allocated_amount"]) for x in s.alloc_by_inv[a["invoice_id"]]),
+            Decimal(0),
+        )
+        if paid - money(inv["invoice_total"]) > quantum(inv["currency"]):
+            return bad("invoice_overpaid", ids)
+    return ok("matched_no_exception", ids)
+
+
 def check_reversal(s: Snapshot, pid: str) -> Result:
     p = s.payments.get(pid)
     if p is None:

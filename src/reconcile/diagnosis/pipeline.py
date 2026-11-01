@@ -9,6 +9,8 @@ import sqlite3
 from pathlib import Path
 
 from reconcile.diagnosis.invoice import diagnose_invoice
+from reconcile.diagnosis.payment import diagnose_bank_row, diagnose_payment
+from reconcile.diagnosis.policy import declared
 from reconcile.domain.contracts import (
     Diagnosis,
     Disposition,
@@ -19,7 +21,7 @@ from reconcile.retrieval.invoice import gather_invoice
 from reconcile.retrieval.snapshot import HOPS, Limits, Reader, RetrievalIncomplete
 
 MANIFEST_FILE = "manifest.json"  # written beside the snapshot by preparation
-INVESTIGATOR = "invoice_primary_v1"
+INVESTIGATOR = "deterministic_v2"
 DEFAULT_LIMITS = Limits()
 # Tables whose primary-key column is known, to tell "absent" from "unsupported".
 KEY_COLUMNS = {
@@ -74,6 +76,8 @@ def investigate(
         ("max_hops", str(HOPS)),
         ("max_rows", str(limits.max_rows)),
         ("max_seconds", str(limits.max_seconds)),
+        ("requested_policy_version", request.policy_version),
+        *declared(),
     )
     entity = request.primary_entity
     try:
@@ -90,18 +94,24 @@ def investigate(
                     "primary_entity_not_in_snapshot",
                     ("the primary record, absent from the snapshot at the cutoff",),
                 )
-            if entity.table != "invoices":
+            if entity.table == "payments":
+                packet = diagnose_payment(request, reader, prov)
+            elif entity.table == "bank_transactions":
+                packet = diagnose_bank_row(request, reader, prov)
+            elif entity.table == "invoices":
+                facts = gather_invoice(reader, entity.record_id, request.cutoff)
+                packet = diagnose_invoice(request, facts, prov)
+            else:
                 return _packet(
                     request,
                     prov,
                     Disposition.OUT_OF_SCOPE,
                     "entity_type_not_supported_yet",
                     limitations=(
-                        "This investigator handles invoice-primary requests only.",
+                        "This investigator handles invoice, payment and "
+                        "bank-transaction requests only.",
                     ),
                 )
-            facts = gather_invoice(reader, entity.record_id, request.cutoff)
-            packet = diagnose_invoice(request, facts, prov)
             if packet.diagnosis.disposition is Disposition.ANSWERED:
                 reader.check_time()  # the budget covers diagnosis too
             return packet

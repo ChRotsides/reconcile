@@ -44,14 +44,14 @@ Section numbers refer to `docs/evidence-contract.md`. Clearing days use Monday t
 
 | Directory | Tests | Rule |
 |---|---|---|
-| `real_identical_distinct_payments` | Two payments with the same amount, date and vendor, on two invoices, each with its own debit. Both must survive preparation; no duplicate finding. Disposition `out_of_scope` (no in-scope class applies) | 2 principle 4 |
-| `real_bank_batch_debit` | One 1500.00 debit settles three payments (400, 600, 500) and carries a reference no payment has. **Current contract answers F12 for all three, wrongly**, because it has no batch concept. Target: abstain | `docs/input-mapping.md` G2 |
+| `real_identical_distinct_payments` | Two payments with the same amount, date and vendor, on two invoices, each with its own debit. Both must survive preparation; no duplicate finding. Answered `no_exception` with the twin cited and kept distinct | 5.1; 2 principle 4 |
+| `real_bank_batch_debit` | One 1500.00 debit settles three payments (400, 600, 500) and carries a reference no payment has. **Current contract answers F12 for all three, wrongly**, because it has no batch concept. Target: abstain `bank_batch_grouping_unmodelled` | `docs/input-mapping.md` G2 |
 | `real_truncated_bank_reference` | Payment reference `VENDOR-PAY-2026-0001`; the bank row carries only its first 16 characters (as MT940 :61: does), so exact matching fails. A1 is empty, but A3 finds the debit (same amount, currency, counterparty), so the **current contract is not gradable, which is the right answer**; no contract gap. Target: abstain `reference_unmatched_candidate_bank_row`. A wrong answer is F12 | 4.2 A3; `docs/export-formats.md` 3.3; G1 |
 | `real_truncated_reference_netted_fee` | The truncated reference of the case above plus a debit 12.50 below the payment and no fee journal. A3 requires an equal amount, so it finds no candidate. **Current contract answers F12 wrongly** (false positive: the debit exists). Target: abstain `reference_unmatched_nearby_debit` | 4.2 A3; G1, G4 |
 | `real_free_text_reference` | Bank reference is free text containing the payment reference (`PAYMENT REF_1 INV 123`). Same shape and outcome as the truncated case. The contract would answer F12 wrongly only if the debit amount also differed (A3 empty); not exercised | 4.2 A3; G1 |
-| `real_partial_payment` | Invoice 1000.00 (status `approved`, see below) paid 400.00, debit 400.00. Not F06, not F14, not a missing settlement. Disposition `out_of_scope` | 4.1 (instalments; no partial variant exists) |
+| `real_partial_payment` | Invoice 1000.00 (status `approved`, see below) paid 400.00, debit 400.00. Not F06, not F14, not a missing settlement. Answered `no_exception` (open balance 600.00 reported) | 5.1; 4.1 |
 | `real_netted_fee_no_journal` | Debit 12.50 below the payment and no fee journal for it; a fee journal for another payment's debit must not explain it. F14 "unexplained shortfall"; the fee is unobservable and must not be asserted | 4.3 |
-| `real_reversal_then_repayment` | Reversed payment (debit, credit, journal), then a second payment settles the same invoice. Not a duplicate. **The reversal contract requires the invoice not to be `paid`, so the current contract does not confirm it** | 5 reversal; 4.1 |
+| `real_reversal_then_repayment` | Reversed payment (debit, credit, journal), then a second payment settles the same invoice. Not a duplicate. **The reversal contract requires the invoice not to be `paid`, so the current contract does not confirm it.** Target (user decision, 2026-11-01): abstain `reversal_followed_by_repayment` until practitioner input | 5 reversal; 4.1 |
 
 ## Deferred (no scenario yet)
 
@@ -70,4 +70,5 @@ Truncated and free-text references are covered above, because the adapter hashes
 
 - Payment method and clearing status come from fixed FinRCA columns (G3, G7); real exports lack them.
 - Expected `quality_gaps` are facts of the snapshot, not diagnoses; an F12 payment and a pending one differ only in `effective_payment_without_bank_row`.
-- `out_of_scope` for the two no-exception shapes is this fixture set's reading of the dispositions in `PLAN.md` section 4; the contract does not define an outcome for them.
+- The two no-exception shapes were `out_of_scope` at M1 (assumption A041). After the M1 gate the user decided they are answered `no_exception` (contract section 5.1); the three known-gap shapes abstain (section 5.2).
+- Expected values for calculations named in `business_days` are day counts (section 5.3). `clearing_limit_*` entries are the declared limit carried by the count, not a separate calculation.

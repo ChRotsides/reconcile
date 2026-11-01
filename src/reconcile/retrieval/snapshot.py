@@ -4,7 +4,9 @@ Limits (PLAN.md section 4: truncation and budget exhaustion are incomplete
 evidence, never a silent partial answer):
 
 * hops: at most `HOPS` relationship steps away from the primary entity
-  (invoice -> allocations -> payments -> bank rows);
+  (invoice -> allocations -> payments -> bank rows; payment -> bank rows,
+  journals, allocations -> invoices -> their other allocations; bank row ->
+  payment -> journals);
 * rows: no query may return more than `Limits.max_rows` rows;
 * time: the whole investigation may use `Limits.max_seconds` of wall time.
 
