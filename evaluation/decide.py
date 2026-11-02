@@ -9,11 +9,15 @@ versus one baseline configuration, headline view). The claim holds only if the
 primary and false-alarm checks pass against EVERY configuration. Each
 comparison carries its configuration, split and input digests; decide refuses
 mismatches. The verdict is a "rehearsal" unless the split is the protocol's
-sealed split. A check whose interval does not exist (too few clusters, empty
+sealed split; in release mode every investigator hard gate must also be true
+(in rehearsal the gates are reported, the verdict is unchanged), the comparisons
+must carry identical investigator provenance, and that provenance must name this
+protocol file's sha256. A check whose interval does not exist (too few clusters, empty
 population) is "not_established", never "pass".
 """
 
 import argparse
+import hashlib
 import json
 import sys
 import tomllib
@@ -24,11 +28,26 @@ from typing import Any
 # configurations from here (tests/unit/test_protocol.py).
 KNOWN_CONFIGURATIONS = ("answer_all", "threshold_0.85")
 
+# Investigator hard gates (metrics.json "hard_gates"). In release mode every one
+# must be true for the claim to hold; in rehearsal they are reported only.
+HARD_GATES = (
+    "absence_check_passed",
+    "rerun_identical_same_image",
+    "all_answered_packets_well_formed",
+    "all_citations_resolve",
+    "all_calculations_exact",
+    "all_day_counts_exact",
+)
+
 Check = dict[str, Any]
 EMPTY = "empty population (zero denominator)"
 
 
-def _validate(protocol: dict[str, Any], comparisons: dict[str, dict[str, Any]]) -> None:
+def _validate(
+    protocol: dict[str, Any],
+    comparisons: dict[str, dict[str, Any]],
+    protocol_sha256: str,
+) -> None:
     expected = set(protocol["systems"]["baseline_configurations"])
     unknown = expected - set(KNOWN_CONFIGURATIONS)
     if unknown:
@@ -59,6 +78,19 @@ def _validate(protocol: dict[str, Any], comparisons: dict[str, dict[str, Any]]) 
     b_digests = [c["b_sha256"] for c in comparisons.values()]
     if len(set(b_digests)) != len(b_digests):
         raise ValueError("two configurations share one baseline file (b_sha256)")
+    for name, comp in comparisons.items():
+        prov = comp.get("investigator_provenance")
+        if not isinstance(prov, dict):
+            raise ValueError(f"{name}: comparison has no investigator_provenance")
+        if prov.get("protocol_sha256") != protocol_sha256:
+            raise ValueError(
+                f"{name}: investigator run used protocol sha256"
+                f" {prov.get('protocol_sha256')!r}, this protocol file is"
+                f" {protocol_sha256!r}"
+            )
+    provs = [c["investigator_provenance"] for c in comparisons.values()]
+    if any(p != provs[0] for p in provs):
+        raise ValueError("comparisons carry different investigator_provenance")
     stats = protocol["statistics"]
     want = {
         "method": stats["method"],
@@ -136,10 +168,29 @@ def _false_alarm(rule: dict[str, Any], comp: dict[str, Any]) -> Check:
     return check | {"status": "pass", "reason": None}
 
 
+def _gates(comparisons: dict[str, dict[str, Any]]) -> dict[str, bool | None]:
+    """Gate name -> True/False, None when missing or not a bool. A gate is true
+    only if every comparison says so."""
+    out: dict[str, bool | None] = {}
+    for g in HARD_GATES:
+        vals = [
+            (c.get("investigator_hard_gates") or {}).get(g)
+            for c in comparisons.values()
+        ]
+        out[g] = (
+            True
+            if all(v is True for v in vals)
+            else (False if any(v is False for v in vals) else None)
+        )
+    return out
+
+
 def decide(
-    protocol: dict[str, Any], comparisons: dict[str, dict[str, Any]]
+    protocol: dict[str, Any],
+    comparisons: dict[str, dict[str, Any]],
+    protocol_sha256: str,
 ) -> dict[str, Any]:
-    _validate(protocol, comparisons)
+    _validate(protocol, comparisons, protocol_sha256)
     rule = protocol["decision"]
     configurations: dict[str, dict[str, Check]] = {}
     split = next(iter(comparisons.values()))["split"]
@@ -155,6 +206,15 @@ def decide(
             statuses.append(check["status"])
             if check["status"] != "pass":
                 reasons.append(f"{name} {check_name}: {check['reason']}")
+    mode = "release" if split == protocol["splits"]["sealed"] else "rehearsal"
+    gates = _gates(comparisons)
+    if mode == "release":
+        for g, ok in gates.items():
+            if ok is not True:
+                statuses.append("fail")
+                reasons.append(
+                    f"hard gate {g}: {'false' if ok is False else 'missing'}"
+                )
     if "fail" in statuses:
         verdict = "fails"
     elif "not_established" in statuses:
@@ -166,7 +226,8 @@ def decide(
         "reasons": reasons,
         "configurations": configurations,
         "split": split,
-        "mode": "release" if split == protocol["splits"]["sealed"] else "rehearsal",
+        "mode": mode,
+        "hard_gates": gates,
         "digests": {
             n: {
                 "a_sha256": comparisons[n]["a_sha256"],
@@ -190,8 +251,8 @@ def main() -> None:
     )
     p.add_argument("--out", required=True)
     ns = p.parse_args()
-    with Path(ns.protocol).open("rb") as f:
-        protocol = tomllib.load(f)
+    raw = Path(ns.protocol).read_bytes()
+    protocol = tomllib.loads(raw.decode("utf-8"))
     comparisons: dict[str, dict[str, Any]] = {}
     for item in ns.comparison:
         name, sep, path = item.partition("=")
@@ -199,7 +260,7 @@ def main() -> None:
             sys.exit(f"decide: bad or repeated --comparison {item!r}")
         comparisons[name] = json.loads(Path(path).read_text(encoding="utf-8"))
     try:
-        result = decide(protocol, comparisons)
+        result = decide(protocol, comparisons, hashlib.sha256(raw).hexdigest())
     except ValueError as e:
         sys.exit(f"decide: {e}")
     Path(ns.out).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
@@ -210,6 +271,8 @@ def main() -> None:
                 f" diff {_num(c['difference'])}"
                 f" interval {c['interval']}"
             )
+    for g, ok in result["hard_gates"].items():
+        print(f"hard gate {g:34} {'missing' if ok is None else ok}")
     if result["mode"] == "rehearsal":
         print(
             f"REHEARSAL ({result['split']} split) - not a release verdict. verdict:",

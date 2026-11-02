@@ -37,6 +37,19 @@ def frac(n: int, d: int) -> dict[str, Any]:
     return {"n": n, "d": d, "rate": (round(n / d, 4) if d else None)}
 
 
+def is_false_alarm(row: dict) -> bool:
+    """The one false-alarm definition, independent of scoring group: the label
+    is legitimate, the tool answered, and the category is a failure category.
+    A row without `disposition` (baseline answer-all rows) counts as answered.
+    `kind` is not consulted: groups such as contradicted and not_gradable
+    never receive kind == "false_alarm"."""
+    return (
+        row["failure_type"] == "NO_FAILURE"
+        and row.get("disposition", "answered") == "answered"
+        and is_failure(row["category"])
+    )
+
+
 def classify(row: dict) -> None:
     """Fill row['outcome'] (and 'kind' for wrong ones)."""
     disp, cat, grp = row["disposition"], row["category"], row["group"]
@@ -134,9 +147,7 @@ def cohort_metrics(
         "evidence_complete_among_answered": frac(
             sum(bool(r.get("complete")) for r in answered), len(answered)
         ),
-        "false_alarms": frac(
-            sum(r.get("kind") == "false_alarm" for r in legit), len(legit)
-        ),
+        "false_alarms": frac(sum(map(is_false_alarm, legit)), len(legit)),
         "search_counts_reproduce_among_answered": frac(
             sum(not r["searches_mismatch"] for r in answered), len(answered)
         ),
@@ -323,7 +334,7 @@ def false_alarms_by(rows: list[dict]) -> dict:
     (denominator: legitimate cases of that variant) and by predicted family
     (denominator: all legitimate cases)."""
     legit = [r for r in rows if r["failure_type"] == "NO_FAILURE"]
-    fa = [r for r in legit if r.get("kind") == "false_alarm"]
+    fa = [r for r in legit if is_false_alarm(r)]
     return {
         "by_variant": {
             v: frac(

@@ -270,6 +270,38 @@ def test_false_alarms_by_variant_and_predicted_family() -> None:
     assert M.false_alarms_by([]) == {"by_variant": {}, "by_predicted_family": {}}
 
 
+def test_false_alarm_is_group_independent() -> None:
+    groups = ("cohort", "label_conflict", "fx", "contradicted", "not_gradable")
+    rows = [
+        row(
+            failure_type="NO_FAILURE",
+            group=g,
+            variant="v1",
+            expected_category="legitimate_z",
+            category="F06",
+            reason=None,
+        )
+        for g in (*groups, "oos_legit")
+    ]
+    assert all(M.is_false_alarm(r) for r in rows)
+    # kind is not what decides it: contradicted/not_gradable never get one
+    assert [r.get("kind") for r in rows if r["group"] in groups[3:]] != [
+        "false_alarm"
+    ] * 2
+    m = M.cohort_metrics(rows, groups)
+    assert m["false_alarms"] == M.frac(len(groups), len(groups))
+    assert M.false_alarms_by(rows)["by_variant"] == {"v1": M.frac(6, 6)}
+    assert M.false_alarms_by(rows)["by_predicted_family"] == {"F06": M.frac(6, 6)}
+    # not false alarms: abstained, legitimate category, failure label,
+    # baseline answer-all row without disposition counts as answered
+    ok = dict(rows[0])
+    assert not M.is_false_alarm(ok | {"disposition": "abstained"})
+    assert not M.is_false_alarm(ok | {"category": "legitimate_z"})
+    assert not M.is_false_alarm(ok | {"failure_type": "F06_INVOICE_PAID_TWICE"})
+    del ok["disposition"]
+    assert M.is_false_alarm(ok)
+
+
 def test_nearest_rank_percentiles() -> None:
     xs = [50.0, 15.0, 40.0, 20.0, 35.0]  # unsorted on purpose
     assert M.nearest_rank(xs, 50) == 35.0  # ceil(0.5*5) = rank 3

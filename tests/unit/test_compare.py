@@ -29,6 +29,8 @@ def inv(
         "split": "validation",
         "group": group,
         "outcome": outcome,
+        "disposition": outcome if outcome in ("abstained", "failed") else "answered",
+        "category": "F06" if kind == "false_alarm" or not legit else "legitimate_x",
         "complete": complete,
         "kind": kind,
         "failure_type": "NO_FAILURE" if legit else "F06_INVOICE_PAID_TWICE",
@@ -52,6 +54,7 @@ def base(
         "split": "validation",
         "group": group,
         "correct": correct,
+        "category": "F06" if kind == "false_alarm" or not legit else "legitimate_x",
         "complete": complete,
         "kind": kind,
         "failure_type": "NO_FAILURE" if legit else "F06_INVOICE_PAID_TWICE",
@@ -297,6 +300,88 @@ def test_empty_legitimate_population_is_explicit() -> None:
     assert fa["bootstrap"]["difference"] is None
     assert fa["bootstrap"]["interval"] is None
     assert r["primary_success"]["a"]["denominator"] == 3
+
+
+def test_false_alarm_is_group_independent() -> None:
+    # a legitimate case answered with a failure category is a false alarm in
+    # every group, whatever `kind` the scorer gave it
+    for g in ("cohort", "label_conflict", "fx", "contradicted", "not_gradable"):
+        r = inv("x", "v", "answered_other", None, legit=True, group=g)
+        r["disposition"] = "answered"
+        r["category"] = "F06"
+        assert compare.outcomes({"x": r})["x"]["false_alarm"], g
+    r = inv("y", "v", "oos", None, legit=True, group="oos_legit")
+    r["disposition"], r["category"] = "answered", "F06"
+    assert compare.outcomes({"y": r})["y"]["false_alarm"]
+    # not a false alarm: abstained, legit category, failure label
+    for disp, cat, legit in (
+        ("abstained", "F06", True),
+        ("answered", "legitimate_x", True),
+        ("answered", "F06", False),
+    ):
+        r = inv("z", "v", "x", None, legit=legit, group="contradicted")
+        r["disposition"], r["category"] = disp, cat
+        assert not compare.outcomes({"z": r})["z"]["false_alarm"], (disp, cat, legit)
+    # baseline answer-all row: no disposition, answered by construction
+    b = base("w", "v", False, False, legit=True, group="fx")
+    b["category"] = "F14"
+    assert compare.outcomes({"w": b})["w"]["false_alarm"]
+
+
+def _write(path: Path, text: str) -> str:
+    path.write_text(text)
+    return str(compare.sha256_file(path))
+
+
+def test_check_inputs_binds_files_to_recorded_digests(tmp_path: Path) -> None:
+    a = tmp_path / "cases.jsonl"
+    b = tmp_path / "cases_threshold_0.85.jsonl"
+    a_sha, b_sha = _write(a, "a\n"), _write(b, "b\n")
+    prov = {"protocol_sha256": "P", "cases_sha256": a_sha}
+    gates = {"absence_check_passed": True}
+    metrics = {"provenance": prov, "hard_gates": gates}
+    manifest = {
+        "system": "sys",
+        "model": "m",
+        "configurations": {
+            "threshold_0.85": {
+                "cases_file": b.name,
+                "cases_sha256": b_sha,
+                "abstention_threshold": 0.85,
+            }
+        },
+    }
+    got = compare.check_inputs(a, b, metrics, manifest, "threshold_0.85")
+    assert got == {
+        "configuration": "threshold_0.85",
+        "a_sha256": a_sha,
+        "b_sha256": b_sha,
+        "investigator_provenance": prov,
+        "investigator_hard_gates": gates,
+        "baseline_system": "sys",
+        "baseline_model": "m",
+        "abstention_threshold": 0.85,
+    }
+    with pytest.raises(ValueError, match="investigator cases file"):
+        compare.check_inputs(
+            a,
+            b,
+            {"provenance": prov | {"cases_sha256": "x"}},
+            manifest,
+            "threshold_0.85",
+        )
+    with pytest.raises(ValueError, match="no provenance"):
+        compare.check_inputs(a, b, {}, manifest, "threshold_0.85")
+    bad = json.loads(json.dumps(manifest))
+    bad["configurations"]["threshold_0.85"]["cases_sha256"] = "x"
+    with pytest.raises(ValueError, match="baseline cases file"):
+        compare.check_inputs(a, b, metrics, bad, "threshold_0.85")
+    bad = json.loads(json.dumps(manifest))
+    bad["configurations"]["threshold_0.85"]["cases_file"] = "cases.jsonl"
+    with pytest.raises(ValueError, match="manifest says"):
+        compare.check_inputs(a, b, metrics, bad, "threshold_0.85")
+    with pytest.raises(ValueError, match="no configuration"):
+        compare.check_inputs(a, b, metrics, manifest, "answer_all")
 
 
 def test_sha256_file(tmp_path: Path) -> None:
