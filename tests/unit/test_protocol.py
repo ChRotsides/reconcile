@@ -94,3 +94,7 @@ def test_baseline_configurations_known_to_decide() -> None:
     configs = P["systems"]["baseline_configurations"]
     assert configs
     assert set(configs) <= set(decide.KNOWN_CONFIGURATIONS)
+
+
+def test_release_hard_gates_match_decide() -> None:
+    assert tuple(P["decision"]["release_hard_gates"]) == decide.HARD_GATES

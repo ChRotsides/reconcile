@@ -14,5 +14,5 @@ Numbers quoted here are development results on the synthetic FinRCA benchmark (t
 | [0004](0004-label-isolation.md) | Label isolation | accepted; isolation partly depends on the operator |
 | [0005](0005-abstention.md) | Abstention | accepted |
 | [0006](0006-model-inclusion.md) | Model inclusion | accepted as a deferral; no model exists |
-| [0007](0007-metric-choice.md) | Metric choice | accepted for M2; M3 will update it when the protocol is frozen |
+| [0007](0007-metric-choice.md) | Metric choice | accepted for M3; freezes with protocol-v1 |
 | [0008](0008-dataset-and-licence.md) | Dataset and licence handling | accepted; data licence unverified |

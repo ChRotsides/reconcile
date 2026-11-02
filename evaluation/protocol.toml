@@ -52,7 +52,8 @@ baseline_evidence = "relaxed record-availability upper bound (evaluation/baselin
 [decision]
 # The investigator's claim holds only if both rules hold against EVERY baseline
 # configuration, on the sealed headline view. User decision 2026-11-02.
-min_primary_difference = 0.05  # paired point difference, investigator - baseline
+min_primary_difference = 0.05  # paired point difference, investigator - baseline;
+# a point difference below it fails even when too few clusters give no interval
 primary_interval_must_exclude_zero = true
 false_alarm_scope = "all legitimate cases of the split"
 # Observed-sample engineering criterion ("no observed increase"), not a
@@ -60,6 +61,8 @@ false_alarm_scope = "all legitimate cases of the split"
 # the interval is [0, 0] and carries no assurance about rates.
 max_false_alarm_difference_upper_bound = 0.0  # investigator - baseline
 list_every_false_alarm = true
+# A release verdict also requires every scorer hard gate (docs/evaluation-protocol.md section 7).
+release_hard_gates = ["absence_check_passed", "rerun_identical_same_image", "all_answered_packets_well_formed", "all_citations_resolve", "all_calculations_exact", "all_day_counts_exact"]
 
 [statistics]
 method = "cluster_percentile_bootstrap"  # evaluation/paired.py
