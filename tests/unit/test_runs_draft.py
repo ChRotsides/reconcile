@@ -372,3 +372,19 @@ def test_only_declared_files_are_opened(
     ]
     assert stray == []
     assert os.path.realpath(mixed["file"]) in opened
+
+
+def test_cli_passes_max_output_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run(*args: object, **kwargs: object) -> dict[str, object]:
+        seen.update(kwargs)
+        return {"rows": 0, "status_counts": {}, "stopped": None}
+
+    monkeypatch.setattr(draft_run, "run_drafts", fake_run)
+    argv = [str(tmp_path / "p.jsonl"), str(tmp_path / "out"), "--model", "m"]
+    argv += ["--effort", "low", "--mode", "replay", "--max-output-tokens", "2000"]
+    assert draft_run.main(argv) == 0
+    assert seen["max_output_tokens"] == 2000

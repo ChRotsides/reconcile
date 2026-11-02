@@ -247,6 +247,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--cap-usd", type=Decimal, default=Decimal(25))
     ap.add_argument("--limit", type=int)
     ap.add_argument("--select", type=Path)
+    ap.add_argument("--max-output-tokens", type=int, default=1500)
     a = ap.parse_args(argv)
     stats = run_drafts(
         a.packets_file,
@@ -259,6 +260,7 @@ def main(argv: list[str]) -> int:
         cap_usd=a.cap_usd,
         limit=a.limit,
         select=a.select,
+        max_output_tokens=a.max_output_tokens,
     )
     print(f"drafts: {stats['rows']} {sorted(stats['status_counts'].items())}")
     if stats["stopped"]:
