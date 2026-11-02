@@ -77,12 +77,12 @@ def test_classify_outcomes() -> None:
 
 
 # Six cohort cases used by several tests (expected values computed by hand).
-# Packet counts are req met/total, cited resolved/total, claims supported/total,
-# calcs exact/total:
+# Packet counts are req met/total, cited resolved/total, findings with valid
+# references/total, calcs exact/total:
 #   A F12 answered correct, complete       easy
-#      req 4/4, cited 5/5, claims 3/3, calcs 2/2
+#      req 4/4, cited 5/5, findings 3/3, calcs 2/2
 #   B F12 answered legit category (wrong)  hard
-#      req 2/3, cited 3/4, claims 1/2, calcs 1/3
+#      req 2/3, cited 3/4, findings 1/2, calcs 1/3
 #   C legit v1 answered a failure          easy    (no packet counts)
 #   D legit v2 answered correct, incomplete medium all packet counts 0/0
 #   E F12 failed
@@ -96,8 +96,8 @@ def cases() -> list[dict[str, Any]]:
             req_met=4,
             cited_total=5,
             cited_resolved=5,
-            claims=3,
-            claims_supported=3,
+            findings=3,
+            findings_reference_ok=3,
             calcs=2,
             calcs_exact=2,
         ),
@@ -108,8 +108,8 @@ def cases() -> list[dict[str, Any]]:
             req_met=2,
             cited_total=4,
             cited_resolved=3,
-            claims=2,
-            claims_supported=1,
+            findings=2,
+            findings_reference_ok=1,
             calcs=3,
             calcs_exact=1,
         ),
@@ -124,8 +124,8 @@ def cases() -> list[dict[str, Any]]:
             req_met=0,
             cited_total=0,
             cited_resolved=0,
-            claims=0,
-            claims_supported=0,
+            findings=0,
+            findings_reference_ok=0,
             calcs=0,
             calcs_exact=0,
         ),
@@ -206,8 +206,10 @@ def test_packet_metrics_hand_calculated() -> None:
     rows = cases()  # only answered rows count; the abstained row's req is ignored
     assert M.evidence_recall(rows) == M.frac(6, 7)  # (4+2+0) / (4+3+0)
     assert M.citation_resolution(rows) == M.frac(8, 9)  # (5+3+0) / (5+4+0)
-    cs = M.claim_support(rows)
-    assert cs["unsupported_over_emitted"] == M.frac(1, 5)  # emitted 3+2, supported 4
+    ri = M.reference_integrity(rows)
+    assert ri["invalid_references_over_findings"] == M.frac(1, 5)  # 3+2 findings, 4 ok
+    assert ri["valid_references_over_findings"] == M.frac(4, 5)
+    assert "claim_support" not in dir(M)  # the measure does not support claims
     mc = M.monetary_correctness(rows)
     assert mc["exact_over_reported"] == M.frac(3, 5)  # (2+1) / (2+3)
     # coverage: answered with >= 1 calculation: A, B of A, B, C, D (C has none)
@@ -218,7 +220,10 @@ def test_packet_metrics_empty_denominators() -> None:
     nothing = [row(disposition="abstained", category=None)]
     assert M.evidence_recall(nothing)["rate"] is None
     assert M.citation_resolution(nothing)["rate"] is None
-    assert M.claim_support(nothing)["unsupported_over_emitted"]["rate"] is None
+    assert (
+        M.reference_integrity(nothing)["invalid_references_over_findings"]["rate"]
+        is None
+    )
     assert M.monetary_correctness(nothing)["calculation_coverage"]["rate"] is None
     assert M.monetary_correctness(nothing)["exact_over_reported"]["rate"] is None
     assert M.execution_reliability([])["failed"]["rate"] is None
@@ -339,11 +344,15 @@ def snap(tmp_path: Path) -> Any:
           '100.00', '0.00', 'USD');
         INSERT INTO gl_entries VALUES ('J1', 'L2', 'X9', 'other', '2025-01-03',
           '5.00', '0.00', 'USD');
+        INSERT INTO gl_entries VALUES ('J1', 'L3', 'P1', 'payment', '2025-01-03',
+          '0.00', '100.00', 'USD');
+        INSERT INTO gl_entries VALUES ('J1', 'L4', 'X9', 'other', '2025-01-03',
+          '0.00', '5.00', 'USD');
         """
     )
     con.commit()
     con.close()
-    return D.Snap(path)
+    return D.Snap(path, "s")
 
 
 def ev(eid: str, table: str, rid: str, values: dict[str, str]) -> dict[str, Any]:
@@ -474,7 +483,7 @@ def test_day_count_exact_counts_weekdays(snap: Any) -> None:
     assert D.day_count_exact(dc(20, None), by_id, ok, snap, cutoff)
 
 
-def test_packet_audit_counts_unsupported_claims(snap: Any) -> None:
+def test_packet_audit_counts_invalid_references(snap: Any) -> None:
     ops = [
         ("pay", "payment_amount", "100.00 USD"),
         ("a1", "allocated_amount", "60.00 USD"),
@@ -495,6 +504,7 @@ def test_packet_audit_counts_unsupported_claims(snap: Any) -> None:
                 {"evidence_ids": ["pay", "fp"], "calculation_ids": []},  # forged
                 {"evidence_ids": ["pay", "nope"], "calculation_ids": []},  # absent id
                 {"evidence_ids": ["pay"], "calculation_ids": ["missing"]},  # no calc
+                {"evidence_ids": [], "calculation_ids": []},  # cites nothing
             ]
         },
     }
@@ -502,8 +512,21 @@ def test_packet_audit_counts_unsupported_claims(snap: Any) -> None:
     assert a == {
         "cited_total": 3,
         "cited_resolved": 2,  # the forged item does not resolve
-        "claims": 5,
-        "claims_supported": 1,
+        "findings": 6,
+        "findings_reference_ok": 1,  # the vacuous finding establishes nothing
         "calcs": 2,
         "calcs_exact": 1,
+        "day_counts": 0,
+        "day_counts_exact": 0,
+        "searches_mismatch": [],
+        "audit_ok": False,
     }
+    clean = {
+        **packet,
+        "evidence": [PAY, A1],
+        "calculations": [calc("ok", "difference", ops, "40.00 USD")],
+        "diagnosis": {
+            "findings": [{"evidence_ids": ["pay", "a1"], "calculation_ids": ["ok"]}]
+        },
+    }
+    assert D.packet_audit(clean, snap)["audit_ok"]

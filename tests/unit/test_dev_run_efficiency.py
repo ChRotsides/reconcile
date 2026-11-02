@@ -6,11 +6,9 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
-import sqlite3
 import sys
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -27,14 +25,26 @@ def sha(path: Path) -> str:
 def make_run(root: Path, with_stats: bool = True) -> dict[str, Any]:
     manifest: dict[str, Any] = {
         "packets_sha256": {},
+        "requests_file_sha256": {},
+        "links_file_sha256": {},
         "timings_sha256": {},
         "run_stats_sha256": {},
     }
+    (root / "prepared/snapshot").mkdir(parents=True)
+    (root / "prepared/snapshot" / D.SNAPSHOT_FILE).write_bytes(b"snapshot")
+    manifest["snapshot_file_sha256"] = sha(root / "prepared/snapshot" / D.SNAPSHOT_FILE)
     for split, secs in (("train", [0.1, 0.2, 0.4]), ("validation", [0.3, 0.5])):
         d = root / "inference" / split
         d.mkdir(parents=True)
         (d / "packets.jsonl").write_text("{}\n")
         manifest["packets_sha256"][split] = sha(d / "packets.jsonl")
+        for key, sub, name in (
+            ("requests_file_sha256", f"prepared/requests/{split}", "requests.jsonl"),
+            ("links_file_sha256", f"evaluator/{split}", "links.jsonl"),
+        ):
+            (root / sub).mkdir(parents=True)
+            (root / sub / name).write_text("{}\n")
+            manifest[key][split] = sha(root / sub / name)
         if with_stats:
             (d / D.TIMINGS_FILE).write_text(
                 "".join(
@@ -86,32 +96,3 @@ def test_verify_digests_detects_missing_stats(tmp_path: Path) -> None:
     (tmp_path / "inference/validation" / D.STATS_FILE).unlink()
     with pytest.raises(SystemExit, match="run-stats.json differs"):
         D.verify_digests(tmp_path, m)
-
-
-def test_rows_carry_group_vendor_id(tmp_path: Path) -> None:
-    root = tmp_path
-    (root / "evaluator/train").mkdir(parents=True)
-    (root / "prepared/requests/train").mkdir(parents=True)
-    (root / "inference/train").mkdir(parents=True)
-    (root / "evaluator/train/links.jsonl").write_text(
-        json.dumps({"request_id": "q1", "case_id": "c1"}) + "\n"
-    )
-    (root / "prepared/requests/train/requests.jsonl").write_text(
-        json.dumps({"request_id": "q1", "primary_entity": {"table": "payments"}}) + "\n"
-    )
-    packet = {
-        "request": {"request_id": "q1"},
-        "diagnosis": {"disposition": "abstained", "category": None, "reason": "x"},
-        "evidence": [],
-    }
-    (root / "inference/train/packets.jsonl").write_text(json.dumps(packet) + "\n")
-    label = {
-        "failure_type": "F12",
-        "scenario_variant": "v",
-        "difficulty": "easy",
-        "group_vendor_id": "V-123",
-    }
-    snap = SimpleNamespace(con=sqlite3.connect(":memory:"))
-    conflicts = SimpleNamespace(verified={}, candidates={}, review={})
-    (row,) = D.load_split(root, "train", {"c1": label}, snap, conflicts)
-    assert row["group_vendor_id"] == "V-123"

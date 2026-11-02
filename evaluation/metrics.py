@@ -12,8 +12,11 @@ Row fields used (all optional unless a function says so):
   group, failure_type, variant, difficulty, disposition, reason, category,
   expected_category, outcome, kind, complete,
   req_total/req_met        evidence-contract items required / satisfied,
-  cited_total/cited_resolved, claims/claims_supported,
+  cited_total/cited_resolved, findings/findings_reference_ok,
   calcs/calcs_exact        (answered cases only).
+`complete` is evidence completeness INCLUDING the packet audit (evaluation/
+dev_run.py completeness): contract requirements met and every cited record,
+calculation, day count and finding reference valid.
 """
 
 from __future__ import annotations
@@ -262,19 +265,22 @@ def citation_resolution(
     )
 
 
-def claim_support(
+def reference_integrity(
     rows: list[dict], groups: tuple[str, ...] = C.COHORT_VIEWS["all_cases"]
 ) -> dict:
-    """Claims are the structured findings of answered packets. A finding is
-    supported when all its evidence ids are in the packet, each resolves, and each
-    calculation id it names exists and validates. Reports unsupported / emitted
-    (rate None when no claims were emitted)."""
+    """Findings are the structured findings of answered packets. A finding has
+    valid references when all its evidence ids are in the packet and resolve, and
+    each calculation or day-count id it names exists and validates. A finding
+    that cites no evidence and no calculation establishes nothing and counts as
+    not valid. This is NOT claim support: whether the finding's assertion is
+    true is not checked (predicate-level claim checking is carried to M4).
+    Reports invalid / emitted (rate None when no findings were emitted)."""
     a = _answered(rows, groups)
-    emitted = sum(r.get("claims", 0) for r in a)
-    supported = sum(r.get("claims_supported", 0) for r in a)
+    emitted = sum(r.get("findings", 0) for r in a)
+    valid = sum(r.get("findings_reference_ok", 0) for r in a)
     return {
-        "unsupported_over_emitted": frac(emitted - supported, emitted),
-        "supported_over_emitted": frac(supported, emitted),
+        "invalid_references_over_findings": frac(emitted - valid, emitted),
+        "valid_references_over_findings": frac(valid, emitted),
     }
 
 

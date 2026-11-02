@@ -34,10 +34,10 @@ import sqlite3
 import subprocess
 import sys
 import time
-from collections import Counter, defaultdict
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime
-from decimal import Decimal
+from decimal import Context, Decimal, Inexact, InvalidOperation
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -55,8 +55,15 @@ from metrics import (  # noqa: E402
 
 from reconcile.adapters.finrca import create_key_file, prepare_finrca_snapshot  # noqa: E402
 from reconcile.adapters.finrca_requests import prepare_finrca_requests  # noqa: E402
-from reconcile.diagnosis.policy import POLICY_VERSION, SCOPE_LIMITATION, quantum  # noqa: E402
+from reconcile.diagnosis.policy import (  # noqa: E402
+    CLEARING_LIMITS,
+    POLICY_VERSION,
+    SCOPE_LIMITATION,
+    clearing_policy,
+    quantum,
+)
 from reconcile.domain.calendar import business_days  # noqa: E402
+from reconcile.domain.money import MAX_DIGITS  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_UPSTREAM = Path(
@@ -69,9 +76,28 @@ IMAGE = "reconcile-inference:dev"
 SCRIPT = REPO / "deploy/inference/run_inference.sh"
 TIMINGS_FILE = "timings.jsonl"  # names written by reconcile.runs.batch
 STATS_FILE = "run-stats.json"
+SNAPSHOT_FILE = "snapshot.sqlite"
 CURRENCY = "USD"
 is_failure = C.is_failure
 is_no_failure = C.is_no_failure
+
+# Exact evaluator arithmetic: the precision the money type needs for a sum or
+# difference of two MAX_DIGITS-digit amounts (reconcile.domain.money), with
+# rounding trapped. The default 28-digit context would silently round the
+# 30-digit amounts the money type allows.
+EXACT = Context(prec=2 * MAX_DIGITS + 5, traps=[Inexact, InvalidOperation])
+
+
+def dsum(values: Iterable[Decimal]) -> Decimal:
+    total = Decimal(0)
+    for v in values:
+        total = EXACT.add(total, v)
+    return total
+
+
+def dsub(a: Decimal, b: Decimal) -> Decimal:
+    return EXACT.subtract(a, b)
+
 
 # ------------------------------------------------------------ orchestration
 
@@ -198,7 +224,7 @@ def run(tag: str, upstream: Path) -> None:
         "started_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         "code": code_commit(),
         "snapshot_content_sha256": manifest["snapshot"]["content_sha256"],
-        "snapshot_file_sha256": manifest["snapshot"]["file_sha256"],
+        "snapshot_file_sha256": sha256_file(snap_dir / SNAPSHOT_FILE),
         "source_revision": SOURCE_REVISION,
         "cutoff": CUTOFF.isoformat(),
         "policy_version": POLICY_VERSION,
@@ -207,6 +233,12 @@ def run(tag: str, upstream: Path) -> None:
         "requests": summaries,
         "packets_sha256": {
             s: sha256_file(root / "inference" / s / "packets.jsonl") for s in SPLITS
+        },
+        "requests_file_sha256": {
+            s: sha256_file(prepared / "requests" / s / "requests.jsonl") for s in SPLITS
+        },
+        "links_file_sha256": {
+            s: sha256_file(root / "evaluator" / s / "links.jsonl") for s in SPLITS
         },
         "timings_sha256": {
             s: sha256_file(root / "inference" / s / TIMINGS_FILE) for s in SPLITS
@@ -239,6 +271,7 @@ def rerun(tag: str) -> None:
     into fresh directories and compare packet digests with the run manifest."""
     root = REPO / "artifacts/dev-runs" / tag
     manifest = json.loads((root / "run-manifest.json").read_text())
+    verify_digests(root, manifest)  # the inputs being re-run are the run's own
     # Pin the run's own image by id (run_inference.sh honours $IMAGE), so a
     # rebuilt shared tag cannot change what is checked.
     have = subprocess.run(
@@ -291,10 +324,22 @@ def rerun(tag: str) -> None:
 
 
 def verify_digests(root: Path, manifest: dict) -> None:
-    """Packets (and, when the manifest records them, timings and run stats) must
-    be unchanged since the run manifest was written."""
+    """The run manifest must bind every scoring input, for every split: packets,
+    requests and evaluator links (checked by `read_split_inputs`, on the bytes
+    that are then scored) and the snapshot file. A manifest without them (an
+    older run) is refused: re-run rather than score unbound inputs. Timings and
+    run stats are checked when recorded."""
+    for key in ("packets_sha256", "requests_file_sha256", "links_file_sha256"):
+        if set(manifest.get(key) or {}) != set(SPLITS):
+            sys.exit(
+                f"run manifest has no {key} for every split; "
+                "it predates input binding, so it cannot be evaluated: re-run"
+            )
+    want = manifest.get("snapshot_file_sha256")
+    path = root / "prepared/snapshot" / SNAPSHOT_FILE
+    if not want or not path.exists() or sha256_file(path) != want:
+        sys.exit(f"{SNAPSHOT_FILE} differs from the run manifest")
     for key, name in (
-        ("packets_sha256", "packets.jsonl"),
         ("timings_sha256", TIMINGS_FILE),
         ("run_stats_sha256", STATS_FILE),
     ):
@@ -302,6 +347,24 @@ def verify_digests(root: Path, manifest: dict) -> None:
             path = root / "inference" / split / name
             if not path.exists() or sha256_file(path) != want:
                 sys.exit(f"{split}: {name} differs from the run manifest")
+
+
+def read_split_inputs(
+    root: Path, manifest: dict, split: str
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """(packets, requests, links) of a split. Each file is read once: the bytes
+    hashed against the run manifest are the bytes parsed and scored."""
+    out = []
+    for key, path in (
+        ("packets_sha256", root / "inference" / split / "packets.jsonl"),
+        ("requests_file_sha256", root / "prepared/requests" / split / "requests.jsonl"),
+        ("links_file_sha256", root / "evaluator" / split / "links.jsonl"),
+    ):
+        data = path.read_bytes() if path.exists() else b""
+        if hashlib.sha256(data).hexdigest() != manifest[key][split]:
+            sys.exit(f"{split}: {path.name} differs from the run manifest")
+        out.append(parse_jsonl(data))
+    return out[0], out[1], out[2]
 
 
 def efficiency_block(
@@ -342,10 +405,45 @@ def efficiency_block(
 # category the packet claims). Upstream evidence_ids are not used.
 
 
+def journal_totals(
+    lines: list[dict], source: str, kind: str
+) -> tuple[str, Decimal, Decimal] | None:
+    """(currency, attributable debit, whole-journal debit) of a journal given ALL
+    its observable lines, or None. Both contract conditions are required: (a)
+    one currency, no negative line amount, and the whole journal's debit equals
+    its credit and is positive; (b) the lines of type `kind` sourced to `source`
+    are themselves balanced and positive (docs/evidence-contract.md section 3)."""
+    if len({x["currency"] for x in lines}) != 1:
+        return None
+    own = [
+        x
+        for x in lines
+        if x["source_transaction_id"] == source and x["transaction_type"] == kind
+    ]
+    try:
+        if any(Decimal(x[side]) < 0 for x in lines for side in ("debit", "credit")):
+            return None
+        total = (
+            dsum(Decimal(x["debit"]) for x in lines),
+            dsum(Decimal(x["credit"]) for x in lines),
+        )
+        mine = (
+            dsum(Decimal(x["debit"]) for x in own),
+            dsum(Decimal(x["credit"]) for x in own),
+        )
+    except ArithmeticError:
+        return None
+    if total[0] != total[1] or total[0] <= 0 or mine[0] != mine[1] or mine[0] <= 0:
+        return None
+    return lines[0]["currency"], mine[0], total[0]
+
+
 class Snap:
     """Read-only view of the prepared snapshot (tokens only)."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, digest: str) -> None:
+        # `digest` is the snapshot content digest every cited record must carry.
+        self.digest = digest
         self.con = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
         self.con.row_factory = sqlite3.Row
 
@@ -382,25 +480,29 @@ class Snap:
             if r["direction"] == "debit" and r["status"] == "posted"
         ]
 
+    def journal_lines(self, journal: str) -> list[dict]:
+        """Every observable line of the journal, whatever its source or type."""
+        return self.q(
+            "SELECT * FROM gl_entries WHERE journal_id = ? AND posting_date <= ?",
+            journal,
+            CUTOFF.isoformat(),
+        )
+
     def balanced_journals(self, source: str, kind: str) -> list[str]:
-        lines = self.q(
-            "SELECT * FROM gl_entries WHERE source_transaction_id = ?"
-            " AND transaction_type = ?",
+        """Journals with a line of type `kind` sourced to `source` that pass
+        `journal_totals` (docs/evidence-contract.md section 3, conditions a, b)."""
+        ids = self.q(
+            "SELECT DISTINCT journal_id FROM gl_entries WHERE source_transaction_id = ?"
+            " AND transaction_type = ? AND posting_date <= ? ORDER BY journal_id",
             source,
             kind,
+            CUTOFF.isoformat(),
         )
-        by: dict[str, list[dict]] = defaultdict(list)
-        for ln in lines:
-            by[ln["journal_id"]].append(ln)
-        out = []
-        for jid, ls in sorted(by.items()):
-            if len({x["currency"] for x in ls}) != 1:
-                continue
-            d = sum(Decimal(x["debit"]) for x in ls)
-            c = sum(Decimal(x["credit"]) for x in ls)
-            if d == c and d > 0:
-                out.append(jid)
-        return out
+        return [
+            r["journal_id"]
+            for r in ids
+            if journal_totals(self.journal_lines(r["journal_id"]), source, kind)
+        ]
 
     def twins(self, pay: dict) -> list[str]:
         return [
@@ -435,10 +537,6 @@ class View:
         self.searches = [
             e["search"] for e in packet["evidence"] if e["search"] is not None
         ]
-        self.calcs = []
-        for c in packet["calculations"]:
-            cited = {self._key(o["evidence_id"]) for o in c["operands"]}
-            self.calcs.append((c["calculation_id"], cited))
         self.findings = [
             (
                 f["check_id"],
@@ -450,15 +548,7 @@ class View:
         ]
         self.limitations = list(packet["limitations"])
         self.calc_by_id = {c["calculation_id"]: c for c in packet["calculations"]}
-        self.day_counts = [
-            (
-                d["calculation_id"],
-                self._key(d["start_evidence"]),
-                d["result"],
-                d["limit"],
-            )
-            for d in packet["day_counts"]
-        ]
+        self.day_counts = {d["calculation_id"]: d for d in packet["day_counts"]}
 
     def _key(self, evidence_id: str) -> tuple[str, str] | None:
         e = self.by_id.get(evidence_id)
@@ -471,11 +561,15 @@ class View:
     def cites(self, table: str, ids: list[str]) -> bool:
         return bool(ids) and all((table, i) in self.records for i in ids)
 
-    def search(self, table: str, count: int, *needles: str) -> bool:
+    def search(self, table: str, count: int, predicate: str) -> bool:
+        """A search of `table` with exactly the predicate the evaluator built for
+        this requirement (whitespace aside) and the stated count. A predicate that
+        contains the right condition plus a restriction is a different search."""
+        want = " ".join(predicate.split())
         return any(
             s["table"] == table
             and s["observed_count"] == count
-            and all(n in s["predicate"] for n in needles)
+            and " ".join(s["predicate"].split()) == want
             for s in self.searches
         )
 
@@ -503,20 +597,25 @@ class View:
         c = self.calc_by_id.get(calc_id)
         if c is None or c["operation"] != operation or not c["tolerance"]:
             return None
-        ops = [
-            (self._key(o["evidence_id"]), o["field"], Decimal(o["amount"].split()[0]))
-            for o in c["operands"]
-        ]
-        return ops, Decimal(c["result"].split()[0]), Decimal(c["tolerance"].split()[0])
+        try:
+            ops = [
+                (
+                    self._key(o["evidence_id"]),
+                    o["field"],
+                    Decimal(o["amount"].split()[0]),
+                )
+                for o in c["operands"]
+            ]
+            return (
+                ops,
+                Decimal(c["result"].split()[0]),
+                Decimal(c["tolerance"].split()[0]),
+            )
+        except (ArithmeticError, IndexError):  # malformed amount text
+            return None
 
-    def calc_over(self, *keys: tuple[str, str]) -> bool:
-        return any(set(keys) <= cited for _, cited in self.calcs)
-
-    def day_count_from(self, key: tuple[str, str]) -> tuple[int, int] | None:
-        for _, start, result, limit in self.day_counts:
-            if start == key:
-                return result, limit
-        return None
+    def day_count(self, calc_id: str) -> dict | None:
+        return self.day_counts.get(calc_id)
 
 
 def alloc_ids(rows: list[dict]) -> list[str]:
@@ -525,6 +624,129 @@ def alloc_ids(rows: list[dict]) -> list[str]:
 
 def bank_ids(rows: list[dict]) -> list[str]:
     return [r["bank_transaction_id"] for r in rows]
+
+
+# The absence searches a category requires, with the exact predicate text the
+# evaluator expects (docs/evidence-contract.md section 4.2 and 4.3). Built here,
+# not copied from the packet: a search that also carries an extra restriction
+# is a different, narrower search.
+
+
+def a1_predicate(ref: str) -> str:
+    return (
+        f"payment_reference = '{ref}' AND transaction_type <> 'bank fee'"
+        f" AND posted_date <= '{CUTOFF.isoformat()}'"
+    )
+
+
+def a2_predicate(ref: str) -> str:
+    return f"reference_number = '{ref}'"
+
+
+def a3_predicate(pay: dict) -> str:
+    return (
+        "direction = 'debit' AND transaction_type <> 'bank fee'"
+        f" AND currency = '{pay['payment_currency']}'"
+        f" AND amount = '{pay['payment_amount']}'"
+        f" AND counterparty_token = '{pay['bank_account_id']}'"
+        f" AND posted_date <= '{CUTOFF.isoformat()}'"
+        " AND payment_reference matches no payment"
+    )
+
+
+def fee_search_predicate(bank_id: str) -> str:
+    return (
+        f"transaction_type = 'bank_fee' AND source_transaction_id = '{bank_id}'"
+        f" AND posting_date <= '{CUTOFF.isoformat()}'"
+    )
+
+
+def lag_ok(v: View, pay: dict, deb_key: tuple[str, str] | None) -> bool:
+    """`business_day_lag`: payment date to the debit's posted date, within the
+    method's clearing limit."""
+    return deb_key is not None and day_count_ok(
+        v, pay, "business_day_lag", (deb_key, "posted_date"), over_limit=False
+    )
+
+
+def committed_overpayment_ok(
+    s: Snap, v: View, inv: dict | None, committed_allocs: list[dict]
+) -> bool:
+    """F06 (contract 4.1): `invoice_total_minus_committed` is the invoice total
+    minus exactly the committed allocations (operation `difference`), every
+    operand equal to the snapshot, the result recomputed, and below minus one
+    quantum of the invoice currency (committed exceeds the invoice total)."""
+    got = v.calculation("invoice_total_minus_committed", "difference")
+    if got is None or inv is None or not committed_allocs:
+        return False
+    ops, result, tol = got
+    q = quantum(inv["currency"]).amount
+    first = ops[0]
+    return (
+        first[:2] == (("invoices", inv["invoice_id"]), "invoice_total")
+        and first[2] == Decimal(inv["invoice_total"])
+        and operands_match(
+            ops[1:], "allocated_amount", allocation_amounts(s, committed_allocs)
+        )
+        and result == dsub(first[2], dsum(a for _, _, a in ops[1:]))
+        and tol == q
+        and result < q.copy_negate()
+    )
+
+
+def delta_ok(v: View, pay: dict, debit: dict | None, shortfall: bool) -> bool:
+    """`delta` is payment amount minus bank amount, exactly those two operands
+    (a sum of the same two figures does not do), operands equal to the snapshot.
+    `shortfall`: delta above one quantum (F14); else |delta| within one quantum
+    (the amounts match)."""
+    got = v.calculation("delta", "difference")
+    if got is None or debit is None:
+        return False
+    ops, result, tol = got
+    q = _quantum(pay)
+    debit_key = ("bank_transactions", debit["bank_transaction_id"])
+    if not (
+        len(ops) == 2
+        and ops[0][:2] == (("payments", pay["payment_id"]), "payment_amount")
+        and ops[0][2] == Decimal(pay["payment_amount"])
+        and operands_match(ops[1:], "amount", {debit_key: Decimal(debit["amount"])})
+        and result == dsub(ops[0][2], ops[1][2])
+        and tol == q
+    ):
+        return False
+    return result > q if shortfall else result.copy_abs() <= q
+
+
+def day_count_ok(
+    v: View,
+    pay: dict,
+    calc_id: str,
+    end: tuple[tuple[str, str], str] | None,
+    over_limit: bool,
+) -> bool:
+    """The day count `calc_id` runs from the payment's `payment_date` to `end`
+    (a cited record and field; None = the cutoff), carries the method-specific
+    limit and policy name declared in reconcile.diagnosis.policy (not whatever
+    limit the packet states), and is above that limit (`over_limit`) or not.
+    The count itself is checked against the snapshot dates by the packet audit."""
+    d = v.day_count(calc_id)
+    method = pay["payment_method"]
+    limit = CLEARING_LIMITS.get(method)
+    if d is None or limit is None:
+        return False
+    same_end = (
+        d["end_evidence"] is None
+        if end is None
+        else (v._key(d["end_evidence"] or "") == end[0] and d["end_field"] == end[1])
+    )
+    return (
+        v._key(d["start_evidence"]) == ("payments", pay["payment_id"])
+        and d["start_field"] == "payment_date"
+        and same_end
+        and d["limit"] == limit
+        and d["limit_policy"] == clearing_policy(method)
+        and (d["result"] > limit) == over_limit
+    )
 
 
 def _category_requirements(
@@ -591,10 +813,12 @@ def _category_requirements(
                 for b in bank_ids(s.posted_debits(p["reference_number"]))
             ]
             add("committed_debits", v.cites("bank_transactions", debits))
-            alloc_keys = [("payment_allocations", i) for i in alloc_ids(allocs)]
+            committed_ids = {p["payment_id"] for p in committed}
             add(
                 "overpayment_calculation",
-                v.calc_over(("invoices", rid), *alloc_keys[:1]),
+                committed_overpayment_ok(
+                    s, v, inv, [a for a in allocs if a["payment_id"] in committed_ids]
+                ),
             )
         elif category in ("legitimate_split_payment", "legitimate_due_date_payment"):
             eff = [p for p in pays if effective(p)]
@@ -613,7 +837,7 @@ def _category_requirements(
     pay = s.payment(rid)
     if pay is None:
         return []
-    ref, pkey = pay["reference_number"], ("payments", rid)
+    ref = pay["reference_number"]
     add("payment", v.cites("payments", [rid]))
     allocs = s.allocs_of_payment(rid)
     debits = s.posted_debits(ref)
@@ -630,38 +854,32 @@ def _category_requirements(
             v.cites("gl_entries", s.balanced_journals(rid, "payment")),
         )
         add(
-            "search_a1_no_bank_row",
-            v.search("bank_transactions", 0, f"payment_reference = '{ref}'"),
+            "search_a1_no_bank_row", v.search("bank_transactions", 0, a1_predicate(ref))
         )
-        add(
-            "search_a2_unique_reference",
-            v.search("payments", 1, f"reference_number = '{ref}'"),
-        )
+        add("search_a2_unique_reference", v.search("payments", 1, a2_predicate(ref)))
         add(
             "search_a3_no_candidate",
-            v.search(
-                "bank_transactions",
-                0,
-                f"counterparty_token = '{pay['bank_account_id']}'",
-                "matches no payment",
-            ),
+            v.search("bank_transactions", 0, a3_predicate(pay)),
         )
-        dc = v.day_count_from(pkey)
-        want_over = category == "F12"
-        add("business_day_age", dc is not None and ((dc[0] > dc[1]) == want_over))
+        add(
+            "business_day_age",
+            day_count_ok(v, pay, "business_day_age", None, category == "F12"),
+        )
     elif category == "F14":
         add(
             "posted_debit", one_debit and v.cites("bank_transactions", bank_ids(debits))
         )
-        add("delta_calculation", deb_key is not None and v.calc_over(pkey, deb_key))
+        add(
+            "delta_calculation",
+            one_debit and delta_ok(v, pay, debits[0], shortfall=True),
+        )
         add(
             "search_no_fee_journal",
             one_debit
             and v.search(
                 "gl_entries",
                 0,
-                f"source_transaction_id = '{debits[0]['bank_transaction_id']}'",
-                "bank_fee",
+                fee_search_predicate(debits[0]["bank_transaction_id"]),
             ),
         )
     elif category in ("legitimate_weekend_clearing", "legitimate_check_clearing"):
@@ -670,9 +888,9 @@ def _category_requirements(
         )
         add(
             "amount_equality_calculation",
-            deb_key is not None and v.calc_over(pkey, deb_key),
+            one_debit and delta_ok(v, pay, debits[0], shortfall=False),
         )
-        add("business_day_lag", v.day_count_from(pkey) is not None)
+        add("business_day_lag", lag_ok(v, pay, deb_key))
         add(
             "allocations",
             bool(allocs) and v.cites("payment_allocations", alloc_ids(allocs)),
@@ -717,8 +935,11 @@ def _category_requirements(
             "posted_debit", one_debit and v.cites("bank_transactions", bank_ids(debits))
         )
         add("allocations", v.cites("payment_allocations", alloc_ids(allocs)))
-        add("delta_calculation", deb_key is not None and v.calc_over(pkey, deb_key))
-        add("business_day_lag", v.day_count_from(pkey) is not None)
+        add(
+            "delta_calculation",
+            one_debit and delta_ok(v, pay, debits[0], shortfall=False),
+        )
+        add("business_day_lag", lag_ok(v, pay, deb_key))
         invs = [a["invoice_id"] for a in allocs]
         eff_allocs = [
             a
@@ -852,13 +1073,9 @@ def attributable_journal_amounts(s: Snap, p: dict) -> dict[tuple[str, str], Deci
     pid = p["payment_id"]
     out: dict[tuple[str, str], Decimal] = {}
     for j in s.balanced_journals(pid, "payment"):
-        lines = s.q(
-            "SELECT * FROM gl_entries WHERE journal_id = ?"
-            " AND source_transaction_id = ? AND transaction_type = 'payment'",
-            j,
-            pid,
-        )
-        out[("gl_entries", j)] = sum((Decimal(x["debit"]) for x in lines), Decimal(0))
+        totals = journal_totals(s.journal_lines(j), pid, "payment")
+        if totals:
+            out[("gl_entries", j)] = totals[1]
     return out
 
 
@@ -935,9 +1152,9 @@ def chk_journal_calculation(s: Snap, v: View, p: dict) -> bool:
         return False
     return (
         journal_attribution_ok(v, p)
-        and result == ops[0][2] - sum((a for _, _, a in rest), Decimal(0))
+        and result == dsub(ops[0][2], dsum(a for _, _, a in rest))
         and tol == _quantum(p)
-        and abs(result) <= tol
+        and result.copy_abs() <= tol
     )
 
 
@@ -985,7 +1202,7 @@ def chk_totals_calculation(s: Snap, v: View, p: dict) -> bool:
             and first[:2] == (("invoices", inv), "invoice_total")
             and first[2] == Decimal(row["invoice_total"])
             and operands_match(rest, "allocated_amount", allocation_amounts(s, allocs))
-            and result == first[2] - sum((a for _, _, a in rest), Decimal(0))
+            and result == dsub(first[2], dsum(a for _, _, a in rest))
             and tol == _quantum(p)
             and result >= -tol
             and v.cites("payments", [x["payment_id"] for x in pays])
@@ -1032,7 +1249,7 @@ def chk_payment_allocation_calculation(s: Snap, v: View, p: dict) -> bool:
         and ops[0][:2] == (("payments", pid), "payment_amount")
         and ops[0][2] == Decimal(p["payment_amount"])
         and operands_match(rest, "allocated_amount", allocation_amounts(s, allocs))
-        and result == ops[0][2] - sum((a for _, _, a in rest), Decimal(0))
+        and result == dsub(ops[0][2], dsum(a for _, _, a in rest))
         and tol == _quantum(p)
         and result >= -tol
     )
@@ -1091,26 +1308,33 @@ def required(
 
 def completeness(packet: dict, entity: tuple[str, str], snap: Snap) -> dict:
     """Evidence completeness of an answered packet: every contract requirement
-    of its category holds and every absence search it states reproduces on the
-    snapshot (a false absence claim makes the packet incomplete)."""
+    of its category holds, every absence search it states reproduces on the
+    snapshot (a false absence claim makes the packet incomplete), AND the packet
+    audit passes (every cited record resolves, every calculation and day count
+    is exact, every finding's references are valid). A packet that fails the
+    audit is not an evidence-complete success, whatever it cites."""
     reqs = required(packet["diagnosis"]["category"], entity, snap, View(packet))
-    mismatch = searches_reproduce(packet, snap)
+    audit = packet_audit(packet, snap)
     missing = [n for n, ok in reqs if not ok]
-    if mismatch:
+    if audit["searches_mismatch"]:
         missing.append("searches_reproduce")
+    contract_met = bool(reqs) and not missing
+    if not audit["audit_ok"]:
+        missing.append("packet_audit")
     return {
         "contract_defined": bool(reqs),
         "req_total": len(reqs),
         "req_met": sum(ok for _, ok in reqs),
-        "complete": bool(reqs) and not missing,
+        "contract_complete": contract_met,
+        "complete": contract_met and audit["audit_ok"],
         "missing": missing,
-        "searches_mismatch": mismatch,
+        **audit,
     }
 
 
 # ------------------------------------------------------------ packet audit
-# Per-packet facts for the PLAN.md section 7 metrics (citation resolution, claim
-# support, monetary correctness). Aggregation lives in metrics.py.
+# Per-packet facts for the PLAN.md section 7 metrics (citation resolution,
+# reference integrity, monetary correctness). Aggregation lives in metrics.py.
 
 KEY_COLUMN = {
     "payments": "payment_id",
@@ -1119,6 +1343,8 @@ KEY_COLUMN = {
     "approval_events": "approval_event_id",
 }
 MONEY = re.compile(r"-?\d+(\.\d+)? [A-Z]{3}")
+JOURNAL_VALUES = {"amount", "journal_total", "currency", "source", "gl_type"}
+JOURNAL_TIMESTAMPS = {"posting_date"}
 
 
 def _value_matches(packet_val: str, snap_val: str, currency: str | None) -> bool:
@@ -1133,29 +1359,28 @@ def _value_matches(packet_val: str, snap_val: str, currency: str | None) -> bool
     return packet_val == snap_val
 
 
-def _journal_matches(values: dict, journal: str, snap: Snap) -> bool:
+def _journal_matches(values: dict, timestamps: dict, journal: str, snap: Snap) -> bool:
     """A journal item: `source`/`gl_type` name lines of the journal, `amount` is
-    the total debit of those lines, `journal_total` the whole journal's debit."""
-    lines = snap.q(
-        "SELECT * FROM gl_entries WHERE journal_id = ? AND posting_date <= ?",
-        journal,
-        CUTOFF.isoformat(),
-    )
-    cur = {x["currency"] for x in lines}
-    own = [
-        x
-        for x in lines
-        if x["source_transaction_id"] == values.get("source")
-        and x["transaction_type"] == values.get("gl_type")
-    ]
-    if not own or len(cur) != 1:
+    the total debit of those lines, `journal_total` the whole journal's debit,
+    `posting_date` its latest posting date. Only these fields exist; any other
+    field, or a journal that is not balanced as a whole and on the named lines,
+    does not resolve."""
+    lines = snap.journal_lines(journal)
+    totals = journal_totals(lines, values.get("source", ""), values.get("gl_type", ""))
+    if (
+        totals is None
+        or not set(values) <= JOURNAL_VALUES
+        or not set(timestamps) <= JOURNAL_TIMESTAMPS
+        or values.get("currency") != totals[0]
+    ):
         return False
-    (currency,) = cur
-    expected = {
-        "amount": sum((Decimal(x["debit"]) for x in own), Decimal(0)),
-        "journal_total": sum((Decimal(x["debit"]) for x in lines), Decimal(0)),
-    }
-    return values.get("currency") == currency and all(
+    if "posting_date" in timestamps and timestamps["posting_date"] != max(
+        x["posting_date"] for x in lines
+    ):
+        return False
+    currency, amount, total = totals
+    expected = {"amount": amount, "journal_total": total}
+    return all(
         k not in values
         or (
             MONEY.fullmatch(values[k]) is not None
@@ -1167,12 +1392,16 @@ def _journal_matches(values: dict, journal: str, snap: Snap) -> bool:
 
 
 def evidence_resolves(e: dict, snap: Snap) -> bool:
-    """The cited record exists in the snapshot and every recorded value equals
-    the snapshot's. Search-only items have no record and are not handled here."""
+    """The cited record is in this run's snapshot (digest), exists there, and
+    every recorded value and timestamp is a field of it with the snapshot's
+    value. Search-only items have no record and are not handled here."""
     table, rid = e["record"]["table"], e["record"]["record_id"]
+    if e["record"].get("snapshot") != snap.digest:
+        return False
     values = e["values"] or {}
+    timestamps = e.get("timestamps") or {}
     if table == "gl_entries":
-        return _journal_matches(values, rid, snap)
+        return _journal_matches(values, timestamps, rid, snap)
     if table == "payment_allocations":
         pid, _, iid = rid.partition("|")
         row = snap.one(
@@ -1187,15 +1416,21 @@ def evidence_resolves(e: dict, snap: Snap) -> bool:
         currency = (row or {}).get("currency") or (row or {}).get("payment_currency")
     else:
         return False
-    return row is not None and all(
-        k in row and _value_matches(v, str(row[k]), currency) for k, v in values.items()
+    return (
+        row is not None
+        and all(
+            k in row and _value_matches(v, str(row[k]), currency)
+            for k, v in values.items()
+        )
+        and all(k in row and v == str(row[k]) for k, v in timestamps.items())
     )
 
 
 def calculation_exact(c: dict, by_id: dict, resolved: dict[str, bool]) -> bool:
     """Every operand is a resolved evidence item whose recorded `field` equals
     the operand's amount, all in one currency, and the stated result equals the
-    sum (first minus the rest for a difference) of the operands exactly."""
+    sum (first minus the rest for a difference) of the operands exactly, in the
+    exact Decimal context (no rounding)."""
     amounts: list[Decimal] = []
     cur: set[str] = set()
     for o in c["operands"]:
@@ -1216,22 +1451,27 @@ def calculation_exact(c: dict, by_id: dict, resolved: dict[str, bool]) -> bool:
     r, k = c["result"].split()
     if cur != {k}:
         return False
-    if c["operation"] == "sum":
-        want = sum(amounts, Decimal(0))
-    elif c["operation"] == "difference":
-        want = amounts[0] - sum(amounts[1:], Decimal(0))
-    else:
+    try:
+        if c["operation"] == "sum":
+            want = dsum(amounts)
+        elif c["operation"] == "difference":
+            want = dsub(amounts[0], dsum(amounts[1:]))
+        else:
+            return False
+    except ArithmeticError:  # more digits than the money type allows
         return False
     return Decimal(r) == want
 
 
 def _snapshot_day(e: dict, field: str, snap: Snap) -> date | None:
-    """The date the snapshot holds in `field` of the cited record (the latest
-    posting date for a journal), None if it cannot be read."""
+    """The date the snapshot holds in `field` of the cited record, None if the
+    record has no such field or it is not a date. A journal has one date field,
+    `posting_date` (its latest line)."""
     table, rid = e["record"]["table"], e["record"]["record_id"]
     if table == "gl_entries":
-        rows = snap.q("SELECT posting_date FROM gl_entries WHERE journal_id = ?", rid)
-        value = max((r["posting_date"] for r in rows), default=None)
+        if field != "posting_date":
+            return None
+        value = max((x["posting_date"] for x in snap.journal_lines(rid)), default=None)
     elif table == "payment_allocations":
         pid, _, iid = rid.partition("|")
         row = snap.one(
@@ -1278,10 +1518,14 @@ def day_count_exact(
 
 def packet_audit(packet: dict, snap: Snap) -> dict:
     """Counts for an answered packet: cited record items and how many resolve;
-    findings (claims) and how many are supported; calculations and how many are
-    exact; see metrics.claim_support and metrics.monetary_correctness."""
+    calculations and day counts and how many are exact; findings and how many
+    have valid references (see metrics.reference_integrity: this is NOT a check
+    that the finding's assertion is true). `audit_ok` is the hard gate for a
+    primary success; `completeness` also requires every stated search to
+    reproduce (reported apart, as `searches_mismatch`)."""
     by_id = {e["evidence_id"]: e for e in packet["evidence"]}
-    bad_search = {n.split(":")[0] for n in searches_reproduce(packet, snap)}
+    mismatch = searches_reproduce(packet, snap)
+    bad_search = {n.split(":")[0] for n in mismatch}
     resolved = {
         i: (evidence_resolves(e, snap) if e["record"] else i not in bad_search)
         for i, e in by_id.items()
@@ -1291,25 +1535,38 @@ def packet_audit(packet: dict, snap: Snap) -> dict:
         for c in packet["calculations"]
     }
     cutoff = date.fromisoformat(packet["request"]["cutoff"])
-    valid = exact | {
+    counts = {
         d["calculation_id"]: day_count_exact(d, by_id, resolved, snap, cutoff)
         for d in packet["day_counts"]
     }
+    valid = exact | counts
     findings = packet["diagnosis"]["findings"]
-    supported = sum(
-        all(resolved.get(i, False) for i in f["evidence_ids"])
+    # A finding that cites nothing (no evidence, no calculation) establishes
+    # nothing: it is counted as not valid, not passed by an empty `all`.
+    referenced_ok = sum(
+        bool(f["evidence_ids"] or f["calculation_ids"])
+        and all(resolved.get(i, False) for i in f["evidence_ids"])
         and all(valid.get(i, False) for i in f["calculation_ids"])
         for f in findings
     )
+    cited_total = sum(bool(e["record"]) for e in by_id.values())
+    cited_resolved = sum(bool(e["record"]) and resolved[i] for i, e in by_id.items())
     return {
-        "cited_total": sum(bool(e["record"]) for e in by_id.values()),
-        "cited_resolved": sum(
-            bool(e["record"]) and resolved[i] for i, e in by_id.items()
-        ),
-        "claims": len(findings),
-        "claims_supported": supported,
+        "cited_total": cited_total,
+        "cited_resolved": cited_resolved,
+        "findings": len(findings),
+        "findings_reference_ok": referenced_ok,
         "calcs": len(packet["calculations"]),
         "calcs_exact": sum(exact.values()),
+        "day_counts": len(counts),
+        "day_counts_exact": sum(counts.values()),
+        "searches_mismatch": mismatch,
+        "audit_ok": (
+            cited_resolved == cited_total
+            and sum(exact.values()) == len(exact)
+            and sum(counts.values()) == len(counts)
+            and referenced_ok == len(findings)
+        ),
     }
 
 
@@ -1321,9 +1578,18 @@ def read_jsonl(path: Path) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
+def parse_jsonl(data: bytes) -> list[dict]:
+    return [json.loads(line) for line in data.decode().splitlines() if line.strip()]
+
+
+TABLE_NAME = re.compile(r"[a-z_]+")
+
+
 def searches_reproduce(packet: dict, snap: Snap) -> list[str]:
     """Searches whose stated count differs when the predicate is re-run on the
-    snapshot (docs/evidence-contract.md principle 3). Returns mismatch notes."""
+    snapshot (docs/evidence-contract.md principle 3). Returns mismatch notes. A
+    search that cannot be run (malformed SQL, unknown table) is invalid
+    evidence, reported as a mismatch, never an exception."""
     bad = []
     for e in packet["evidence"]:
         s = e["search"]
@@ -1336,9 +1602,15 @@ def searches_reproduce(packet: dict, snap: Snap) -> list[str]:
                 " AND (payment_reference IS NULL OR payment_reference NOT IN"
                 " (SELECT reference_number FROM payments))",
             )
-        n = snap.con.execute(
-            f"SELECT COUNT(*) FROM {s['table']} WHERE {pred}"  # noqa: S608
-        ).fetchone()[0]
+        try:
+            if not TABLE_NAME.fullmatch(s["table"]):
+                raise sqlite3.Error("bad table name")
+            n = snap.con.execute(
+                f"SELECT COUNT(*) FROM {s['table']} WHERE {pred}"  # noqa: S608
+            ).fetchone()[0]
+        except sqlite3.Error:
+            bad.append(f"{e['evidence_id']}:malformed")
+            continue
         if n != s["observed_count"]:
             bad.append(f"{e['evidence_id']}:{s['observed_count']}!={n}")
     return bad
@@ -1360,62 +1632,100 @@ def fx_abstention_cites(packet: dict) -> bool:
     )
 
 
+def case_row(
+    split: str,
+    case_id: str,
+    lab: dict,
+    packet: dict,
+    entity: dict,
+    snap: Snap,
+    conflicts: C.Conflicts,
+) -> dict:
+    """The scored row of one case: label facts, the packet's disposition and,
+    for an answered packet, evidence completeness including the packet audit."""
+    d = packet["diagnosis"]
+    group = C.group_of(
+        lab["failure_type"], lab["scenario_variant"], case_id, conflicts.verified
+    )
+    row = {
+        "split": split,
+        "case_id": case_id,
+        "failure_type": lab["failure_type"],
+        "variant": lab["scenario_variant"],
+        "difficulty": lab.get("difficulty"),
+        "group_vendor_id": lab.get("group_vendor_id"),
+        "group": group,
+        "disposition": d["disposition"],
+        "category": d["category"],
+        "reason": d["reason"],
+        "label_conflict_with": conflicts.verified.get(case_id, []),
+        "conflict_candidate_with": conflicts.candidates.get(case_id, []),
+        "review_candidate_with": conflicts.review.get(case_id, []),
+        "entity_table": entity["table"],
+        "expected_category": C.expected_category(
+            lab["failure_type"], lab["scenario_variant"]
+        ),
+    }
+    classify(row)
+    row["searches_mismatch"] = searches_reproduce(packet, snap)
+    if group == "fx" and d["disposition"] == "abstained":
+        row["fx_cites_ok"] = fx_abstention_cites(packet)
+    if d["disposition"] == "answered":
+        row |= completeness(packet, (entity["table"], entity["record_id"]), snap)
+    return row
+
+
 def load_split(
-    root: Path,
     split: str,
     labels_by_case: dict,
     snap: Snap,
     conflicts: C.Conflicts,
+    packets: list[dict],
+    requests: list[dict],
+    links: list[dict],
 ) -> list[dict]:
-    links = {
-        r["request_id"]: r["case_id"]
-        for r in read_jsonl(root / "evaluator" / split / "links.jsonl")
-    }
-    requests = {
-        r["request_id"]: r
-        for r in read_jsonl(root / "prepared/requests" / split / "requests.jsonl")
-    }
-    packets = read_jsonl(root / "inference" / split / "packets.jsonl")
+    """Score one split from its already-verified packets, requests and links.
+    The scored case set must be exactly the label roster of the split (every
+    label case has one request, one link and one packet), and every packet must
+    answer the request it was prepared for: same request, snapshot and cutoff.
+    Anything else is refused, never scored on a reduced set."""
+    link_of = {r["request_id"]: r["case_id"] for r in links}
+    request_of = {r["request_id"]: r for r in requests}
     ids = [p["request"]["request_id"] for p in packets]
-    if sorted(ids) != sorted(links) or set(ids) != set(requests):
+    if len(link_of) != len(links) or len(request_of) != len(requests):
+        sys.exit(f"{split}: duplicate request ids in requests or links")
+    if sorted(ids) != sorted(link_of) or set(ids) != set(request_of):
         sys.exit(f"{split}: packets, requests and links do not cover the same cases")
+    cases = sorted(link_of.values())
+    if cases != sorted(labels_by_case):
+        missing = sorted(set(labels_by_case) - set(cases))[:5]
+        extra = sorted(set(cases) - set(labels_by_case))[:5]
+        sys.exit(
+            f"{split}: scored cases differ from the label roster"
+            f" (missing {missing}, extra {extra})"
+        )
     rows = []
     for p in packets:
         rid = p["request"]["request_id"]
-        case_id = links[rid]
-        lab = labels_by_case[case_id]
-        d = p["diagnosis"]
-        ent = requests[rid]["primary_entity"]
-        group = C.group_of(
-            lab["failure_type"], lab["scenario_variant"], case_id, conflicts.verified
+        req = request_of[rid]
+        if (
+            p["request"] != req
+            or req["snapshot"] != snap.digest
+            or req["cutoff"] != CUTOFF.isoformat()
+        ):
+            sys.exit(f"{split}: packet {rid} does not answer its prepared request")
+        case_id = link_of[rid]
+        rows.append(
+            case_row(
+                split,
+                case_id,
+                labels_by_case[case_id],
+                p,
+                req["primary_entity"],
+                snap,
+                conflicts,
+            )
         )
-        row = {
-            "split": split,
-            "case_id": case_id,
-            "failure_type": lab["failure_type"],
-            "variant": lab["scenario_variant"],
-            "difficulty": lab.get("difficulty"),
-            "group_vendor_id": lab.get("group_vendor_id"),
-            "group": group,
-            "disposition": d["disposition"],
-            "category": d["category"],
-            "reason": d["reason"],
-            "label_conflict_with": conflicts.verified.get(case_id, []),
-            "conflict_candidate_with": conflicts.candidates.get(case_id, []),
-            "review_candidate_with": conflicts.review.get(case_id, []),
-            "entity_table": ent["table"],
-            "expected_category": C.expected_category(
-                lab["failure_type"], lab["scenario_variant"]
-            ),
-        }
-        classify(row)
-        row["searches_mismatch"] = searches_reproduce(p, snap)
-        if group == "fx" and d["disposition"] == "abstained":
-            row["fx_cites_ok"] = fx_abstention_cites(p)
-        if d["disposition"] == "answered":
-            row |= completeness(p, (ent["table"], ent["record_id"]), snap)
-            row |= packet_audit(p, snap)
-        rows.append(row)
     return rows
 
 
@@ -1531,7 +1841,7 @@ def all_metrics(rows: list[dict]) -> dict:
         ),
         "evidence_recall": M.evidence_recall(rows),
         "citation_resolution": M.citation_resolution(rows),
-        "claim_support": M.claim_support(rows),
+        "reference_integrity": M.reference_integrity(rows),
         "monetary_correctness": M.monetary_correctness(rows),
         "execution_reliability": M.execution_reliability(rows),
         "false_alarms_by": M.false_alarms_by(legit_all),
@@ -1743,9 +2053,13 @@ def render(m: dict) -> str:
 def evaluate(tag: str, upstream: Path = DEFAULT_UPSTREAM) -> None:
     root = REPO / "artifacts/dev-runs" / tag
     manifest = json.loads((root / "run-manifest.json").read_text())
-    # Packets must be final: refuse if they changed since the run manifest.
+    # Inputs must be final: refuse if any changed since the run manifest, and
+    # read them before any label is opened.
     verify_digests(root, manifest)
-    snap = Snap(root / "prepared/snapshot/snapshot.sqlite")
+    inputs = {s: read_split_inputs(root, manifest, s) for s in SPLITS}
+    snap = Snap(
+        root / "prepared/snapshot" / SNAPSHOT_FILE, manifest["snapshot_content_sha256"]
+    )
     rows: list[dict] = []
     labels_by_split = {  # labels opened only here, dev splits only
         split: {
@@ -1761,7 +2075,9 @@ def evaluate(tag: str, upstream: Path = DEFAULT_UPSTREAM) -> None:
         all_labels, snap.con, REPO / "data/private" / tag / "key"
     )
     for split in SPLITS:
-        rows += load_split(root, split, labels_by_split[split], snap, conflicts)
+        rows += load_split(
+            split, labels_by_split[split], snap, conflicts, *inputs[split]
+        )
     rows.sort(key=lambda r: (r["split"], r["case_id"]))
     metrics = {
         "tag": tag,
