@@ -77,24 +77,32 @@ def calibrate(target: float, sd: float) -> float:
     return (lo + hi) / 2
 
 
-def model() -> tuple[float, float, float]:
+def model(
+    sd_cluster: float = SD_CLUSTER, sd_system: float = SD_SYSTEM
+) -> tuple[float, float, float]:
     """Return (mu_a, mu_b, exact population difference)."""
-    mu_a = calibrate(TARGET_A, math.hypot(SD_CLUSTER, SD_CASE))
-    mu_b = calibrate(TARGET_B, math.hypot(SD_CLUSTER, SD_CASE, SD_SYSTEM))
-    true_diff = mean_rate(mu_a, math.hypot(SD_CLUSTER, SD_CASE)) - mean_rate(
-        mu_b, math.hypot(SD_CLUSTER, SD_CASE, SD_SYSTEM)
-    )
+    sd_a = math.hypot(sd_cluster, SD_CASE)
+    sd_b = math.hypot(sd_cluster, SD_CASE, sd_system)
+    mu_a = calibrate(TARGET_A, sd_a)
+    mu_b = calibrate(TARGET_B, sd_b)
+    true_diff = mean_rate(mu_a, sd_a) - mean_rate(mu_b, sd_b)
     return mu_a, mu_b, true_diff
 
 
 def simulate_dataset(
-    rng: random.Random, sizes: list[int], n_clusters: int, mu_a: float, mu_b: float
+    rng: random.Random,
+    sizes: list[int],
+    n_clusters: int,
+    mu_a: float,
+    mu_b: float,
+    sd_cluster: float,
+    sd_system: float,
 ) -> list[tuple[str, bool, bool]]:
     cases: list[tuple[str, bool, bool]] = []
     for c in range(n_clusters):
         size = sizes[rng.randrange(len(sizes))]
-        u = rng.gauss(0, SD_CLUSTER)
-        w = rng.gauss(0, SD_SYSTEM)
+        u = rng.gauss(0, sd_cluster)
+        w = rng.gauss(0, sd_system)
         for _ in range(size):
             z = rng.gauss(0, SD_CASE)
             sa = rng.random() < expit(mu_a + u + z)
@@ -114,12 +122,16 @@ def coverage(
     mu_a: float,
     mu_b: float,
     true_diff: float,
+    sd_cluster: float,
+    sd_system: float,
 ) -> dict[str, object]:
     rng = random.Random(f"{seed}/{label}/{n_clusters}")
     hits = 0
     widths = 0.0
     for _ in range(sims):
-        cases = simulate_dataset(rng, sizes, n_clusters, mu_a, mu_b)
+        cases = simulate_dataset(
+            rng, sizes, n_clusters, mu_a, mu_b, sd_cluster, sd_system
+        )
         r = paired.cluster_bootstrap(cases, rng.randrange(2**31), reps, alpha, 1)
         lo, hi = r["interval"]  # type: ignore[misc]
         hits += lo <= true_diff <= hi
@@ -143,10 +155,25 @@ def run(
     reps: int,
     seed: int,
     alpha: float = 0.05,
+    sd_cluster: float = SD_CLUSTER,
+    sd_system: float = SD_SYSTEM,
 ) -> dict[str, object]:
-    mu_a, mu_b, true_diff = model()
+    mu_a, mu_b, true_diff = model(sd_cluster, sd_system)
     rows = [
-        coverage(sizes, k, sims, reps, seed, label, alpha, mu_a, mu_b, true_diff)
+        coverage(
+            sizes,
+            k,
+            sims,
+            reps,
+            seed,
+            label,
+            alpha,
+            mu_a,
+            mu_b,
+            true_diff,
+            sd_cluster,
+            sd_system,
+        )
         for label, sizes in scenarios.items()
         for k in cluster_counts
     ]
@@ -154,7 +181,7 @@ def run(
         "true_difference": true_diff,
         "targets": [TARGET_A, TARGET_B],
         "mu": [mu_a, mu_b],
-        "sd_cluster_case_system": [SD_CLUSTER, SD_CASE, SD_SYSTEM],
+        "sd_cluster_case_system": [sd_cluster, SD_CASE, sd_system],
         "alpha": alpha,
         "seed": seed,
         "size_scenarios": scenarios,
@@ -168,6 +195,8 @@ def main() -> None:
     ap.add_argument("--sims", type=int, default=500)
     ap.add_argument("--reps", type=int, default=2000)
     ap.add_argument("--alpha", type=float, default=0.05)
+    ap.add_argument("--sd-cluster", type=float, default=SD_CLUSTER)
+    ap.add_argument("--sd-system", type=float, default=SD_SYSTEM)
     ap.add_argument("--seed", type=int, default=20260101)
     ap.add_argument(
         "--clusters", type=int, nargs="+", default=[5, 10, 15, 20, 30, 55, 100]
@@ -180,7 +209,16 @@ def main() -> None:
     if args.sizes_json:
         scenarios = json.loads(args.sizes_json.read_text())
     t0 = time.time()
-    out = run(scenarios, args.clusters, args.sims, args.reps, args.seed, args.alpha)
+    out = run(
+        scenarios,
+        args.clusters,
+        args.sims,
+        args.reps,
+        args.seed,
+        args.alpha,
+        args.sd_cluster,
+        args.sd_system,
+    )
     out["runtime_seconds"] = time.time() - t0
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(out, indent=2))

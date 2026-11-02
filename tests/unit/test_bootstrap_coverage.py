@@ -34,3 +34,10 @@ def test_alpha_is_recorded_and_widens_interval() -> None:
     narrow = bc.run({"s": [3]}, [20], sims=20, reps=200, seed=3, alpha=0.2)
     assert wide["alpha"] == 0.01
     assert wide["rows"][0]["mean_width"] > narrow["rows"][0]["mean_width"]
+
+
+def test_sd_options_recorded_and_change_model() -> None:
+    r = bc.run({"s": [2]}, [6], sims=3, reps=50, seed=1, sd_cluster=2.0, sd_system=1.0)
+    assert r["sd_cluster_case_system"] == [2.0, bc.SD_CASE, 1.0]
+    assert abs(r["true_difference"] - 0.07) < 1e-4  # calibration holds for any SDs
+    assert r["mu"] != list(bc.model()[:2])

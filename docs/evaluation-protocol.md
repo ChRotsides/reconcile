@@ -70,7 +70,7 @@ The rule is implemented by `evaluation/decide.py` on the output of `evaluation/c
 1. **Primary:** the paired point difference in correct-and-evidence-complete is at least 0.05 (5 percentage points), and the lower bound of the nominal 98% vendor-cluster bootstrap interval is greater than 0.
 2. **False alarms ("no observed increase"):** the upper bound of the same interval for the false-alarm difference (investigator minus baseline, over all legitimate cases) is at most 0. A bound of exactly 0.0 passes; a bound above 0 fails. This is an observed-sample engineering criterion, not a statistical non-inferiority claim: it passes only if the investigator raises no false alarm that the baseline does not also raise in some resample. When neither system raises a false alarm the interval is [0, 0] and says nothing about the underlying rates; the report must then say "neither system raised a false alarm on N legitimate cases" and nothing stronger.
 
-Each check is `pass`, `fail` or `not_established`. A point difference below 0.05, an interval lower bound not above 0, or a false-alarm upper bound above 0 is `fail`. Fewer than 20 clusters gives no interval, and the check is `not_established`, never `pass`. The verdict is `fails` if any check fails, else `not_established` if any check is not established, else `holds`. `decide.py` also refuses comparisons whose method, seed, repetitions, alpha, minimum clusters or view differ from the protocol, requires exactly the protocol's configurations, requires the same investigator run across configurations (by file digest) and different baseline files, and records the split and digests. A verdict on any split other than the sealed one is labelled a rehearsal, not a release verdict.
+Each check is `pass`, `fail` or `not_established`. A point difference below 0.05, an interval lower bound not above 0, or a false-alarm upper bound above 0 is `fail`. Fewer than 30 clusters gives no interval, and the check is `not_established`, never `pass`. The verdict is `fails` if any check fails, else `not_established` if any check is not established, else `holds`. `decide.py` also refuses comparisons whose method, seed, repetitions, alpha, minimum clusters or view differ from the protocol, requires exactly the protocol's configurations, requires the same investigator run across configurations (by file digest) and different baseline files, and records the split and digests. A verdict on any split other than the sealed one is labelled a rehearsal, not a release verdict.
 
 **Who decided what.** The user decided on 2026-11-02: the +5 point minimum paired difference, the rule that false alarms must not increase, and the $25 model budget. The parent made two choices that are stricter than or equal to the user's rule, not looser: it applies both checks to both baseline configurations (the user's rule did not say how to treat two configurations), and it set alpha at 0.02 so that the interval reaches about 95% actual coverage (section 8). The `PLAN.md` +10 point figure was only a candidate; the user's +5 replaces it.
 
@@ -79,8 +79,8 @@ Each check is `pass`, `fail` or `not_established`. A point difference below 0.05
 ## 8. Statistics
 
 - **Method:** `cluster_percentile_bootstrap` (`evaluation/paired.py`). Vendor clusters are resampled with replacement; each replicate recomputes the ratio-of-totals difference. Percentile bounds are `r[floor(alpha/2*(reps-1))]` and `r[ceil((1-alpha/2)*(reps-1))]` of the sorted replicates, with no interpolation.
-- **Seed 20261102, 10000 replicates, alpha 0.02 (nominal 98%), at least 20 clusters.**
-- **Why alpha 0.02 and 20 clusters.** The percentile cluster bootstrap undercovers with few clusters, so coverage was measured by simulation (`evaluation/bootstrap_coverage.py`; results `artifacts/bootstrap_coverage_exact.json` for alpha 0.05 and `artifacts/bootstrap_coverage_exact_a02.json` for alpha 0.02; untracked). True paired difference 0.07; success rates 0.95 and 0.88; cluster sizes drawn from the exact validation (55 clusters, largest 35) and train cluster-size lists; 2000 bootstrap replicates per simulated dataset.
+- **Seed 20261102, 10000 replicates, alpha 0.02 (nominal 98%), at least 30 clusters.**
+- **Why alpha 0.02 and 30 clusters.** The percentile cluster bootstrap undercovers with few clusters, so coverage was measured by simulation (`evaluation/bootstrap_coverage.py`; results `artifacts/bootstrap_coverage_exact.json` for alpha 0.05 and `artifacts/bootstrap_coverage_exact_a02.json` for alpha 0.02; untracked). True paired difference 0.07; success rates 0.95 and 0.88; cluster sizes drawn from the exact validation (55 clusters, largest 35) and train cluster-size lists; 2000 bootstrap replicates per simulated dataset.
 
 | Clusters | Nominal 95%, validation sizes | Nominal 95%, train sizes | Nominal 98%, validation sizes | Nominal 98%, train sizes |
 |---:|---:|---:|---:|---:|
@@ -94,8 +94,17 @@ Each check is `pass`, `fail` or `not_established`. A point difference below 0.05
 | 55 | 0.934 | 0.956 | 0.961 | 0.978 |
 | 80 | 0.944 | 0.916 | 0.970 | 0.967 |
 
-The 95% columns used 500 simulated datasets per cell; the 98% columns used 1000. Reading: a nominal 95% interval covered about 0.91 to 0.96; a nominal 98% interval covered 0.954 to 0.978 from 20 clusters, which is the intended 95%. Below 20 clusters coverage falls (0.917 and 0.938 at 15; 0.804 and 0.839 at 10), so no interval is reported there.
-- **Assumptions of that measurement (not verified against real data):** the outcome model's standard deviations (cluster 1.0, case 1.0, system-by-cluster 0.5, logit scale) and the two success rates were chosen, not fitted to data; with the real correlation structure coverage could be better or worse. A sensitivity check over other standard deviations is pending; see `evaluation/bootstrap_coverage.py` for the model and what has been run. Until it is done, the 98% choice is a measured-under-assumptions choice, not a guarantee.
+The 95% columns used 500 simulated datasets per cell; the 98% columns used 1000. Reading: a nominal 95% interval covered about 0.91 to 0.96; a nominal 98% interval covered 0.954 to 0.978 from 20 clusters, which is the intended 95%. Below 20 clusters coverage falls (0.917 and 0.938 at 15; 0.804 and 0.839 at 10). The sensitivity check below moved the minimum to 30.
+- **Assumptions of that measurement (not verified against real data):** the outcome model's standard deviations (cluster 1.0, case 1.0, system-by-cluster 0.5, logit scale) and the two success rates were chosen, not fitted to data; with the real correlation structure coverage could be better or worse. Sensitivity check (alpha 0.02, 1000 datasets per cell; `artifacts/bootstrap_coverage_sens_*.json`), shared cluster SD / system-by-cluster SD:
+
+| SDs | 20 clusters (validation, train sizes) | 30 clusters | 55 clusters |
+|---|---|---|---|
+| 0.5 / 0.5 | 0.952, 0.960 | 0.955, 0.965 | 0.964, 0.971 |
+| 1.0 / 0.5 (main) | 0.954, 0.958 | 0.955, 0.956 | 0.961, 0.978 |
+| 1.0 / 1.0 | 0.946, 0.956 | 0.956, 0.956 | 0.972, 0.975 |
+| 2.0 / 0.5 | 0.934, 0.946 | 0.944, 0.954 | 0.964, 0.969 |
+
+With a strong vendor effect, 20 clusters fell about two standard errors short of 0.95 (0.934, SE 0.008); from 30 clusters every scenario is within about one standard error of 0.95 or above it. So the protocol requires 30 clusters. This remains a measurement under a chosen model, not a guarantee for the real correlation structure.
 - Zero observed errors does not establish zero risk; intervals describe the sealed sample only, and dependency inside a vendor is the only dependency modelled.
 
 ## 9. Budgets
