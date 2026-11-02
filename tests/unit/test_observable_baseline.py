@@ -120,7 +120,9 @@ def test_featurize_order_and_groups_do_not_depend_on_tokens(
         )
         monkeypatch.setattr(run.F, "resolve", lambda s, t, rid: by_tok[rid])
         monkeypatch.setattr(run.F, "vendor_of", lambda f: vendor.get(f, "none"))
-        ids, ents, xs, groups = run.featurize(root, None, split)
+        ids, ents, xs, groups = run.featurize(
+            root, None, split, run.read_links(root, split)
+        )
         return ids, xs, groups
 
     a = featurized({"A1": "ff", "A2": "11", "A3": "55", "A4": "aa"}, "train")
@@ -129,6 +131,44 @@ def test_featurize_order_and_groups_do_not_depend_on_tokens(
     assert a[0] == cases
     assert a[1] == [{"x": 1.0}, {"x": 2.0}, {"x": 3.0}, {"x": 4.0}]
     assert a[2] == ["A1", "A2", "A1", "A4"]
+
+
+def test_prediction_featurize_needs_no_evaluator_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prediction featurization opens only requests and snapshot: it runs with
+    the evaluator directory absent, and joining case ids afterwards gives the
+    same per-case inputs as the training-style (links-first) path."""
+    import json
+
+    run = _load("run")
+    value = {"r1": 3.0, "r2": 1.0, "r3": 2.0}
+    case = {"r1": "C3", "r2": "C1", "r3": "C2"}
+    root = tmp_path / "root"
+    (root / "prepared/requests/validation").mkdir(parents=True)
+    (root / "prepared/requests/validation/requests.jsonl").write_text(
+        "".join(
+            json.dumps(
+                {
+                    "request_id": q,
+                    "primary_entity": {"table": "payments", "record_id": q},
+                }
+            )
+            + "\n"
+            for q in case
+        )
+    )
+    monkeypatch.setattr(run.F, "extract", lambda s, t, rid: {"x": value[rid]})
+    monkeypatch.setattr(run.F, "resolve", lambda s, t, rid: rid)
+    monkeypatch.setattr(run.F, "vendor_of", lambda f: f)
+    assert not (root / "evaluator").exists()
+    pred = run.featurize(root, None, "validation")
+    assert pred[0] == ["r1", "r2", "r3"]  # opaque request ids, file order
+    ids, ents, xs = run.join_cases(pred, case)
+    assert ids == ["C1", "C2", "C3"]
+    assert [e[1] for e in ents] == ["r2", "r3", "r1"]
+    assert xs == [{"x": 1.0}, {"x": 2.0}, {"x": 3.0}]
 
 
 def test_build_rows_carry_split_and_cluster(monkeypatch: pytest.MonkeyPatch) -> None:

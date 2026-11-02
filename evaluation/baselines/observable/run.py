@@ -123,26 +123,35 @@ def prepare(tag: str, upstream: Path) -> tuple[Path, Path]:
 # ------------------------------------------------------------------ features
 
 
-def featurize(
-    root: Path, snap: F.Snapshot, split: str
-) -> tuple[list[str], list[tuple[str, str]], list[dict[str, float]], list[str]]:
-    """Per request: (case_id, (table, record_id), features, vendor group), in
-    case_id order. Reads the requests file and the snapshot; the evaluator-side
-    links file only maps request_id to case_id (no label). Tokens, request ids
-    and so their order depend on the HMAC key, so sample order and group names
-    come from case ids, never from tokens: same inputs, same fit, any key."""
-    links = {
+def read_links(root: Path, split: str) -> dict[str, str]:
+    """request_id -> case_id. Evaluator side: training and scoring only."""
+    return {
         r["request_id"]: r["case_id"]
         for r in read_jsonl(root / "evaluator" / split / "links.jsonl")
     }
-    reqs = sorted(
-        read_jsonl(root / "prepared/requests" / split / "requests.jsonl"),
-        key=lambda r: links[r["request_id"]],
-    )
+
+
+def featurize(
+    root: Path,
+    snap: F.Snapshot,
+    split: str,
+    case_of: dict[str, str] | None = None,
+) -> tuple[list[str], list[tuple[str, str]], list[dict[str, float]], list[str]]:
+    """Per request: (id, (table, record_id), features, vendor group).
+
+    Without `case_of` (prediction) this reads only the requests file and the
+    snapshot; ids are opaque request ids in file order and no evaluator file is
+    opened, so it can run on a sealed split. With `case_of` (training) ids are
+    case ids and rows are in case_id order: tokens, request ids and so their
+    file order depend on the HMAC key, so sample order and group names must come
+    from case ids: same inputs, same fit, any key."""
+    reqs = read_jsonl(root / "prepared/requests" / split / "requests.jsonl")
+    if case_of is not None:
+        reqs.sort(key=lambda r: case_of[r["request_id"]])
     ids, ents, xs, raw_groups = [], [], [], []
     for r in reqs:
         table, rid = r["primary_entity"]["table"], r["primary_entity"]["record_id"]
-        ids.append(links[r["request_id"]])
+        ids.append(r["request_id"] if case_of is None else case_of[r["request_id"]])
         ents.append((table, rid))
         xs.append(F.extract(snap, table, rid))
         raw_groups.append(
@@ -152,6 +161,23 @@ def featurize(
     first: dict[str, str] = {}
     groups = [first.setdefault(g, c) for g, c in zip(raw_groups, ids, strict=True)]
     return ids, ents, xs, groups
+
+
+def join_cases(
+    pred_side: tuple[
+        list[str], list[tuple[str, str]], list[dict[str, float]], list[str]
+    ],
+    case_of: dict[str, str],
+) -> tuple[list[str], list[tuple[str, str]], list[dict[str, float]]]:
+    """Scoring step: attach case ids to request-keyed prediction inputs and put
+    them in case_id order (the order the scored rows and metrics use)."""
+    ids, ents, xs, _ = pred_side
+    order = sorted(range(len(ids)), key=lambda i: case_of[ids[i]])
+    return (
+        [case_of[ids[i]] for i in order],
+        [ents[i] for i in order],
+        [xs[i] for i in order],
+    )
 
 
 def matrix(xs: list[dict[str, float]], names: list[str]) -> np.ndarray:
@@ -458,8 +484,14 @@ def main() -> None:
     snap = F.Snapshot(snap_dir / "snapshot.sqlite", CUTOFF)
 
     # 1. features: snapshot and requests only (no label file open yet)
-    data = {s: featurize(root, snap, s) for s in SPLITS}
-    names = F.feature_names(data["train"][2][0])
+    # Prediction inputs (validation) use no evaluator file; training reads case
+    # ids to fix sample order.
+    train = featurize(root, snap, "train", read_links(root, "train"))
+    pred_inputs = featurize(root, snap, "validation")
+    names = F.feature_names(train[2][0])
+    # scoring step (evaluator side): join case ids to the request-keyed rows
+    va = join_cases(pred_inputs, read_links(root, "validation"))
+    data = {"train": train, "validation": va}
     Xtr, Xva = (matrix(data[s][2], names) for s in SPLITS)
 
     # 2. labels: opened only now, after every feature exists
