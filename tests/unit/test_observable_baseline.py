@@ -4,6 +4,9 @@ import importlib.util
 import sys
 from datetime import date
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 DIR = Path(__file__).resolve().parents[2] / "evaluation/baselines/observable"
 
@@ -71,3 +74,58 @@ def test_feature_groups_cover_the_declared_residuals() -> None:
         "i_status_paid",
         "i_n_approval",
     ]
+
+
+def test_featurize_order_and_groups_do_not_depend_on_tokens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two key-dependent token mappings of the same toy cases give the same
+    samples, in the same (case_id) order, with the same group names. A1 and A3
+    share a vendor; GL case A4 is its own group."""
+    import json
+
+    run = _load("run")
+    cases = ["A1", "A2", "A3", "A4"]
+    value = {"A1": 1.0, "A2": 2.0, "A3": 3.0, "A4": 4.0}
+    vendor = {"A1": "v1", "A2": "v2", "A3": "v1"}
+
+    def featurized(
+        tokens: dict[str, str], split: str
+    ) -> tuple[list[str], list[dict[str, float]], list[str]]:
+        root = tmp_path / split
+        (root / "evaluator" / split).mkdir(parents=True)
+        (root / "prepared/requests" / split).mkdir(parents=True)
+        by_tok = {tokens[c]: c for c in cases}
+        reqs: list[dict[str, Any]] = [
+            {
+                "request_id": "req_" + tokens[c],
+                "primary_entity": {
+                    "table": "gl_entries" if c == "A4" else "payments",
+                    "record_id": tokens[c],
+                },
+            }
+            for c in cases
+        ]
+        links = [{"request_id": r["request_id"], "case_id": by_tok[r["request_id"][4:]]}
+                 for r in reqs]  # fmt: skip
+        reqs.sort(key=lambda r: r["request_id"])  # token order, as in the real files
+        for name, rows in (("prepared/requests", reqs), ("evaluator", links)):
+            file = "requests.jsonl" if name != "evaluator" else "links.jsonl"
+            (root / name / split / file).write_text(
+                "".join(json.dumps(r) + "\n" for r in rows)
+            )
+        monkeypatch.setattr(
+            run.F, "extract", lambda s, t, rid: {"x": value[by_tok[rid]]}
+        )
+        monkeypatch.setattr(run.F, "resolve", lambda s, t, rid: by_tok[rid])
+        monkeypatch.setattr(run.F, "vendor_of", lambda f: vendor.get(f, "none"))
+        ids, ents, xs, groups = run.featurize(root, None, split)
+        return ids, xs, groups
+
+    a = featurized({"A1": "ff", "A2": "11", "A3": "55", "A4": "aa"}, "train")
+    b = featurized({"A1": "01", "A2": "ee", "A3": "99", "A4": "20"}, "validation")
+    assert a == b
+    assert a[0] == cases
+    assert a[1] == [{"x": 1.0}, {"x": 2.0}, {"x": 3.0}, {"x": 4.0}]
+    assert a[2] == ["A1", "A2", "A1", "A4"]

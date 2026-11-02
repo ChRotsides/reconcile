@@ -19,12 +19,14 @@ are replicated from `dev_run.py` (`classify`, `cohort_metrics`,
 
 import argparse
 import json
+import resource
 import sqlite3
 import sys
 import time
 import warnings
 from collections import Counter
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -123,21 +125,31 @@ def prepare(tag: str, upstream: Path) -> tuple[Path, Path]:
 def featurize(
     root: Path, snap: F.Snapshot, split: str
 ) -> tuple[list[str], list[tuple[str, str]], list[dict[str, float]], list[str]]:
-    """Per request: (request_id, (table, record_id), features, vendor group).
-    Reads the requests file and the snapshot only."""
+    """Per request: (case_id, (table, record_id), features, vendor group), in
+    case_id order. Reads the requests file and the snapshot; the evaluator-side
+    links file only maps request_id to case_id (no label). Tokens, request ids
+    and so their order depend on the HMAC key, so sample order and group names
+    come from case ids, never from tokens: same inputs, same fit, any key."""
+    links = {
+        r["request_id"]: r["case_id"]
+        for r in read_jsonl(root / "evaluator" / split / "links.jsonl")
+    }
     reqs = sorted(
         read_jsonl(root / "prepared/requests" / split / "requests.jsonl"),
-        key=lambda r: r["request_id"],
+        key=lambda r: links[r["request_id"]],
     )
-    ids, ents, xs, groups = [], [], [], []
+    ids, ents, xs, raw_groups = [], [], [], []
     for r in reqs:
         table, rid = r["primary_entity"]["table"], r["primary_entity"]["record_id"]
-        ids.append(r["request_id"])
+        ids.append(links[r["request_id"]])
         ents.append((table, rid))
         xs.append(F.extract(snap, table, rid))
-        groups.append(
+        raw_groups.append(
             F.vendor_of(F.resolve(snap, table, rid)) if table != "gl_entries" else rid
         )
+    # GroupKFold breaks ties by group name, so name each group by its first case
+    first: dict[str, str] = {}
+    groups = [first.setdefault(g, c) for g, c in zip(raw_groups, ids, strict=True)]
     return ids, ents, xs, groups
 
 
@@ -429,11 +441,7 @@ def main() -> None:
                 args.upstream / "data/benchmark" / split / "rca_ground_truth.jsonl"
             )
         }
-        links = {
-            r["request_id"]: r["case_id"]
-            for r in read_jsonl(root / "evaluator" / split / "links.jsonl")
-        }
-        return [by_case[links[rid]] | {"case_id": links[rid]} for rid in data[split][0]]
+        return [by_case[c] | {"case_id": c} for c in data[split][0]]
 
     ltr, lva = labels_for("train"), labels_for("validation")
     ytr = np.array([fine_label(r) for r in ltr])
@@ -479,9 +487,20 @@ def main() -> None:
             best = (n, name, model)
     assert best is not None
     _, best_name, best_model = best
+    t_fit = time.monotonic()
     model = clone_model(best_model).fit(Xtr, ytr)
+    fit_seconds = time.monotonic() - t_fit
     classes = list(model.classes_)
+    t_pred = time.monotonic()
     proba = model.predict_proba(Xva)
+    batch_predict_seconds = time.monotonic() - t_pred
+    # per-case latency: one single-row predict_proba call per validation case
+    # (results above come from the batch call; these timings only measure)
+    per_case_seconds = []
+    for i in range(len(Xva)):
+        t = time.monotonic()
+        model.predict_proba(Xva[i : i + 1])
+        per_case_seconds.append(time.monotonic() - t)
     pred = [classes[i] for i in proba.argmax(1)]
     conf = list(proba.max(1))
     rows = score_rows(pred, conf)
@@ -706,6 +725,21 @@ def main() -> None:
             "relaxed record-availability upper bound, not a packet check "
             "(evidence.py docstring, docs/baseline-observable.md section 2)"
         ),
+        "efficiency": {
+            **M.efficiency(
+                per_case_seconds,
+                resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,  # KiB on Linux
+                Decimal("0"),  # no paid calls
+                primary["all_cases"]["correct_and_evidence_complete_over_cohort"]["n"],
+            ),
+            "latency_basis": (
+                "per validation case: one single-row predict_proba call on the "
+                "selected fitted model, features already extracted"
+            ),
+            "train_fit_seconds_selected_model": round(fit_seconds, 3),
+            "validation_batch_predict_seconds": round(batch_predict_seconds, 4),
+            "peak_rss_note": "whole script process, including grid search",
+        },
         "seconds": round(time.monotonic() - t0, 1),
         "command": (
             "uv run --group eval python evaluation/baselines/observable/run.py "
