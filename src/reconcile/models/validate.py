@@ -22,6 +22,7 @@ from reconcile.domain.contracts import (
     EvidencePacket,
     FindingState,
 )
+from reconcile.domain.money import CURRENCY_SCALE
 
 MAX_SUMMARY = 600
 MAX_TEXT = 300
@@ -29,7 +30,8 @@ MAX_CLAIMS = 20
 NO_ACTION = "none"
 
 # Verbs that would send an analyst to change money or records. They are
-# allowed only when a packet recommendation itself uses the word.
+# allowed only when the packet's own text (recommendations, assumptions,
+# limitations) already uses the word.
 FORBIDDEN_ACTIONS = (
     "pay",
     "repay",
@@ -68,16 +70,36 @@ def _strip_ids(text: str) -> str:
     return _PREFIXED.sub(" ", _HEX.sub(" ", text))
 
 
-def _amounts(text: str) -> set[tuple[Decimal, str | None]]:
-    """(absolute value, currency or None) for each decimal or currency-tagged number."""
+def _amounts(
+    text: str, currencies: frozenset[str] | None = None
+) -> set[tuple[Decimal, str | None]]:
+    """(absolute value, currency or None) for each decimal or currency-tagged number.
+
+    With `currencies`, a 3-letter token after a number is a currency only if it
+    is in that set ("7590.62 ACH payment" is the bare amount 7590.62); a bare
+    integer is then not an amount.
+    """
     found: set[tuple[Decimal, str | None]] = set()
     for m in _AMOUNT.finditer(_DATE.sub(" ", _strip_ids(text))):
+        cur = m["cur"]
+        if currencies is not None and cur not in currencies:
+            cur = None
+            if "." not in m["num"]:
+                continue
         try:
             value = abs(Decimal(m["num"].replace(",", "")))
         except InvalidOperation:  # a stray "1,,2" is not an amount
             continue
-        found.add((value, m["cur"]))
+        found.add((value, cur))
     return found
+
+
+def _packet_currencies(packet_json: str) -> frozenset[str]:
+    """Codes the packet's amount strings carry ("12.50 USD"), plus known ISO codes
+    so a real wrong currency in prose is still checked against the packet."""
+    return frozenset(re.findall(r"\d ([A-Z]{3})\"", packet_json)) | frozenset(
+        CURRENCY_SCALE
+    )
 
 
 def _prefixed_ids(text: str) -> set[str]:
@@ -209,7 +231,7 @@ def _check_text(text: str, packet: EvidencePacket, packet_json: str) -> list[str
             problems.append(f"date {d} is not in the packet")
     packet_amounts = _amounts(packet_json)
     packet_values = {v for v, _ in packet_amounts}
-    for value, cur in _amounts(text):
+    for value, cur in _amounts(text, _packet_currencies(packet_json)):
         ok = (value, cur) in packet_amounts if cur else value in packet_values
         if not ok:
             problems.append(
@@ -229,9 +251,13 @@ def _check_text(text: str, packet: EvidencePacket, packet_json: str) -> list[str
         re.findall(
             r"[a-z]+",
             " ".join(
-                r.action_type + " " + " ".join(r.prerequisites)
+                r.action_type
+                + " "
+                + " ".join(r.prerequisites + r.unresolved_assumptions)
                 for r in packet.recommendations
-            ).lower(),
+            ).lower()
+            + " "
+            + " ".join(packet.limitations).lower(),
         )
     )
     for w in {
@@ -239,7 +265,7 @@ def _check_text(text: str, packet: EvidencePacket, packet_json: str) -> list[str
         for m in _ACTION_WORD.finditer(_strip_ids(text))
     }:
         if not set(re.findall(r"[a-z]+", w)) <= own:
-            problems.append(f"action word {w!r} is not a packet recommendation")
+            problems.append(f"action word {w!r} does not appear in the packet")
     return problems
 
 

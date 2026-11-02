@@ -3,6 +3,7 @@ fabrication is rejected."""
 
 import copy
 import json
+import re
 import tempfile
 from dataclasses import replace
 from datetime import date
@@ -371,3 +372,54 @@ def test_problems_never_quote_long_model_text() -> None:
     draft = faithful(packet)
     draft["next_step"]["action"] = "q" * 5000
     assert all(len(p) < 300 for p in validate(draft, packet))
+
+
+def test_faithful_restatement_of_packet_limitation_is_accepted() -> None:
+    packet = load_packets()["f12_payment_missing_from_bank"]
+    assert any("do not pay again" in x for x in packet.limitations)
+    draft = faithful(packet)
+    draft["next_step"]["text"] = (
+        "A missing row is not proof; do not pay again unchecked."
+    )
+    assert validate(draft, packet) == []
+
+
+def test_action_word_absent_from_the_whole_packet_is_rejected() -> None:
+    packet = load_packets()["f06_double_payment"]
+    texts = [*packet.limitations]
+    for r in packet.recommendations:
+        texts += [r.action_type, *r.prerequisites, *r.unresolved_assumptions]
+    assert not re.search(r"\bpay\b", " ".join(texts), re.I)
+    draft = faithful(packet)
+    draft["next_step"]["text"] = "Pay the vendor again."
+    assert has(validate(draft, packet), "action word")
+
+
+def _packet_amount(packet: EvidencePacket) -> tuple[str, str]:
+    m = re.search(r"(\d+\.\d\d) ([A-Z]{3})\"", json.dumps(packet.to_obj()))
+    assert m
+    return m.group(1), m.group(2)
+
+
+def test_token_after_amount_that_is_not_a_currency_is_a_bare_amount() -> None:
+    packet = load_packets()["f06_double_payment"]
+    amount, cur = _packet_amount(packet)
+    draft = faithful(packet)
+    draft["summary"] = f"{cur} {amount} ACH payment was made."
+    assert validate(draft, packet) == []
+
+
+def test_bare_amount_before_non_currency_token_must_still_be_in_the_packet() -> None:
+    packet = load_packets()["f06_double_payment"]
+    draft = faithful(packet)
+    draft["summary"] = "USD 7590.62 ACH payment was made."
+    assert has(validate(draft, packet), "7590.62")
+
+
+def test_real_wrong_currency_after_packet_amount_is_still_rejected() -> None:
+    packet = load_packets()["f06_double_payment"]
+    draft = faithful(packet)
+    amount, cur = _packet_amount(packet)
+    other = "USD" if cur != "USD" else "EUR"
+    draft["summary"] = f"{amount} {other} was paid."
+    assert has(validate(draft, packet), other)
