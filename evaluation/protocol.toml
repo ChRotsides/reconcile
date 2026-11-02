@@ -4,7 +4,7 @@
 
 [protocol]
 version = "1"
-status = "draft"  # becomes "frozen" in the tagged commit
+status = "frozen"  # tagged protocol-v1, approved by the user on 2026-11-02
 date = "2026-11-02"
 
 [data]

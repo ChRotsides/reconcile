@@ -311,6 +311,29 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 
 **Gate:** An independent run can regenerate the table from saved predictions. Success criteria are declared before sealed test evaluation.
 
+**Gate outcome (2026-11-02): pass, approved by the user; protocol frozen and tagged `protocol-v1`.** Evidence: `evaluation/protocol.toml`, `docs/evaluation-protocol.md`, `docs/results-card-m3.md`, `docs/decisions/0007-metric-choice.md`; three Codex review rounds (28 findings, all fixed and verified by the parent; none changed a development result).
+- **Met:**
+  - Section 7 metrics are shared by both scorers and checked against hand-calculated examples.
+  - Predictions are finalized before scoring. Every input is digest-bound and read once. The scorer runs inference, then a same-image rerun, then scoring.
+  - The release cohort, views, slices and denominators are declared.
+  - The paired vendor-cluster bootstrap uses alpha 0.02 and at least 30 clusters, chosen by a coverage simulation with a sensitivity check.
+  - Baseline quality, latency and memory are measured, with cost 0 USD.
+  - Code, protocol and data digests are recorded.
+  - CI runs the regression checks. Leakage, exact arithmetic, citation integrity and legitimate-case handling are covered.
+  - Regeneration: re-scoring the saved packets of `m3-dev-8` gave a byte-identical `cases.jsonl` and identical comparison statistics.
+- **Decision rule (user, 2026-11-02, with the parent's stricter readings accepted at the gate):** against both baseline configurations, the paired primary difference must be at least +5 points with the nominal 98% interval above 0. False alarms must show no observed increase (an aggregate, descriptive criterion). A release verdict also needs all six hard gates. Model budget: $25 in total.
+- **Development rehearsal:** investigator 119/123 against baseline 109/123 (`answer_all`) and 94/123 (`threshold_0.85`); false alarms 0/139 against 25/139 and 3/139. Verdict `holds`, labelled a rehearsal, not evidence for the claim.
+- **Carried to M7, as written acceptance conditions (protocol section 12):**
+  - the sealed-split unlock bound to the tag;
+  - execution-identity binding of code, images, models, thresholds and inputs;
+  - isolated baseline inference with an absence check.
+- **Carried to M4:** predicate-level claim checking before any model-written claim is scored.
+- **Open:**
+  - The CI workflow has not run on GitHub (no remote).
+  - The sealed cohort's cluster count is unknown; below 30 the verdict is `not_established`.
+  - The coverage simulation's outcome model is chosen, not fitted (A064).
+  - The practitioner packet review is still pending from M2.
+
 ### M4 — Bounded AI assistance
 
 - [ ] Select one provider/model through a small validation-only comparison; record identity and pricing assumptions.

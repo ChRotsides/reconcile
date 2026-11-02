@@ -1,6 +1,6 @@
 # Evaluation protocol, version 1
 
-**Status: draft until the commit is tagged `protocol-v1`.** This document explains `evaluation/protocol.toml` in words. If the two disagree, the TOML file and the code it drives (`evaluation/decide.py`, `evaluation/compare.py`, `evaluation/paired.py`, `evaluation/metrics.py`, `evaluation/cohort.py`) are what runs; report the disagreement as a defect. `tests/unit/test_protocol.py` checks that the TOML matches the code for the cohort, the data fields, the deterministic budgets, the statistics block, the status and splits, and the baseline configurations.
+**Status: frozen on 2026-11-02 and tagged `protocol-v1`, approved by the user at the M3 gate.** Runs scored under it must record this file's SHA-256; runs made before the freeze recorded the draft's and are development history. This document explains `evaluation/protocol.toml` in words. If the two disagree, the TOML file and the code it drives (`evaluation/decide.py`, `evaluation/compare.py`, `evaluation/paired.py`, `evaluation/metrics.py`, `evaluation/cohort.py`) are what runs; report the disagreement as a defect. `tests/unit/test_protocol.py` checks that the TOML matches the code for the cohort, the data fields, the deterministic budgets, the statistics block, the status and splits, and the baseline configurations.
 
 ## 1. Purpose
 
