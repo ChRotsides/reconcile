@@ -224,33 +224,55 @@ def run(tag: str, upstream: Path) -> None:
     evaluate(tag, upstream)
 
 
+def image_problem(manifest_id: str, found_id: str | None) -> str | None:
+    """Why the rerun cannot be a valid check, or None. The rerun is only valid
+    on the run's own image (protocol integrity.require_same_image_id)."""
+    if found_id is None:
+        return f"image {manifest_id} is no longer present locally"
+    if found_id != manifest_id:
+        return f"image id {found_id} differs from the manifest's {manifest_id}"
+    return None
+
+
 def rerun(tag: str) -> None:
     """Re-run the container inference on the run's own snapshot and requests
     into fresh directories and compare packet digests with the run manifest."""
     root = REPO / "artifacts/dev-runs" / tag
     manifest = json.loads((root / "run-manifest.json").read_text())
+    # Pin the run's own image by id (run_inference.sh honours $IMAGE), so a
+    # rebuilt shared tag cannot change what is checked.
     have = subprocess.run(
-        ["docker", "image", "inspect", "--format", "{{.Id}}", IMAGE],
+        ["docker", "image", "inspect", "--format", "{{.Id}}", manifest["image_id"]],
         text=True,
         capture_output=True,
     )
-    if have.returncode != 0:
-        sys.exit(f"image {IMAGE} is missing; build it with {SCRIPT} --build")
+    problem = image_problem(
+        manifest["image_id"], have.stdout.strip() if have.returncode == 0 else None
+    )
     n = 1
     while (root / f"rerun-{n}").exists() or (root / f"rerun-{n}.json").exists():
         n += 1
+    if problem:
+        result = {"tag": tag, "rerun": n, "ok": False, "reason": problem}
+        (root / f"rerun-{n}.json").write_text(
+            json.dumps(result, indent=2, sort_keys=True) + "\n"
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        sys.exit(f"rerun-{n}: {problem}")
     result: dict = {
         "tag": tag,
         "rerun": n,
+        "ok": True,
         "image_id": have.stdout.strip(),
-        "image_id_matches_manifest": have.stdout.strip() == manifest["image_id"],
+        "image_id_matches_manifest": True,
         "splits": {},
     }
     for split in SPLITS:
         out = root / f"rerun-{n}" / split
         run_cmd(
             [str(SCRIPT), str(root / "prepared/snapshot"),
-             str(root / "prepared/requests" / split), str(out)]
+             str(root / "prepared/requests" / split), str(out)],
+            env={**os.environ, "IMAGE": manifest["image_id"]},
         )  # fmt: skip
         new = sha256_file(out / "packets.jsonl")
         result["splits"][split] = {
@@ -259,6 +281,7 @@ def rerun(tag: str) -> None:
             "identical": new == manifest["packets_sha256"][split],
         }
     result["identical"] = all(v["identical"] for v in result["splits"].values())
+    result["ok"] = result["identical"]
     (root / f"rerun-{n}.json").write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n"
     )
