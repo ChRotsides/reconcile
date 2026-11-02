@@ -198,7 +198,7 @@ reconcile/
   evaluation/
     adapters/finrca_labels.py
     baselines/, metrics/
-    compare.py, protocol.yaml
+    compare.py, protocol.toml
   tests/
     unit/, integration/, leakage/, regression/
   fixtures/public/
@@ -303,7 +303,7 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 - [ ] Define the release cohort, legitimate-case slices and out-of-scope challenge report, including exclusions and denominators.
 - [ ] Implement paired comparisons and vendor-cluster resampling with a fixed analysis seed.
 - [ ] Measure baseline quality, cost, latency and memory.
-- [ ] Freeze `evaluation/protocol.yaml`: primary metric, practical improvement threshold, false-alarm margin, splits, budgets and ablations.
+- [ ] Freeze `evaluation/protocol.toml` (TOML, read by the standard library's `tomllib`; changed from YAML on 2026-11-02 to avoid a parser dependency): primary metric, practical improvement threshold, false-alarm margin, splits, budgets and ablations.
 - [ ] Record code/data/config digests and deterministic reruns where applicable.
 - [ ] Add CI regression checks for leakage, exact arithmetic, citation integrity and legitimate-case handling.
 
@@ -399,7 +399,7 @@ Map required evidence to the audited evaluator. For legitimate cases lacking a n
 | Answer precision | Correct answered cases / answered cases; undefined when no cases are answered |
 | Coverage and abstention | Answered and abstained fractions of all attempted cases |
 | Root-cause accuracy | Exact supported category, broken down by family/difficulty |
-| Evidence precision/recall | Correct required citations / cited records and / required records; declare empty-set conventions |
+| Evidence recall and citation resolution | Recall: evidence-contract requirement items met / required items. Citation resolution: cited records that exist in the snapshot with the recorded values / cited records. Declare empty-set conventions. (Changed on 2026-11-02 from record-set precision, "correct required citations / cited records": the contract states requirements as items, and it allows context citations that this formula would count as errors.) |
 | Claim support | Unsupported or ungradable factual claims / emitted claims; citation presence alone is insufficient |
 | False-alarm rate | Legitimate cases diagnosed as failures / all legitimate cases |
 | Monetary correctness | Exact validated calculations / reported calculations, alongside calculation coverage |
@@ -470,7 +470,7 @@ reconcile data fetch --dataset finrca --revision <pinned-commit> --output data/u
 reconcile data prepare --source data/upstream --output data/prepared --config configs/development.yaml
 reconcile investigate --snapshot data/prepared/inputs --request fixtures/public/request.json --mode deterministic --output artifacts/demo
 reconcile batch --snapshot data/prepared/inputs --requests data/prepared/requests.jsonl --config configs/evaluation.yaml --output artifacts/run-001
-reconcile evaluate --predictions artifacts/run-001/predictions.jsonl --labels data/evaluator/test --protocol evaluation/protocol.yaml --output artifacts/run-001/evaluation
+reconcile evaluate --predictions artifacts/run-001/predictions.jsonl --labels data/evaluator/test --protocol evaluation/protocol.toml --output artifacts/run-001/evaluation
 reconcile report --run artifacts/run-001 --format html
 reconcile demo --offline
 ```
