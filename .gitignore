@@ -11,6 +11,7 @@ DECISIONS.local.md
 # Secrets and local configuration
 .env
 .env.*
+.config/
 !.env.example
 *.pem
 *.key
