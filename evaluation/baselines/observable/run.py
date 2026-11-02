@@ -44,6 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import cohort as C  # noqa: E402  (shared with evaluation/dev_run.py)
 import evidence  # noqa: E402
 import features as F  # noqa: E402
+import metrics as M  # noqa: E402  (shared metric definitions, PLAN.md section 7)
 
 from reconcile.adapters.finrca import create_key_file, prepare_finrca_snapshot  # noqa: E402
 from reconcile.adapters.finrca_requests import prepare_finrca_requests  # noqa: E402
@@ -219,6 +220,7 @@ def build_rows(
             "case_id": case_id,
             "failure_type": lab["failure_type"],
             "variant": lab["scenario_variant"],
+            "difficulty": lab.get("difficulty"),
             "group": group,
             "entity_table": table,
             "predicted": p,
@@ -246,52 +248,72 @@ def build_rows(
     return rows
 
 
-def frac(n: int, d: int) -> dict[str, Any]:
-    return {"n": n, "d": d, "rate": round(n / d, 4) if d else None}
+def as_scored(rows: list[dict[str, Any]], answered_fn: Any) -> list[dict[str, Any]]:
+    """Rows in the shape the shared metrics (evaluation/metrics.py) read: the
+    classifier answers a case or, by `answered_fn`, abstains from it."""
+    out = []
+    for r in rows:
+        a = bool(answered_fn(r))
+        out.append(
+            r
+            | {
+                "disposition": "answered" if a else "abstained",
+                "reason": None,
+                "searches_mismatch": [],
+                "outcome": ("correct" if r["correct"] else "wrong")
+                if a
+                else "abstained",
+                "kind": r.get("kind") if a else None,
+            }
+        )
+    return out
 
 
-def metrics(
+def baseline_metrics(
     rows: list[dict[str, Any]],
     answered_fn: Any = lambda r: True,
     groups: tuple[str, ...] = VIEWS["all_cases"],
 ) -> dict[str, Any]:
-    """Same definitions as dev_run.cohort_metrics, with `answered_fn` deciding
-    abstention (default: the classifier always answers) and `groups` the view."""
-    c = [r for r in rows if r["group"] in groups]
-    ans = [r for r in c if answered_fn(r)]
-    cor = [r for r in ans if r["correct"]]
-    comp = [r for r in cor if r["complete"]]
+    """The shared definitions of evaluation/metrics.py applied to the baseline's
+    rows, with `answered_fn` deciding abstention (default: the classifier always
+    answers) and `groups` the view."""
+    sr = as_scored(rows, answered_fn)
+    cm = M.cohort_metrics(sr, groups)
+    c = [r for r in sr if r["group"] in groups]
     legit = [r for r in c if r["failure_type"] == "NO_FAILURE"]
-    legit_all = [r for r in rows if r["failure_type"] == "NO_FAILURE"]
-    oos = [r for r in rows if r["group"] == "oos_failure"]
-    coarse = [
-        r
-        for r in ans
-        if is_failure(r["category"]) == (r["failure_type"] != "NO_FAILURE")
-    ]
+    legit_all = [r for r in sr if r["failure_type"] == "NO_FAILURE"]
+    ac = M.all_clear_risk(sr)
 
     def fa(r: dict[str, Any]) -> bool:
-        return answered_fn(r) and r.get("kind") == "false_alarm"
+        return r["disposition"] == "answered" and r.get("kind") == "false_alarm"
 
     def fa_narrow(r: dict[str, Any]) -> bool:
-        return answered_fn(r) and r["category"] in ("F06", "F12", "F14")
+        return r["disposition"] == "answered" and r["category"] in (
+            "F06",
+            "F12",
+            "F14",
+        )
 
     return {
-        "cohort_cases": len(c),
-        "answered": frac(len(ans), len(c)),
-        "answer_precision_exact": frac(len(cor), len(ans)),
-        "failure_vs_no_failure_accuracy_answered": frac(len(coarse), len(ans)),
-        "evidence_complete_among_answered": frac(
-            sum(r["complete"] for r in ans), len(ans)
+        "cohort_cases": cm["cases"],
+        "answered": cm["answered"],
+        "answer_precision_exact": cm["answer_precision"],
+        "failure_vs_no_failure_accuracy_answered": cm[
+            "failure_vs_no_failure_accuracy_answered"
+        ],
+        "evidence_complete_among_answered": cm["evidence_complete_among_answered"],
+        "evidence_complete_among_correct": cm["evidence_complete_among_correct"],
+        "correct_and_evidence_complete_over_cohort": cm[
+            "correct_and_evidence_complete"
+        ],
+        "correct_over_cohort": M.frac(
+            sum(r["outcome"] == "correct" for r in c), len(c)
         ),
-        "evidence_complete_among_correct": frac(len(comp), len(cor)),
-        "correct_and_evidence_complete_over_cohort": frac(len(comp), len(c)),
-        "correct_over_cohort": frac(len(cor), len(c)),
-        "false_alarms_cohort_legit": frac(sum(map(fa, legit)), len(legit)),
-        "false_alarms_cohort_legit_F06_F12_F14_only": frac(
+        "false_alarms_cohort_legit": cm["false_alarms"],
+        "false_alarms_cohort_legit_F06_F12_F14_only": M.frac(
             sum(map(fa_narrow, legit)), len(legit)
         ),
-        "false_alarms_all_legit": frac(
+        "false_alarms_all_legit": M.frac(
             sum(
                 fa(r)
                 for r in legit_all
@@ -299,27 +321,13 @@ def metrics(
             ),
             len(legit_all),
         ),
-        "false_alarms_ap_side_legit": frac(
+        "false_alarms_ap_side_legit": M.frac(
             sum(fa(r) for r in legit_all if r["group"] == "oos_legit"),
             sum(r["group"] == "oos_legit" for r in legit_all),
         ),
-        "all_clear_on_out_of_scope_failures": frac(
-            sum(answered_fn(r) and is_no_failure(r["category"]) for r in oos), len(oos)
-        ),
-        "all_clear_per_family": {
-            f: frac(
-                sum(
-                    answered_fn(r) and is_no_failure(r["category"])
-                    for r in oos
-                    if r["failure_type"] == f
-                ),
-                sum(r["failure_type"] == f for r in oos),
-            )
-            for f in sorted({r["failure_type"] for r in oos})
-        },
-        "wrong_by_kind": dict(
-            Counter(r["kind"] for r in ans if not r["correct"] and r["group"] in groups)
-        ),
+        "all_clear_on_out_of_scope_failures": ac["overall"],
+        "all_clear_per_family": ac["per_family"],
+        "wrong_by_kind": cm["wrong_by_kind"],
     }
 
 
@@ -327,7 +335,7 @@ def both_views(
     rows: list[dict[str, Any]], answered_fn: Any = lambda r: True
 ) -> dict[str, Any]:
     """The metrics in both cohort views, from the shared definitions."""
-    return {name: metrics(rows, answered_fn, g) for name, g in VIEWS.items()}
+    return {name: baseline_metrics(rows, answered_fn, g) for name, g in VIEWS.items()}
 
 
 def fx_slice(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -339,30 +347,17 @@ def fx_slice(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def per_label(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    out = {}
-    cohort = [r for r in rows if r["group"] in C.COHORT_GROUPS]
-    for k in sorted(
-        {
-            r["failure_type"] if r["failure_type"] != "NO_FAILURE" else r["variant"]
-            for r in cohort
+def baseline_per_label(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    shared = M.per_label(as_scored(rows, lambda r: True), C.COHORT_GROUPS)
+    return {
+        k: {
+            "cases": v["cases"],
+            "correct": v["correct"],
+            "complete_correct": v["complete_correct"],
+            "predicted": v["answered_categories"],
         }
-    ):
-        sub = [
-            r
-            for r in cohort
-            if (
-                r["failure_type"] if r["failure_type"] != "NO_FAILURE" else r["variant"]
-            )
-            == k
-        ]
-        out[k] = {
-            "cases": len(sub),
-            "correct": sum(r["correct"] for r in sub),
-            "complete_correct": sum(r["correct"] and r["complete"] for r in sub),
-            "predicted": dict(Counter(r["category"] for r in sub)),
-        }
-    return out
+        for k, v in shared.items()
+    }
 
 
 def investigator_rows(tag: str, conflicts: C.Conflicts) -> list[dict[str, Any]]:
@@ -462,7 +457,7 @@ def main() -> None:
     def cohort_acc(pred: np.ndarray) -> tuple[int, int]:
         rows = score_rows(list(pred), [1.0] * len(pred))
         # model selection keeps the pre-conflict definition: all in-scope cases
-        m = metrics(rows, groups=C.COHORT_GROUPS)
+        m = baseline_metrics(rows, groups=C.COHORT_GROUPS)
         return m["answer_precision_exact"]["n"], m["answer_precision_exact"]["d"]
 
     # 3. model selection on validation: exact cohort accuracy, first best wins
@@ -509,25 +504,23 @@ def main() -> None:
         in C.COHORT_GROUPS
     ]
     thr_grid = [round(0.5 + 0.05 * k, 2) for k in range(10)]
+    curve = M.precision_coverage_curve(
+        [(c, category_of(a) == category_of(b)) for a, b, c in cohort_tr], thr_grid
+    )
     chosen = None
     cv_table = []
-    for th in thr_grid:
-        kept = [(a, b) for a, b, c in cohort_tr if c >= th]
-        prec = (
-            sum(category_of(a) == category_of(b) for a, b in kept) / len(kept)
-            if kept
-            else float("nan")
-        )
+    for pt in curve:
+        kept, prec = pt["precision"]["d"], pt["precision"]["n"]
         cv_table.append(
             {
-                "threshold": th,
-                "cv_cohort_answered": len(kept),
-                "cv_cohort": len(cohort_tr),
-                "cv_precision": round(prec, 4),
+                "threshold": pt["threshold"],
+                "cv_cohort_answered": kept,
+                "cv_cohort": pt["coverage"]["d"],
+                "cv_precision": round(prec / kept, 4) if kept else float("nan"),
             }
         )
-        if chosen is None and kept and prec >= args.cv_precision_target:
-            chosen = th
+        if chosen is None and kept and prec / kept >= args.cv_precision_target:
+            chosen = pt["threshold"]
     threshold = chosen if chosen is not None else thr_grid[-1]
     with_abstention = both_views(rows, lambda r: r["confidence"] >= threshold)
 
@@ -669,7 +662,28 @@ def main() -> None:
             "cv_table": cv_table,
             "validation_with_abstention": with_abstention,
         },
-        "per_label_no_abstention": per_label(rows),
+        "per_label_no_abstention": baseline_per_label(rows),
+        "root_cause_accuracy_by_family": M.root_cause_accuracy_by(
+            as_scored(rows, lambda r: True), "failure_type"
+        ),
+        "root_cause_accuracy_by_difficulty": M.root_cause_accuracy_by(
+            as_scored(rows, lambda r: True), "difficulty"
+        ),
+        "false_alarms_by": M.false_alarms_by(
+            [
+                r
+                for r in as_scored(rows, lambda r: True)
+                if r["failure_type"] == "NO_FAILURE"
+            ]
+        ),
+        "validation_precision_coverage_curve": M.precision_coverage_curve(
+            [
+                (r["confidence"], r["correct"])
+                for r in rows
+                if r["group"] in C.COHORT_GROUPS
+            ],
+            thr_grid,
+        ),
         "permutation_importance_top20_exact_label_accuracy_drop": top,
         "feature_family_permutation_relative_cohort_drop": group_perm,
         "residual_ablation": ablation,

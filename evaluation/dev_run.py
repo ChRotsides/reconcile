@@ -28,6 +28,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -41,10 +42,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cohort as C  # noqa: E402  (shared cohort, groups and label conflicts)
+import metrics as M  # noqa: E402  (shared metric definitions, PLAN.md section 7)
+from metrics import (  # noqa: E402
+    all_clear_risk,
+    classify,
+    cohort_metrics,
+    confusion,
+    frac,
+    per_label,
+)
 
 from reconcile.adapters.finrca import create_key_file, prepare_finrca_snapshot  # noqa: E402
 from reconcile.adapters.finrca_requests import prepare_finrca_requests  # noqa: E402
 from reconcile.diagnosis.policy import POLICY_VERSION, SCOPE_LIMITATION, quantum  # noqa: E402
+from reconcile.domain.calendar import business_days  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_UPSTREAM = Path(
@@ -967,9 +978,216 @@ def completeness(packet: dict, entity: tuple[str, str], snap: Snap) -> dict:
         missing.append("searches_reproduce")
     return {
         "contract_defined": bool(reqs),
+        "req_total": len(reqs),
+        "req_met": sum(ok for _, ok in reqs),
         "complete": bool(reqs) and not missing,
         "missing": missing,
         "searches_mismatch": mismatch,
+    }
+
+
+# ------------------------------------------------------------ packet audit
+# Per-packet facts for the PLAN.md section 7 metrics (citation resolution, claim
+# support, monetary correctness). Aggregation lives in metrics.py.
+
+KEY_COLUMN = {
+    "payments": "payment_id",
+    "invoices": "invoice_id",
+    "bank_transactions": "bank_transaction_id",
+    "approval_events": "approval_event_id",
+}
+MONEY = re.compile(r"-?\d+(\.\d+)? [A-Z]{3}")
+
+
+def _value_matches(packet_val: str, snap_val: str, currency: str | None) -> bool:
+    """Money strings ("12.50 USD") compare as Decimal amount plus currency, any
+    other value as text."""
+    if MONEY.fullmatch(packet_val):
+        amount, cur = packet_val.split()
+        try:
+            return currency in (None, cur) and Decimal(amount) == Decimal(snap_val)
+        except ArithmeticError:
+            return False
+    return packet_val == snap_val
+
+
+def _journal_matches(values: dict, journal: str, snap: Snap) -> bool:
+    """A journal item: `source`/`gl_type` name lines of the journal, `amount` is
+    the total debit of those lines, `journal_total` the whole journal's debit."""
+    lines = snap.q(
+        "SELECT * FROM gl_entries WHERE journal_id = ? AND posting_date <= ?",
+        journal,
+        CUTOFF.isoformat(),
+    )
+    cur = {x["currency"] for x in lines}
+    own = [
+        x
+        for x in lines
+        if x["source_transaction_id"] == values.get("source")
+        and x["transaction_type"] == values.get("gl_type")
+    ]
+    if not own or len(cur) != 1:
+        return False
+    (currency,) = cur
+    expected = {
+        "amount": sum((Decimal(x["debit"]) for x in own), Decimal(0)),
+        "journal_total": sum((Decimal(x["debit"]) for x in lines), Decimal(0)),
+    }
+    return values.get("currency") == currency and all(
+        k not in values
+        or (
+            MONEY.fullmatch(values[k]) is not None
+            and values[k].split()[1] == currency
+            and Decimal(values[k].split()[0]) == v
+        )
+        for k, v in expected.items()
+    )
+
+
+def evidence_resolves(e: dict, snap: Snap) -> bool:
+    """The cited record exists in the snapshot and every recorded value equals
+    the snapshot's. Search-only items have no record and are not handled here."""
+    table, rid = e["record"]["table"], e["record"]["record_id"]
+    values = e["values"] or {}
+    if table == "gl_entries":
+        return _journal_matches(values, rid, snap)
+    if table == "payment_allocations":
+        pid, _, iid = rid.partition("|")
+        row = snap.one(
+            "SELECT * FROM payment_allocations WHERE payment_id = ? AND invoice_id = ?",
+            pid,
+            iid,
+        )
+        pay = snap.payment(pid)
+        currency = pay["payment_currency"] if pay else None
+    elif table in KEY_COLUMN:
+        row = snap.one(f"SELECT * FROM {table} WHERE {KEY_COLUMN[table]} = ?", rid)  # noqa: S608
+        currency = (row or {}).get("currency") or (row or {}).get("payment_currency")
+    else:
+        return False
+    return row is not None and all(
+        k in row and _value_matches(v, str(row[k]), currency) for k, v in values.items()
+    )
+
+
+def calculation_exact(c: dict, by_id: dict, resolved: dict[str, bool]) -> bool:
+    """Every operand is a resolved evidence item whose recorded `field` equals
+    the operand's amount, all in one currency, and the stated result equals the
+    sum (first minus the rest for a difference) of the operands exactly."""
+    amounts: list[Decimal] = []
+    cur: set[str] = set()
+    for o in c["operands"]:
+        e = by_id.get(o["evidence_id"])
+        if (
+            e is None
+            or not e["record"]
+            or not resolved[o["evidence_id"]]
+            or (e["values"] or {}).get(o["field"]) != o["amount"]
+            or not MONEY.fullmatch(o["amount"])
+        ):
+            return False
+        a, k = o["amount"].split()
+        amounts.append(Decimal(a))
+        cur.add(k)
+    if not amounts or not MONEY.fullmatch(c["result"]):
+        return False
+    r, k = c["result"].split()
+    if cur != {k}:
+        return False
+    if c["operation"] == "sum":
+        want = sum(amounts, Decimal(0))
+    elif c["operation"] == "difference":
+        want = amounts[0] - sum(amounts[1:], Decimal(0))
+    else:
+        return False
+    return Decimal(r) == want
+
+
+def _snapshot_day(e: dict, field: str, snap: Snap) -> date | None:
+    """The date the snapshot holds in `field` of the cited record (the latest
+    posting date for a journal), None if it cannot be read."""
+    table, rid = e["record"]["table"], e["record"]["record_id"]
+    if table == "gl_entries":
+        rows = snap.q("SELECT posting_date FROM gl_entries WHERE journal_id = ?", rid)
+        value = max((r["posting_date"] for r in rows), default=None)
+    elif table == "payment_allocations":
+        pid, _, iid = rid.partition("|")
+        row = snap.one(
+            "SELECT * FROM payment_allocations WHERE payment_id = ? AND invoice_id = ?",
+            pid,
+            iid,
+        )
+        value = (row or {}).get(field)
+    elif table in KEY_COLUMN:
+        row = snap.one(f"SELECT * FROM {table} WHERE {KEY_COLUMN[table]} = ?", rid)  # noqa: S608
+        value = (row or {}).get(field)
+    else:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def day_count_exact(
+    d: dict, by_id: dict, resolved: dict[str, bool], snap: Snap, cutoff: date
+) -> bool:
+    """Both cited dates are the snapshot's (cited items resolve) and `result` is
+    the business-day count between them (weekdays in (start, end]); an absent end
+    runs to the request cutoff."""
+    ends = [(d["start_evidence"], d["start_field"])]
+    if d["end_evidence"] is not None:
+        ends.append((d["end_evidence"], d["end_field"]))
+    days: list[date] = []
+    for ev, field in ends:
+        e = by_id.get(ev)
+        day = (
+            _snapshot_day(e, field, snap)
+            if e is not None and e["record"] and resolved[ev]
+            else None
+        )
+        if day is None:
+            return False
+        days.append(day)
+    if d["end_evidence"] is None:
+        days.append(cutoff)
+    return days[1] >= days[0] and business_days(days[0], days[1]) == d["result"]
+
+
+def packet_audit(packet: dict, snap: Snap) -> dict:
+    """Counts for an answered packet: cited record items and how many resolve;
+    findings (claims) and how many are supported; calculations and how many are
+    exact; see metrics.claim_support and metrics.monetary_correctness."""
+    by_id = {e["evidence_id"]: e for e in packet["evidence"]}
+    bad_search = {n.split(":")[0] for n in searches_reproduce(packet, snap)}
+    resolved = {
+        i: (evidence_resolves(e, snap) if e["record"] else i not in bad_search)
+        for i, e in by_id.items()
+    }
+    exact = {
+        c["calculation_id"]: calculation_exact(c, by_id, resolved)
+        for c in packet["calculations"]
+    }
+    cutoff = date.fromisoformat(packet["request"]["cutoff"])
+    valid = exact | {
+        d["calculation_id"]: day_count_exact(d, by_id, resolved, snap, cutoff)
+        for d in packet["day_counts"]
+    }
+    findings = packet["diagnosis"]["findings"]
+    supported = sum(
+        all(resolved.get(i, False) for i in f["evidence_ids"])
+        and all(valid.get(i, False) for i in f["calculation_ids"])
+        for f in findings
+    )
+    return {
+        "cited_total": sum(bool(e["record"]) for e in by_id.values()),
+        "cited_resolved": sum(
+            bool(e["record"]) and resolved[i] for i, e in by_id.items()
+        ),
+        "claims": len(findings),
+        "claims_supported": supported,
+        "calcs": len(packet["calculations"]),
+        "calcs_exact": sum(exact.values()),
     }
 
 
@@ -979,68 +1197,6 @@ def completeness(packet: dict, entity: tuple[str, str], snap: Snap) -> dict:
 def read_jsonl(path: Path) -> list[dict]:
     with path.open(encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
-
-
-def classify(row: dict) -> None:
-    """Fill row['outcome'] (and 'kind' for wrong ones)."""
-    disp, cat, grp = row["disposition"], row["category"], row["group"]
-    label_fail = row["failure_type"] != "NO_FAILURE"
-    expected = row["expected_category"]
-    if grp in ("cohort", "label_conflict"):
-        if disp != "answered":
-            row["outcome"] = disp  # abstained | out_of_scope | failed
-        elif cat == expected:
-            row["outcome"] = "correct"
-        else:
-            row["outcome"] = "wrong"
-            if not label_fail and is_failure(cat):
-                row["kind"] = "false_alarm"
-            elif label_fail and is_no_failure(cat):
-                row["kind"] = "failure_called_no_failure"
-            elif label_fail:
-                row["kind"] = "wrong_failure_class"
-            elif cat == "no_exception":
-                row["kind"] = "legit_variant_called_no_exception"
-            else:
-                row["kind"] = "wrong_legit_variant"
-    elif grp == "fx":
-        if disp == "abstained" and row["reason"] == "unsupported_fx":
-            row["outcome"] = "correct_abstention"
-        elif disp == "answered":
-            row["outcome"] = "wrong"
-            row["kind"] = "false_alarm" if is_failure(cat) else "answered_fx_pair"
-        else:
-            row["outcome"] = disp
-            row["kind"] = "abstained_other_reason"
-    elif grp == "not_gradable":
-        row["outcome"] = "answered_not_gradable" if disp == "answered" else disp
-    elif grp == "contradicted":
-        row["outcome"] = disp
-        if disp == "answered":
-            row["kind"] = (
-                "answered_label_category" if cat == expected else "answered_other"
-            )
-    elif grp == "oos_failure":
-        if disp == "answered":
-            row["outcome"] = "answered_oos"
-            row["kind"] = (
-                "failure_class_on_other_family"
-                if is_failure(cat)
-                else "failure_called_no_failure"
-            )
-        else:
-            row["outcome"] = disp
-    else:  # oos_legit
-        if disp == "answered":
-            row["outcome"] = "answered_oos"
-            if is_failure(cat):
-                row["kind"] = "false_alarm"
-            elif cat == "no_exception":
-                row["kind"] = "no_exception_on_ap_side_legit"
-            else:
-                row["kind"] = "payment_variant_on_ap_side_legit"
-        else:
-            row["outcome"] = disp
 
 
 def searches_reproduce(packet: dict, snap: Snap) -> list[str]:
@@ -1116,6 +1272,7 @@ def load_split(
             "case_id": case_id,
             "failure_type": lab["failure_type"],
             "variant": lab["scenario_variant"],
+            "difficulty": lab.get("difficulty"),
             "group": group,
             "disposition": d["disposition"],
             "category": d["category"],
@@ -1134,125 +1291,12 @@ def load_split(
             row["fx_cites_ok"] = fx_abstention_cites(p)
         if d["disposition"] == "answered":
             row |= completeness(p, (ent["table"], ent["record_id"]), snap)
+            row |= packet_audit(p, snap)
         rows.append(row)
     return rows
 
 
 # ------------------------------------------------------------------ metrics
-
-
-def frac(n: int, d: int) -> dict:
-    return {"n": n, "d": d, "rate": (round(n / d, 4) if d else None)}
-
-
-def cohort_metrics(
-    rows: list[dict],
-    groups: tuple[str, ...] = C.COHORT_VIEWS["all_cases"],
-) -> dict:
-    """Metrics over the gradable in-scope cohort. Default: the headline view,
-    every such case. C.COHORT_VIEWS["sensitivity_without_verified_conflicts"]
-    leaves out the hand-verified label conflicts; the baseline reports the same
-    two views from the same module."""
-    c = [r for r in rows if r["group"] in groups]
-    answered = [r for r in c if r["disposition"] == "answered"]
-    correct = [r for r in answered if r["outcome"] == "correct"]
-    complete = [r for r in correct if r.get("complete")]
-    legit = [r for r in c if r["failure_type"] == "NO_FAILURE"]
-    coarse_ok = [
-        r
-        for r in answered
-        if is_failure(r["category"]) == (r["failure_type"] != "NO_FAILURE")
-    ]
-    return {
-        "cases": len(c),
-        "dispositions": dict(Counter(r["disposition"] for r in c)),
-        "answered": frac(len(answered), len(c)),
-        "abstained": frac(sum(r["disposition"] == "abstained" for r in c), len(c)),
-        "out_of_scope": frac(
-            sum(r["disposition"] == "out_of_scope" for r in c), len(c)
-        ),
-        "failed": frac(sum(r["disposition"] == "failed" for r in c), len(c)),
-        "answer_precision": frac(len(correct), len(answered)),
-        "category_accuracy_answered": frac(len(correct), len(answered)),
-        "failure_vs_no_failure_accuracy_answered": frac(len(coarse_ok), len(answered)),
-        "correct_and_evidence_complete": frac(len(complete), len(c)),
-        "evidence_complete_among_correct": frac(len(complete), len(correct)),
-        "evidence_complete_among_answered": frac(
-            sum(bool(r.get("complete")) for r in answered), len(answered)
-        ),
-        "false_alarms": frac(
-            sum(r.get("kind") == "false_alarm" for r in legit), len(legit)
-        ),
-        "search_counts_reproduce_among_answered": frac(
-            sum(not r["searches_mismatch"] for r in answered), len(answered)
-        ),
-        "wrong_by_kind": dict(Counter(r["kind"] for r in c if r["outcome"] == "wrong")),
-        "abstain_or_nonanswer_reasons": dict(
-            Counter(
-                f"{r['disposition']}:{r['reason']}"
-                for r in c
-                if r["disposition"] != "answered"
-            )
-        ),
-    }
-
-
-def per_label(rows: list[dict], groups: tuple[str, ...]) -> dict:
-    out: dict[str, dict] = {}
-
-    def key(r: dict) -> str:
-        return r["failure_type"] if r["failure_type"] != "NO_FAILURE" else r["variant"]
-
-    for k in sorted({key(r) for r in rows if r["group"] in groups}):
-        sub = [r for r in rows if r["group"] in groups and key(r) == k]
-        ans = [r for r in sub if r["disposition"] == "answered"]
-        cor = [r for r in ans if r["outcome"] == "correct"]
-        out[k] = {
-            "cases": len(sub),
-            "answered": len(ans),
-            "correct": len(cor),
-            "complete_correct": sum(bool(r.get("complete")) for r in cor),
-            "abstained": sum(r["disposition"] == "abstained" for r in sub),
-            "out_of_scope": sum(r["disposition"] == "out_of_scope" for r in sub),
-            "failed": sum(r["disposition"] == "failed" for r in sub),
-            "answered_categories": dict(Counter(r["category"] for r in ans)),
-        }
-    return out
-
-
-def label_key(r: dict) -> str:
-    return r["failure_type"] if r["failure_type"] != "NO_FAILURE" else r["variant"]
-
-
-def confusion(rows: list[dict], groups: tuple[str, ...]) -> dict:
-    """label -> {answered category or non-answer disposition: count}."""
-    out: dict[str, Counter] = defaultdict(Counter)
-    for r in rows:
-        if r["group"] in groups:
-            out[label_key(r)][
-                r["category"] if r["disposition"] == "answered" else r["disposition"]
-            ] += 1
-    return {k: dict(v) for k, v in sorted(out.items())}
-
-
-def all_clear_risk(rows: list[dict]) -> dict:
-    """Headline risk: failures outside the cohort that the tool answered
-    legitimate_* or no_exception, i.e. a false all-clear. Per upstream family."""
-    oos = [r for r in rows if r["group"] == "oos_failure"]
-
-    def given(r: dict) -> bool:
-        return r["disposition"] == "answered" and is_no_failure(r["category"])
-
-    return {
-        "overall": frac(sum(map(given, oos)), len(oos)),
-        "per_family": {
-            f: frac(
-                sum(given(r) for r in oos if r["failure_type"] == f),
-                sum(r["failure_type"] == f for r in oos),
-            )
-            for f in sorted({r["failure_type"] for r in oos})
-        },
-    }
 
 
 def all_metrics(rows: list[dict]) -> dict:
@@ -1358,6 +1402,16 @@ def all_metrics(rows: list[dict]) -> dict:
             ),
         },
         "all_clear_on_out_of_scope_failures": all_clear_risk(rows),
+        "root_cause_accuracy_by_family": M.root_cause_accuracy_by(rows, "failure_type"),
+        "root_cause_accuracy_by_difficulty": M.root_cause_accuracy_by(
+            rows, "difficulty"
+        ),
+        "evidence_recall": M.evidence_recall(rows),
+        "citation_resolution": M.citation_resolution(rows),
+        "claim_support": M.claim_support(rows),
+        "monetary_correctness": M.monetary_correctness(rows),
+        "execution_reliability": M.execution_reliability(rows),
+        "false_alarms_by": M.false_alarms_by(legit_all),
         "out_of_scope_families": {
             "failure_families": {
                 "cases": sum(r["group"] == "oos_failure" for r in rows),
