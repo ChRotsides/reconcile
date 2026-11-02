@@ -43,3 +43,7 @@ The key is read at run time from `~/.config/reconcile/anthropic_key` (outside th
 
 - If the acceptance rate is low or failures are frequent, drafting is removed.
 - Otherwise drafting stays an optional, off-by-default feature, outside the headline claim, until a practitioner review records a usefulness benefit (protocol `[model_assistance]`). No practitioner review exists yet.
+
+## Deviations (appended after the first paid call)
+
+- 2026-11-02, after stage 1: the smoke test ran with the code default of 1,500 output tokens and used 1,451 of them (accepted, $0.0013, 7.3 s), mostly adaptive thinking. Stages 2 and 3 use 2,000 output tokens, the plan's stated maximum, set with the new `--max-output-tokens` flag (commit 68165a6). The stage 1 result is a smoke test only and is not scored.
