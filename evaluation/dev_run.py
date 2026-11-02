@@ -6,6 +6,7 @@ adapters (which are evaluator-side code; the inference image deletes them).
 
     uv run python evaluation/dev_run.py run TAG [--upstream PATH]
     uv run python evaluation/dev_run.py evaluate TAG      # recompute metrics only
+    uv run python evaluation/dev_run.py rerun TAG         # determinism check
 
 `run` refuses an existing TAG. Steps, in order:
 
@@ -66,6 +67,9 @@ CUTOFF = date(2026, 6, 30)
 SPLITS = ("train", "validation")  # the only splits this script ever names
 IMAGE = "reconcile-inference:dev"
 SCRIPT = REPO / "deploy/inference/run_inference.sh"
+TIMINGS_FILE = "timings.jsonl"  # names written by reconcile.runs.batch
+STATS_FILE = "run-stats.json"
+CURRENCY = "USD"
 is_failure = C.is_failure
 is_no_failure = C.is_no_failure
 
@@ -204,6 +208,12 @@ def run(tag: str, upstream: Path) -> None:
         "packets_sha256": {
             s: sha256_file(root / "inference" / s / "packets.jsonl") for s in SPLITS
         },
+        "timings_sha256": {
+            s: sha256_file(root / "inference" / s / TIMINGS_FILE) for s in SPLITS
+        },
+        "run_stats_sha256": {
+            s: sha256_file(root / "inference" / s / STATS_FILE) for s in SPLITS
+        },
         "timing_seconds": timing,
         "command": f"uv run python evaluation/dev_run.py run {tag}",
     }
@@ -212,6 +222,95 @@ def run(tag: str, upstream: Path) -> None:
     )
     # Packets are final from here on. Only now are labels opened.
     evaluate(tag, upstream)
+
+
+def rerun(tag: str) -> None:
+    """Re-run the container inference on the run's own snapshot and requests
+    into fresh directories and compare packet digests with the run manifest."""
+    root = REPO / "artifacts/dev-runs" / tag
+    manifest = json.loads((root / "run-manifest.json").read_text())
+    have = subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", IMAGE],
+        text=True,
+        capture_output=True,
+    )
+    if have.returncode != 0:
+        sys.exit(f"image {IMAGE} is missing; build it with {SCRIPT} --build")
+    n = 1
+    while (root / f"rerun-{n}").exists() or (root / f"rerun-{n}.json").exists():
+        n += 1
+    result: dict = {
+        "tag": tag,
+        "rerun": n,
+        "image_id": have.stdout.strip(),
+        "image_id_matches_manifest": have.stdout.strip() == manifest["image_id"],
+        "splits": {},
+    }
+    for split in SPLITS:
+        out = root / f"rerun-{n}" / split
+        run_cmd(
+            [str(SCRIPT), str(root / "prepared/snapshot"),
+             str(root / "prepared/requests" / split), str(out)]
+        )  # fmt: skip
+        new = sha256_file(out / "packets.jsonl")
+        result["splits"][split] = {
+            "expected_sha256": manifest["packets_sha256"][split],
+            "rerun_sha256": new,
+            "identical": new == manifest["packets_sha256"][split],
+        }
+    result["identical"] = all(v["identical"] for v in result["splits"].values())
+    (root / f"rerun-{n}.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n"
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    if not result["identical"]:
+        sys.exit(f"rerun-{n}: packets differ from the run manifest")
+
+
+def verify_digests(root: Path, manifest: dict) -> None:
+    """Packets (and, when the manifest records them, timings and run stats) must
+    be unchanged since the run manifest was written."""
+    for key, name in (
+        ("packets_sha256", "packets.jsonl"),
+        ("timings_sha256", TIMINGS_FILE),
+        ("run_stats_sha256", STATS_FILE),
+    ):
+        for split, want in manifest.get(key, {}).items():
+            path = root / "inference" / split / name
+            if not path.exists() or sha256_file(path) != want:
+                sys.exit(f"{split}: {name} differs from the run manifest")
+
+
+def efficiency_block(
+    root: Path, manifest: dict, correct_complete: dict[str, int]
+) -> dict:
+    """Per-split and all-split efficiency from the batch runner's timings and
+    run stats. `correct_complete` is the headline-view correct and
+    evidence-complete count per split. Runs recorded before these files existed
+    give None with a note. The investigator makes no paid calls, so the cost
+    per case is zero."""
+    if "timings_sha256" not in manifest or "run_stats_sha256" not in manifest:
+        return {"efficiency": None, "note": "run predates timings.jsonl/run-stats.json"}
+    seconds: dict[str, list[float]] = {}
+    rss: dict[str, int] = {}
+    for split in SPLITS:
+        d = root / "inference" / split
+        seconds[split] = [r["seconds"] for r in read_jsonl(d / TIMINGS_FILE)]
+        rss[split] = json.loads((d / STATS_FILE).read_text())["peak_rss_kib"]
+
+    def one(secs: list[float], peak: int, ok: int) -> dict:
+        e = M.efficiency(secs, peak, Decimal("0"), ok)
+        return {k: str(v) if isinstance(v, Decimal) else v for k, v in e.items()} | {
+            "currency": CURRENCY
+        }
+
+    out = {s: one(seconds[s], rss[s], correct_complete[s]) for s in SPLITS}
+    out["all_splits"] = one(
+        [x for s in SPLITS for x in seconds[s]],
+        max(rss.values()),
+        sum(correct_complete.values()),
+    )
+    return {"efficiency": out, "note": None}
 
 
 # -------------------------------------------------------------- evaluation
@@ -1273,6 +1372,7 @@ def load_split(
             "failure_type": lab["failure_type"],
             "variant": lab["scenario_variant"],
             "difficulty": lab.get("difficulty"),
+            "group_vendor_id": lab.get("group_vendor_id"),
             "group": group,
             "disposition": d["disposition"],
             "category": d["category"],
@@ -1595,6 +1695,25 @@ def render(m: dict) -> str:
                 f"{v['answered_categories']}"
             )
         lines.append(f"special cases: {a['special_cases']}")
+    eff = m.get("efficiency")
+    lines.append("")
+    if eff is None:
+        lines.append(f"efficiency: none ({m.get('note')})")
+    else:
+        lines.append(
+            "== efficiency (attempted cases, investigator makes no paid calls) =="
+        )
+        for name, e in eff.items():
+            lines.append(
+                f"  {name:11s} n={e['attempted']} p50={e['latency_p50_s']}s"
+                f" p95={e['latency_p95_s']}s"
+                f" throughput={e['throughput_cases_per_s']} cases/s"
+            )
+            lines.append(
+                f"    peak_rss_kib={e['peak_rss_kib']}"
+                f" cost/case={e['cost_per_attempted_case']} {e['currency']}"
+                f" cost/correct-complete={e['cost_per_correct_complete_packet']}"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -1602,12 +1721,7 @@ def evaluate(tag: str, upstream: Path = DEFAULT_UPSTREAM) -> None:
     root = REPO / "artifacts/dev-runs" / tag
     manifest = json.loads((root / "run-manifest.json").read_text())
     # Packets must be final: refuse if they changed since the run manifest.
-    for split in SPLITS:
-        if (
-            sha256_file(root / "inference" / split / "packets.jsonl")
-            != manifest["packets_sha256"][split]
-        ):
-            sys.exit(f"{split}: packets.jsonl differs from the run manifest")
+    verify_digests(root, manifest)
     snap = Snap(root / "prepared/snapshot/snapshot.sqlite")
     rows: list[dict] = []
     labels_by_split = {  # labels opened only here, dev splits only
@@ -1631,6 +1745,8 @@ def evaluate(tag: str, upstream: Path = DEFAULT_UPSTREAM) -> None:
         "all_splits": all_metrics(rows),
         **{s: all_metrics([r for r in rows if r["split"] == s]) for s in SPLITS},
     }
+    ok = {s: metrics[s]["cohort"]["correct_and_evidence_complete"]["n"] for s in SPLITS}
+    metrics |= efficiency_block(root, manifest, ok)
     (root / "metrics.json").write_text(
         json.dumps(metrics, indent=2, sort_keys=True) + "\n"
     )
@@ -1659,12 +1775,14 @@ def evaluate(tag: str, upstream: Path = DEFAULT_UPSTREAM) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("command", choices=("run", "evaluate"))
+    ap.add_argument("command", choices=("run", "evaluate", "rerun"))
     ap.add_argument("tag")
     ap.add_argument("--upstream", type=Path, default=DEFAULT_UPSTREAM)
     args = ap.parse_args()
     if args.command == "run":
         run(args.tag, args.upstream)
+    elif args.command == "rerun":
+        rerun(args.tag)
     else:
         evaluate(args.tag, args.upstream)
 
