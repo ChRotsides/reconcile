@@ -44,6 +44,7 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime
 from decimal import Context, Decimal, Inexact, InvalidOperation
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -913,6 +914,22 @@ def reversal_ok(s: Snap, v: View, pay: dict, debit: dict, credit: dict) -> bool:
     return all(difference_within(v, cid, h, {}, "amount", q) for cid, h in steps)
 
 
+def own_debits_ok(s: Snap, pays: list[dict]) -> bool:
+    """Each payment's reference belongs to it alone. A bank debit carries one
+    payment reference, so unique references give each payment a distinct debit;
+    a shared reference would let one debit evidence several payments (the
+    investigator abstains with `ambiguous_reference`). One payment covering
+    several invoices is unaffected."""
+    return all(
+        s.q(
+            "SELECT payment_id FROM payments WHERE reference_number = ?",
+            p["reference_number"],
+        )
+        == [{"payment_id": p["payment_id"]}]
+        for p in pays
+    )
+
+
 def debit_equals_payment_ok(s: Snap, v: View, pay: dict, inv: dict) -> bool:
     """`debit_minus_payment:<payment>` is the payment's one posted debit minus
     the payment amount, exactly those two operands in that order, equal to the
@@ -1040,6 +1057,7 @@ def _category_requirements(
                 for b in bank_ids(s.posted_debits(p["reference_number"]))
             ]
             add("committed_debits", v.cites("bank_transactions", debits))
+            add("committed_payments_own_debits", own_debits_ok(s, committed))
             committed_ids = {p["payment_id"] for p in committed}
             add(
                 "overpayment_calculation",
@@ -1057,6 +1075,7 @@ def _category_requirements(
                 b for p in eff for b in bank_ids(s.posted_debits(p["reference_number"]))
             ]
             add("posted_debits", v.cites("bank_transactions", debits))
+            add("payments_own_debits", own_debits_ok(s, eff))
             live_pays, live_allocs = _balance_parts(s, rid)
             add(
                 "allocation_total_calculation",
@@ -1599,44 +1618,163 @@ def required(
     return [*base, *guard_requirements(pays, s, v)]
 
 
-def packet_structure_problem(packet: dict) -> str | None:
-    """Why the packet cannot be audited, or None. Checked before any lookup is
-    built from the packet: a later duplicate would replace an earlier invalid
-    item in a dict and hide it. A malformed packet is an unsuccessful case (never
-    complete, never a crash). Calculation and day-count ids share one namespace;
-    a calculation needs at least one operand (the semantic checks reject
-    a one-operand difference)."""
+def _str(x: object) -> bool:
+    return isinstance(x, str)
+
+
+def _int(x: object) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
+def _opt(ok: Callable[[Any], bool]) -> Callable[[Any], bool]:
+    return lambda x: x is None or ok(x)
+
+
+def _list_of(ok: Callable[[Any], bool]) -> Callable[[Any], bool]:
+    return lambda x: isinstance(x, list) and all(ok(i) for i in x)
+
+
+def _text_map(x: object) -> bool:
+    return isinstance(x, dict) and all(_str(k) and _str(v) for k, v in x.items())
+
+
+def _shape(obj: object, **fields: Callable[[Any], bool]) -> bool:
+    """`obj` is a dict holding every named field with a value of the right type."""
+    return isinstance(obj, dict) and all(
+        k in obj and ok(obj[k]) for k, ok in fields.items()
+    )
+
+
+DISPOSITIONS = ("answered", "abstained", "out_of_scope", "failed")
+OPERATIONS = ("sum", "difference")
+
+
+def _field_problem(packet: dict) -> str | None:
+    """The first field the scorer reads that is missing or of the wrong type."""
+    checks: list[tuple[str, bool]] = [
+        (
+            "diagnosis",
+            _shape(
+                packet.get("diagnosis"),
+                disposition=lambda x: x in DISPOSITIONS,
+                category=_opt(_str),
+                reason=_opt(_str),
+                findings=_list_of(
+                    lambda f: _shape(
+                        f,
+                        check_id=_str,
+                        state=_str,
+                        evidence_ids=_list_of(_str),
+                        calculation_ids=_list_of(_str),
+                    )
+                ),
+            ),
+        ),
+        ("limitations", _shape(packet, limitations=_list_of(_str))),
+        (
+            "request",
+            _shape(packet.get("request"), request_id=_str, cutoff=_str)
+            and _date_ok(packet["request"]["cutoff"]),
+        ),
+        (
+            "evidence item",
+            all(
+                _shape(
+                    e,
+                    evidence_id=_str,
+                    record=_opt(
+                        lambda r: _shape(r, table=_str, record_id=_str, snapshot=_str)
+                    ),
+                    search=_opt(
+                        lambda s: _shape(
+                            s, table=_str, predicate=_str, observed_count=_int
+                        )
+                    ),
+                    values=_opt(_text_map),
+                )
+                and ("timestamps" not in e or _opt(_text_map)(e["timestamps"]))
+                for e in packet["evidence"]
+            ),
+        ),
+        (
+            "calculation",
+            _shape(
+                packet,
+                calculations=_list_of(
+                    lambda c: _shape(
+                        c,
+                        calculation_id=_str,
+                        operation=lambda x: x in OPERATIONS,
+                        operands=_list_of(
+                            lambda o: _shape(
+                                o, evidence_id=_str, field=_str, amount=_str
+                            )
+                        ),
+                        result=_str,
+                        tolerance=_opt(_str),
+                    )
+                ),
+            ),
+        ),
+        (
+            "day count",
+            _shape(
+                packet,
+                day_counts=_list_of(
+                    lambda d: _shape(
+                        d,
+                        calculation_id=_str,
+                        start_evidence=_str,
+                        start_field=_str,
+                        end_evidence=_opt(_str),
+                        end_field=_opt(_str),
+                        result=_int,
+                        limit=_int,
+                        limit_policy=_str,
+                    )
+                ),
+            ),
+        ),
+    ]
+    return next((name for name, ok in checks if not ok), None)
+
+
+def _date_ok(text: str) -> bool:
     try:
-        evidence = packet["evidence"]
-        calcs = packet["calculations"]
-        counts = packet["day_counts"]
-        packet["diagnosis"]["findings"]
-        packet["limitations"]
-        packet["request"]["cutoff"]
-        for e in evidence:
-            e["evidence_id"], e["record"], e["search"], e["values"]
-        for f in packet["diagnosis"]["findings"]:
-            f["check_id"], f["state"], f["evidence_ids"], f["calculation_ids"]
-        ids = {
-            "evidence": [e["evidence_id"] for e in evidence],
-            "calculation": [c["calculation_id"] for c in calcs],
-            "day count": [d["calculation_id"] for d in counts],
-        }
-        for name, values in ids.items():
-            if len(set(values)) != len(values):
-                return f"duplicate {name} id"
-        if set(ids["calculation"]) & set(ids["day count"]):
-            return "an id names both a calculation and a day count"
-        for c in calcs:
-            c["result"], c["tolerance"]
-            if not c["operands"]:
-                return f"calculation {c['calculation_id']} has no operands"
-            for o in c["operands"]:
-                o["evidence_id"], o["field"], o["amount"]
-        for d in counts:
-            d["start_evidence"], d["end_evidence"], d["result"], d["limit"]
-    except (KeyError, TypeError, AttributeError):
-        return "missing or mistyped packet field"
+        date.fromisoformat(text)
+    except ValueError:
+        return False
+    return True
+
+
+def packet_structure_problem(packet: dict) -> str | None:
+    """Why the packet cannot be audited, or None. Checked before anything reads
+    the packet: every field the scorer consumes must be present with its type
+    (a wrong shape is an unsuccessful case, never a crash), then duplicates,
+    which a later dict entry would otherwise hide. Calculation and day-count ids
+    share one namespace; a calculation needs at least one operand (the semantic
+    checks reject a one-operand difference)."""
+    if not isinstance(packet, dict):
+        return "missing or mistyped packet field: packet"
+    # Looked at first: the field checks iterate it.
+    if not isinstance(packet.get("evidence"), list):
+        return "missing or mistyped packet field: evidence"
+    wrong = _field_problem(packet)
+    if wrong:
+        return f"missing or mistyped packet field: {wrong}"
+    ids = {
+        "evidence": [e["evidence_id"] for e in packet["evidence"]],
+        "calculation": [c["calculation_id"] for c in packet["calculations"]],
+        "day count": [d["calculation_id"] for d in packet["day_counts"]],
+    }
+    for name, values in ids.items():
+        if len(set(values)) != len(values):
+            return f"duplicate {name} id"
+    if set(ids["calculation"]) & set(ids["day count"]):
+        return "an id names both a calculation and a day count"
+    for c in packet["calculations"]:
+        if not c["operands"]:
+            return f"calculation {c['calculation_id']} has no operands"
     return None
 
 
@@ -2044,6 +2182,26 @@ def fx_abstention_cites(packet: dict) -> bool:
     )
 
 
+def readable_diagnosis(packet: object) -> dict:
+    """Disposition, category and reason of a packet that failed the structural
+    check, where they are readable. A malformed answered packet must stay an
+    answered row (so the well-formed hard gate sees it); an unreadable
+    disposition is a failed case."""
+    raw = packet.get("diagnosis") if isinstance(packet, dict) else None
+    raw = raw if isinstance(raw, dict) else {}
+    disposition = raw.get("disposition")
+    if disposition not in DISPOSITIONS:
+        disposition = "failed"
+    category = raw.get("category")
+    if not _str(category):  # an answered row is classified by its category
+        category = "" if disposition == "answered" else None
+    return {
+        "disposition": disposition,
+        "category": category,
+        "reason": raw.get("reason") if _str(raw.get("reason")) else None,
+    }
+
+
 def case_row(
     split: str,
     case_id: str,
@@ -2055,7 +2213,8 @@ def case_row(
 ) -> dict:
     """The scored row of one case: label facts, the packet's disposition and,
     for an answered packet, evidence completeness including the packet audit."""
-    d = packet["diagnosis"]
+    problem = packet_structure_problem(packet)
+    d = packet["diagnosis"] if problem is None else readable_diagnosis(packet)
     group = C.group_of(
         lab["failure_type"], lab["scenario_variant"], case_id, conflicts.verified
     )
@@ -2079,10 +2238,11 @@ def case_row(
         ),
     }
     classify(row)
-    problem = packet_structure_problem(packet)
     row["well_formed"] = problem is None
-    row["searches_mismatch"] = [] if problem else searches_reproduce(packet, snap)
-    if group == "fx" and d["disposition"] == "abstained" and not problem:
+    if problem:  # explicit unsuccessful case: complete False, with the reason
+        return row | malformed_result(problem)
+    row["searches_mismatch"] = searches_reproduce(packet, snap)
+    if group == "fx" and d["disposition"] == "abstained":
         row["fx_cites_ok"] = fx_abstention_cites(packet)
     if d["disposition"] == "answered":
         row |= completeness(packet, (entity["table"], entity["record_id"]), snap)
