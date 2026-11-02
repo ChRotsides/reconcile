@@ -128,5 +128,16 @@ def test_validation() -> None:
     for alpha in (0.0, 1.0, -0.1, 1.5):
         with pytest.raises(ValueError, match="alpha"):
             paired.cluster_bootstrap(cases, 1, 10, alpha, 2)
-    with pytest.raises(ValueError):
-        paired.cluster_bootstrap([], 1, 10, 0.05, 2)
+
+
+def test_empty_population_is_explicit_not_a_crash() -> None:
+    c = paired.paired_counts({}, {})
+    assert c["n"] == 0
+    assert c["successes_a"] == c["successes_b"] == 0
+    assert c["difference"] is None
+    for min_clusters in (0, 2):  # even min_clusters 0 gives no interval
+        r = paired.cluster_bootstrap([], 1, 10, 0.05, min_clusters)
+        assert r["difference"] is None
+        assert r["interval"] is None
+        assert r["n_cases"] == r["n_clusters"] == 0
+        assert r["too_few_clusters"] is True

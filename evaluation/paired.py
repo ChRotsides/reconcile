@@ -12,6 +12,9 @@ rows would understate uncertainty. Each replicate recomputes
 sum_a/sum_n - sum_b/sum_n over the resampled clusters (a ratio of totals, so
 larger clusters weigh more, as they do in the point estimate).
 
+An empty population gives zero denominators, an undefined (None) difference and
+no interval.
+
 Percentile interval: replicates sorted ascending as r[0..reps-1];
 lower = r[floor(alpha/2 * (reps-1))], upper = r[ceil((1 - alpha/2) * (reps-1))].
 No interpolation, so the bounds are always actual replicate values.
@@ -23,15 +26,15 @@ import random
 METHOD = "cluster_percentile_bootstrap"
 
 
-def paired_counts(a: dict[str, bool], b: dict[str, bool]) -> dict[str, int | float]:
+def paired_counts(
+    a: dict[str, bool], b: dict[str, bool]
+) -> dict[str, int | float | None]:
     if a.keys() != b.keys():
         raise ValueError(
             f"case id sets differ: a has {len(a)}, b has {len(b)}, "
             f"common {len(a.keys() & b.keys())}"
         )
     n = len(a)
-    if n == 0:
-        raise ValueError("no cases")
     both = sum(1 for k in a if a[k] and b[k])
     only_a = sum(1 for k in a if a[k] and not b[k])
     only_b = sum(1 for k in a if b[k] and not a[k])
@@ -43,7 +46,7 @@ def paired_counts(a: dict[str, bool], b: dict[str, bool]) -> dict[str, int | flo
         "only_a": only_a,
         "only_b": only_b,
         "neither": n - both - only_a - only_b,
-        "difference": (only_a - only_b) / n,
+        "difference": (only_a - only_b) / n if n else None,  # undefined if empty
     }
 
 
@@ -58,8 +61,6 @@ def cluster_bootstrap(
         raise ValueError(f"reps must be >= 1, got {reps}")
     if not 0 < alpha < 1:
         raise ValueError(f"alpha must be in (0, 1), got {alpha}")
-    if not cases:
-        raise ValueError("no cases")
     totals: dict[str, list[int]] = {}
     for cluster, sa, sb in cases:
         t = totals.setdefault(cluster, [0, 0, 0])
@@ -68,7 +69,11 @@ def cluster_bootstrap(
         t[2] += 1
     clusters = [totals[k] for k in sorted(totals)]  # order-independent
     n_cases = len(cases)
-    point = (sum(c[0] for c in clusters) - sum(c[1] for c in clusters)) / n_cases
+    point = (
+        (sum(c[0] for c in clusters) - sum(c[1] for c in clusters)) / n_cases
+        if n_cases
+        else None
+    )
     result: dict[str, object] = {
         "difference": point,
         "interval": None,
@@ -78,7 +83,8 @@ def cluster_bootstrap(
         "seed": seed,
         "reps": reps,
         "method": METHOD,
-        "too_few_clusters": len(clusters) < min_clusters,
+        # An empty population has no clusters: no interval, never a claim.
+        "too_few_clusters": len(clusters) < max(min_clusters, 1),
     }
     if result["too_few_clusters"]:
         return result

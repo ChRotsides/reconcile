@@ -1,7 +1,8 @@
 """Paired comparison of two scored runs (PLAN.md section 7).
 
     uv run python evaluation/compare.py A_CASES B_CASES --split validation \
-        --view all_cases --seed S --reps R --alpha 0.05 --min-clusters M --out OUT.json
+        --configuration answer_all --view all_cases --seed S --reps R \
+        --alpha 0.05 --min-clusters M --out OUT.json
 
 Evaluator side. Reads the per-case `cases.jsonl` of two scorers (the
 investigator's `dev_run.py evaluate`, the classifier baseline) and feeds
@@ -21,6 +22,7 @@ comparison, there is no fallback.
 """
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -45,6 +47,10 @@ def load(path: str | Path) -> dict[str, Row]:
                 raise ValueError(f"{path}: duplicate case_id {row['case_id']}")
             rows[row["case_id"]] = row
     return rows
+
+
+def sha256_file(path: str | Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def is_success(row: Row) -> bool:
@@ -156,14 +162,17 @@ def _fmt(m: dict[str, Any]) -> str:
     a, b, boot = m["a"], m["b"], m["bootstrap"]
     iv = boot["interval"]
     ci = (
-        "too few clusters, no interval"
+        "no interval (empty or too few clusters)"
         if iv is None
         else f"[{iv[0]:+.4f}, {iv[1]:+.4f}]"
     )
+    d = boot["difference"]
+    diff = "undefined" if d is None else f"{d:+.4f}"
     return (
         f"A {a['numerator']}/{a['denominator']}  B {b['numerator']}/{b['denominator']}"
         f"  only_a {m['paired_counts']['only_a']} only_b {m['paired_counts']['only_b']}"
-        f"  diff {boot['difference']:+.4f}  {ci}"
+        f"  diff {diff}"
+        f"  {ci}"
     )
 
 
@@ -172,6 +181,7 @@ def main() -> None:
     p.add_argument("a_cases")
     p.add_argument("b_cases")
     p.add_argument("--split", required=True)
+    p.add_argument("--configuration", required=True)
     p.add_argument("--view", required=True, choices=sorted(C.COHORT_VIEWS))
     p.add_argument("--seed", type=int, required=True)
     p.add_argument("--reps", type=int, required=True)
@@ -192,6 +202,11 @@ def main() -> None:
         )
     except ValueError as e:
         sys.exit(f"compare: {e}")
+    result |= {
+        "configuration": ns.configuration,
+        "a_sha256": sha256_file(ns.a_cases),
+        "b_sha256": sha256_file(ns.b_cases),
+    }
     Path(ns.out).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(
         f"{result['split']} / {result['view']}: {result['n_cases']} cases,"

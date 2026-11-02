@@ -264,3 +264,44 @@ def test_legitimate_sets_or_outside_view_clusters_must_agree() -> None:
     b[-1]["group_vendor_id"] = "other"
     with pytest.raises(ValueError, match="f1: cluster differs"):
         run(a, b)
+
+
+def test_empty_primary_population_is_explicit() -> None:
+    a, b = toy()
+    # Only legitimate cases in the view's complement: use an out-of-view group.
+    for r in a + b:
+        r["group"] = "oos_failure" if r["failure_type"] != "NO_FAILURE" else "cohort"
+    r = run(
+        [x for x in a if x["failure_type"] == "NO_FAILURE"],
+        [x for x in b if x["failure_type"] == "NO_FAILURE"],
+        view="all_cases",
+    )
+    assert r["n_cases"] == 3  # legitimate cohort cases are in the view
+    # An empty view: no case in any view group.
+    for x in a + b:
+        x["group"] = "oos_failure"
+    r = run(a, b)
+    p = r["primary_success"]
+    assert p["a"]["denominator"] == 0
+    assert p["bootstrap"]["difference"] is None
+    assert p["bootstrap"]["interval"] is None
+    assert r["false_alarm"]["a"]["denominator"] == 3  # legitimate, unaffected
+
+
+def test_empty_legitimate_population_is_explicit() -> None:
+    a, b = toy()
+    a, b = a[:3], b[:3]
+    r = run(a, b)
+    fa = r["false_alarm"]
+    assert fa["a"]["denominator"] == 0
+    assert fa["bootstrap"]["difference"] is None
+    assert fa["bootstrap"]["interval"] is None
+    assert r["primary_success"]["a"]["denominator"] == 3
+
+
+def test_sha256_file(tmp_path: Path) -> None:
+    p = tmp_path / "x"
+    p.write_bytes(b"abc")
+    assert compare.sha256_file(p) == (
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    )
