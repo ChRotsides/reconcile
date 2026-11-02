@@ -181,7 +181,9 @@ def predict_split(
 ) -> str:
     """Prediction step: fitted model + threshold + operational inputs (from
     `featurize` without `case_of`) -> predictions file, sorted by request_id,
-    written atomically. Returns its sha256. Touches no link or label file."""
+    written atomically. Returns its sha256. Touches no link or label file.
+    Frozen convention: abstain iff the raw (unrounded) maximum class
+    probability is below the threshold."""
     ids, _, xs, _ = pred_inputs
     proba = model.predict_proba(matrix(xs, names))
     classes = list(model.classes_)
@@ -190,7 +192,7 @@ def predict_split(
             "request_id": rid,
             "predicted": classes[int(p.argmax())],
             "confidence": float(p.max()),
-            "abstained": round(float(p.max()), 4) < threshold,
+            "abstained": float(p.max()) < threshold,
         }
         for rid, p in zip(ids, proba, strict=True)
     ]
@@ -202,16 +204,31 @@ def predict_split(
 
 
 def scored_predictions(
-    path: Path, sha: str, case_of: dict[str, str], case_ids: list[str]
-) -> tuple[list[str], list[float]]:
-    """Scoring step: refuse a predictions file that changed since it was
-    written, then return (label, confidence) in `case_ids` order."""
-    if sha256_file(path) != sha:
+    path: Path,
+    sha: str,
+    case_of: dict[str, str],
+    case_ids: list[str],
+    threshold: float,
+) -> tuple[list[str], list[float], list[bool]]:
+    """Scoring step: read the file once, refuse it if its bytes changed since
+    they were written, parse those same bytes, and refuse a recorded
+    `abstained` flag that disagrees with `confidence < threshold`. Returns
+    (label, raw confidence, abstained) in `case_ids` order."""
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != sha:
         sys.exit(f"{path.name} changed since it was written; refusing to score")
-    by_case = {case_of[r["request_id"]]: r for r in read_jsonl(path)}
+    recs = [json.loads(line) for line in data.decode().splitlines() if line.strip()]
+    for r in recs:
+        if r["abstained"] != (r["confidence"] < threshold):
+            sys.exit(
+                f"{path.name}: abstained flag of {r['request_id']} disagrees with "
+                f"confidence {r['confidence']} < {threshold}; refusing to score"
+            )
+    by_case = {case_of[r["request_id"]]: r for r in recs}
     return (
         [by_case[c]["predicted"] for c in case_ids],
         [by_case[c]["confidence"] for c in case_ids],
+        [by_case[c]["abstained"] for c in case_ids],
     )
 
 
@@ -295,12 +312,15 @@ def build_rows(
     ents: list[tuple[str, str]],
     pred: list[str],
     conf: list[float],
+    abstained: list[bool],
     snap: F.Snapshot,
     labels: dict[str, dict[str, Any]],
     conflicts: C.Conflicts,
 ) -> list[dict[str, Any]]:
     rows = []
-    for case_id, (table, rid), p, c in zip(case_ids, ents, pred, conf, strict=True):
+    for case_id, (table, rid), p, c, ab in zip(
+        case_ids, ents, pred, conf, abstained, strict=True
+    ):
         lab = labels[case_id]
         group = C.group_of(
             lab["failure_type"], lab["scenario_variant"], case_id, conflicts.verified
@@ -318,7 +338,8 @@ def build_rows(
             "entity_table": table,
             "predicted": p,
             "category": cat,
-            "confidence": round(float(c), 4),
+            "confidence": float(c),  # raw: the abstention decision uses it
+            "abstained": ab,
             "expected_category": C.expected_category(
                 lab["failure_type"], lab["scenario_variant"]
             ),
@@ -442,11 +463,7 @@ def baseline_metrics(
             sum(map(fa_narrow, legit)), len(legit)
         ),
         "false_alarms_all_legit": M.frac(
-            sum(
-                M.is_false_alarm(r)
-                for r in legit_all
-                if r["group"] in (*C.COHORT_GROUPS, "fx", "contradicted", "oos_legit")
-            ),
+            sum(M.is_false_alarm(r) for r in legit_all),
             len(legit_all),
         ),
         "false_alarms_ap_side_legit": M.frac(
@@ -581,8 +598,13 @@ def main() -> None:
     case_va = [r["case_id"] for r in lva]
     ent_va = data["validation"][1]
 
-    def score_rows(model_pred: list[str], conf: list[float]) -> list[dict[str, Any]]:
-        return build_rows(case_va, ent_va, model_pred, conf, snap, lab_va, conflicts)
+    def score_rows(
+        model_pred: list[str], conf: list[float], abstained: list[bool] | None = None
+    ) -> list[dict[str, Any]]:
+        ab = abstained if abstained is not None else [False] * len(model_pred)
+        return build_rows(
+            case_va, ent_va, model_pred, conf, ab, snap, lab_va, conflicts
+        )
 
     def cohort_acc(pred: np.ndarray) -> tuple[int, int]:
         rows = score_rows(list(pred), [1.0] * len(pred))
@@ -665,13 +687,17 @@ def main() -> None:
         model.predict_proba(Xva[i : i + 1])
         per_case_seconds.append(time.monotonic() - t)
     # 6. scoring (evaluator side): verify the hash, then join links and labels
-    pred, conf = scored_predictions(
-        pred_path, pred_sha, read_links(root, "validation"), data["validation"][0]
+    pred, conf, abst = scored_predictions(
+        pred_path,
+        pred_sha,
+        read_links(root, "validation"),
+        data["validation"][0],
+        threshold,
     )
-    rows = score_rows(pred, conf)
+    rows = score_rows(pred, conf, abst)
     primary = both_views(rows)
 
-    with_abstention = both_views(rows, lambda r: r["confidence"] >= threshold)
+    with_abstention = both_views(rows, lambda r: not r["abstained"])
 
     # 7. reliance: permutation importance on validation, single and by family
     pi = permutation_importance(
@@ -882,7 +908,7 @@ def main() -> None:
     thr_file = f"cases_threshold_{frozen_threshold}.jsonl"
     for name, cases in (
         ("cases.jsonl", rows),
-        (thr_file, as_scored(rows, lambda r: r["confidence"] >= frozen_threshold)),
+        (thr_file, as_scored(rows, lambda r: not r["abstained"])),
     ):
         with (root / name).open("w") as f:
             for r in cases:

@@ -184,7 +184,14 @@ def test_build_rows_carry_split_and_cluster(monkeypatch: pytest.MonkeyPatch) -> 
     }
     conflicts = run.C.Conflicts(verified={}, candidates={}, review={})
     [row] = run.build_rows(
-        ["A1"], [("payments", "p1")], ["NO_FAILURE"], [0.9], None, labels, conflicts
+        ["A1"],
+        [("payments", "p1")],
+        ["NO_FAILURE"],
+        [0.9],
+        [False],
+        None,
+        labels,
+        conflicts,
     )
     assert row["split"] == "validation"
     assert row["group_vendor_id"] == "vend-1"
@@ -285,13 +292,72 @@ def test_scoring_refuses_a_predictions_file_with_a_different_hash(
     out = tmp_path / "predictions_validation.jsonl"
     sha = run.predict_split(_ToyModel(), ["x"], 0.5, inputs, out)
     case_of = {"r1": "C2", "r2": "C1"}
-    assert run.scored_predictions(out, sha, case_of, ["C1", "C2"]) == (
+    assert run.scored_predictions(out, sha, case_of, ["C1", "C2"], 0.5) == (
         ["B", "A"],
         [0.7, 0.9],
+        [False, False],
     )
     out.write_text(out.read_text().replace('"A"', '"B"'))
     with pytest.raises(SystemExit, match="changed since it was written"):
-        run.scored_predictions(out, sha, case_of, ["C1", "C2"])
+        run.scored_predictions(out, sha, case_of, ["C1", "C2"], 0.5)
+
+
+def test_scoring_parses_the_bytes_it_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file is replaced after the hash is computed: scoring must use the
+    verified bytes (one read), not re-open the path."""
+    run = _load("run")
+    inputs = (["r1"], [("p", "x")], [{"x": 1.0}], ["g"])
+    out = tmp_path / "predictions_validation.jsonl"
+    sha = run.predict_split(_ToyModel(), ["x"], 0.5, inputs, out)
+    verified = out.read_bytes()
+    reads = []
+    real = Path.read_bytes
+
+    def read_then_replace(self: Path) -> bytes:
+        data = real(self)
+        if self == out:
+            reads.append(1)
+            out.write_bytes(verified.replace(b'"A"', b'"B"'))
+        return data
+
+    monkeypatch.setattr(Path, "read_bytes", read_then_replace)
+    pred, _, _ = run.scored_predictions(out, sha, {"r1": "C1"}, ["C1"], 0.5)
+    assert pred == ["A"] and len(reads) == 1
+
+
+@pytest.mark.parametrize(
+    ("p_max", "abstains"), [(0.84996, True), (0.85, False), (0.85004, False)]
+)
+def test_threshold_uses_the_raw_probability(
+    tmp_path: Path, p_max: float, abstains: bool
+) -> None:
+    """Frozen convention: abstain iff raw max probability < 0.85, no rounding
+    (0.84996 would round to 0.85 and wrongly answer)."""
+    import json
+
+    import numpy as np
+
+    class Model:
+        classes_ = ["A", "B"]
+
+        def predict_proba(self, X: Any) -> Any:
+            return np.array([[p_max, 1 - p_max] for _ in X])
+
+    run = _load("run")
+    inputs = (["r1"], [("p", "x")], [{"x": 1.0}], ["g"])
+    out = tmp_path / "p.jsonl"
+    sha = run.predict_split(Model(), ["x"], 0.85, inputs, out)
+    [rec] = [json.loads(line) for line in out.read_text().splitlines()]
+    assert rec["abstained"] is abstains
+    _, _, ab = run.scored_predictions(out, sha, {"r1": "C1"}, ["C1"], 0.85)
+    assert ab == [abstains]
+    # a recorded flag that disagrees with the threshold is refused
+    out.write_text(json.dumps(rec | {"abstained": not abstains}) + "\n")
+    bad = run.sha256_file(out)
+    with pytest.raises(SystemExit, match="disagrees"):
+        run.scored_predictions(out, bad, {"r1": "C1"}, ["C1"], 0.85)
 
 
 def test_baseline_false_alarms_use_the_shared_definition() -> None:
@@ -314,6 +380,26 @@ def test_baseline_false_alarms_use_the_shared_definition() -> None:
         [row | {"category": "no_exception"}], groups=run.C.COHORT_GROUPS
     )
     assert m["false_alarms_all_legit"]["n"] == 0
+
+
+def test_all_legit_false_alarm_numerator_matches_its_denominator() -> None:
+    """A not_gradable legitimate row answered with a failure category is in the
+    denominator, so it must be in the numerator."""
+    run = _load("run")
+    row = {
+        "case_id": "C1",
+        "failure_type": "NO_FAILURE",
+        "group": "not_gradable",
+        "category": "F06",
+        "correct": False,
+        "confidence": 0.9,
+        "abstained": False,
+    }
+    m = run.baseline_metrics([row], groups=run.C.COHORT_GROUPS)
+    assert (m["false_alarms_all_legit"]["n"], m["false_alarms_all_legit"]["d"]) == (
+        1,
+        1,
+    )
 
 
 def test_selected_model_must_be_the_protocols_frozen_baseline() -> None:
