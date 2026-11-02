@@ -1,0 +1,40 @@
+{
+  "description": "Label conflicts verified by hand against the upstream records (parent, 2026-11-01; docs/dev-results.md run 3 and run 4). In each, a legitimate-labelled case and a failure case of a family the investigator checks share a record that is defective in the failure case, so the two labels cannot both hold. Only these pairs leave the sensitivity view of the cohort; the generic rule in evaluation/cohort.py only proposes candidates.",
+  "verified": [
+    {
+      "legitimate_case": "RCA_001679",
+      "failure_case": "RCA_000857",
+      "failure_type": "F09_GL_POSTING_MISMATCH",
+      "shared_record": "PAY_0420351",
+      "defect": "PAY_0420351 is a leg of the split payment of invoice INV_0425052 (the legitimate case's primary entity) and the primary payment of the F09 case: its payment journal is balanced but for the wrong amount (scenario balanced_wrong_amount)."
+    },
+    {
+      "legitimate_case": "RCA_001759",
+      "failure_case": "RCA_000874",
+      "failure_type": "F09_GL_POSTING_MISMATCH",
+      "shared_record": "PAY_0424667",
+      "defect": "PAY_0424667 is a leg of the legitimate split payment and the primary payment of the F09 case; its journal is posted for the wrong amount."
+    },
+    {
+      "legitimate_case": "RCA_002175",
+      "failure_case": "RCA_000889",
+      "failure_type": "F09_GL_POSTING_MISMATCH",
+      "shared_record": "PAY_0420796",
+      "defect": "PAY_0420796 is a leg of the legitimate split payment and the primary payment of the F09 case; its journal is posted for the wrong amount."
+    },
+    {
+      "legitimate_case": "RCA_002212",
+      "failure_case": "RCA_000832",
+      "failure_type": "F09_GL_POSTING_MISMATCH",
+      "shared_record": "PAY_0424634",
+      "defect": "The legitimate due-date case's invoice INV_0426722 is also allocated to PAY_0424634, the primary payment of the F09 case, whose journal (4961.50) differs from the payment (4784.47). The legitimate case's own payment is PAY_0424633."
+    },
+    {
+      "legitimate_case": "RCA_002182",
+      "failure_case": "RCA_000722",
+      "failure_type": "F08_APPROVAL_WORKFLOW_FAILURE",
+      "shared_record": "INV_0424017",
+      "defect": "INV_0424017 is the invoice the legitimate net-fee payment PAY_0420261 is allocated to and the invoice of the F08 case (missing final approval); its approval event was removed, so the payment was released without a final approval."
+    }
+  ]
+}

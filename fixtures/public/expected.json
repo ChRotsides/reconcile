@@ -11,7 +11,7 @@
     ],
     "calculations": [
       {
-        "name": "journal_minus_fee_row",
+        "name": "fee_row_minus_journals",
         "unit": "EUR",
         "value": "0.00"
       }
@@ -32,8 +32,28 @@
         "table": "payments"
       },
       {
+        "id": "PAY_1|INV_1",
+        "role": "allocation of the payment to an invoice in its currency (section 5)",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
+      },
+      {
         "id": "J_FEE_1",
         "role": "bank_fee journal (by journal_id)",
+        "table": "gl_entries"
+      },
+      {
+        "id": "APR_INV_1_A",
+        "role": "completed final approval of an allocated invoice",
+        "table": "approval_events"
+      },
+      {
+        "id": "J_PAY_PAY_1",
+        "role": "payment journal (by journal_id)",
         "table": "gl_entries"
       }
     ],
@@ -56,12 +76,12 @@
         "value": "3000.00"
       },
       {
-        "name": "allocated_minus_payment",
+        "name": "payment_minus_allocated",
         "unit": "EUR",
         "value": "0.00"
       },
       {
-        "name": "bank_minus_payment",
+        "name": "delta",
         "unit": "EUR",
         "value": "0.00"
       }
@@ -100,6 +120,21 @@
         "id": "BT_1",
         "role": "posted debit",
         "table": "bank_transactions"
+      },
+      {
+        "id": "APR_INV_1_A",
+        "role": "completed final approval of an allocated invoice",
+        "table": "approval_events"
+      },
+      {
+        "id": "APR_INV_2_A",
+        "role": "completed final approval of an allocated invoice",
+        "table": "approval_events"
+      },
+      {
+        "id": "J_PAY_PAY_1",
+        "role": "payment journal (by journal_id)",
+        "table": "gl_entries"
       }
     ],
     "family": "legitimate_batch_payment",
@@ -116,7 +151,7 @@
     "absence_searches": [],
     "calculations": [
       {
-        "name": "amount_difference",
+        "name": "delta",
         "unit": "EUR",
         "value": "0.00"
       },
@@ -145,6 +180,26 @@
         "id": "BT_1",
         "role": "unique posted debit",
         "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation of the payment to an invoice in its currency (section 5)",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
+      },
+      {
+        "id": "APR_INV_1_A",
+        "role": "completed final approval of an allocated invoice",
+        "table": "approval_events"
+      },
+      {
+        "id": "J_PAY_PAY_1",
+        "role": "payment journal (by journal_id)",
+        "table": "gl_entries"
       }
     ],
     "family": "legitimate_check_clearing",
@@ -200,6 +255,16 @@
         "id": "BT_1",
         "role": "posted debit",
         "table": "bank_transactions"
+      },
+      {
+        "id": "APR_INV_1_A",
+        "role": "completed final approval of an allocated invoice",
+        "table": "approval_events"
+      },
+      {
+        "id": "J_PAY_PAY_1",
+        "role": "payment journal (by journal_id)",
+        "table": "gl_entries"
       }
     ],
     "family": "legitimate_due_date_payment",
@@ -444,16 +509,6 @@
     "calculations": [
       {
         "name": "delta",
-        "unit": "EUR",
-        "value": "25.00"
-      },
-      {
-        "name": "explained",
-        "unit": "EUR",
-        "value": "0.00"
-      },
-      {
-        "name": "unexplained",
         "unit": "EUR",
         "value": "25.00"
       }
@@ -706,8 +761,28 @@
         "table": "bank_transactions"
       },
       {
+        "id": "PAY_1|INV_1",
+        "role": "allocation of the payment to an invoice in its currency (section 5)",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
+      },
+      {
         "id": "J_FEE_1",
         "role": "bank_fee journal (by journal_id)",
+        "table": "gl_entries"
+      },
+      {
+        "id": "APR_INV_1_A",
+        "role": "completed final approval of an allocated invoice",
+        "table": "approval_events"
+      },
+      {
+        "id": "J_PAY_PAY_1",
+        "role": "payment journal (by journal_id)",
         "table": "gl_entries"
       }
     ],
@@ -774,6 +849,16 @@
         "id": "PAY_1|INV_1",
         "role": "allocation",
         "table": "payment_allocations"
+      },
+      {
+        "id": "APR_INV_1_A",
+        "role": "completed final approval of an allocated invoice",
+        "table": "approval_events"
+      },
+      {
+        "id": "J_PAY_PAY_1",
+        "role": "payment journal (by journal_id)",
+        "table": "gl_entries"
       }
     ],
     "family": "legitimate_payment_reversal",
@@ -841,6 +926,16 @@
         "id": "J_PAY_1",
         "role": "payment journal (by journal_id)",
         "table": "gl_entries"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
+      },
+      {
+        "id": "APR_INV_1_A",
+        "role": "completed final approval of an allocated invoice",
+        "table": "approval_events"
       }
     ],
     "family": "legitimate_pending_settlement",
@@ -855,10 +950,158 @@
     },
     "snapshot_rows": {}
   },
-  "real_bank_batch_debit": {
+  "real_approval_missing": {
+    "absence_searches": [
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "AP",
+        "predicate": "invoice_id = INV_1 AND action IN ('approved', 'auto_approved') AND new_status = 'approved' AND approval_level >= 1 AND event date <= payment date",
+        "table": "approval_events"
+      }
+    ],
+    "abstention_reason": "invoice_approval_not_completed",
+    "calculations": [],
+    "category": null,
+    "contract_section": "5 (all-clear prerequisites)",
+    "disposition": "abstained",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "unique posted debit",
+        "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation of the payment to an invoice in its currency (section 5)",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
+      },
+      {
+        "id": "APR_INV_1_S",
+        "role": "approval event of the invoice",
+        "table": "approval_events"
+      },
+      {
+        "id": "APR_INV_1_L1",
+        "role": "approval event of the invoice",
+        "table": "approval_events"
+      }
+    ],
+    "family": "realistic_shape",
+    "known_contract_gap": null,
+    "must_not": [
+      "legitimate_weekend_clearing",
+      "no_exception"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  },
+  "real_approval_revoked": {
     "absence_searches": [],
+    "abstention_reason": "invoice_approval_not_effective",
+    "calculations": [],
+    "category": null,
+    "contract_section": "5 (all-clear prerequisites)",
+    "disposition": "abstained",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "unique posted debit",
+        "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation of the payment to an invoice in its currency (section 5)",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
+      },
+      {
+        "id": "APR_INV_1_A",
+        "role": "the last final approval before the revocation",
+        "table": "approval_events"
+      },
+      {
+        "id": "APR_INV_1_R",
+        "role": "latest approval event on or before the payment date (a rejection)",
+        "table": "approval_events"
+      }
+    ],
+    "family": "realistic_shape",
+    "known_contract_gap": null,
+    "must_not": [
+      "legitimate_weekend_clearing",
+      "no_exception"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  },
+  "real_bank_batch_debit": {
+    "absence_searches": [
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "A1",
+        "predicate": "payment_reference = PAY_1.reference_number AND transaction_type <> 'bank fee'",
+        "table": "bank_transactions"
+      },
+      {
+        "count": 1,
+        "cutoff": "2026-06-30",
+        "id": "A2",
+        "predicate": "reference_number = PAY_1.reference_number",
+        "table": "payments"
+      },
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "A3",
+        "predicate": "non-fee debit, payment_reference matches no payment, same currency, same amount, counterparty_token = payment.bank_account_id",
+        "table": "bank_transactions"
+      }
+    ],
     "abstention_reason": "bank_batch_grouping_unmodelled",
     "calculations": [
+      {
+        "name": "business_day_age",
+        "unit": "business_days",
+        "value": "21"
+      },
+      {
+        "name": "clearing_limit_ach",
+        "unit": "business_days",
+        "value": "3"
+      },
       {
         "name": "sum_of_payments",
         "unit": "EUR",
@@ -879,6 +1122,16 @@
         "id": "PAY_1",
         "role": "payment",
         "table": "payments"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "J_PAY_1",
+        "role": "payment journal (by journal_id)",
+        "table": "gl_entries"
       },
       {
         "id": "PAY_2",
@@ -913,6 +1166,60 @@
       "effective_payment_without_bank_row": 3,
       "payment_without_bank_row": 3
     },
+    "snapshot_rows": {}
+  },
+  "real_check_double_payment": {
+    "absence_searches": [],
+    "abstention_reason": "invoice_over_allocated",
+    "calculations": [],
+    "category": null,
+    "contract_section": "5 (all-clear prerequisites)",
+    "disposition": "abstained",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "unique posted debit",
+        "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation of the payment to an invoice in its currency (section 5)",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
+      },
+      {
+        "id": "PAY_2",
+        "role": "second effective payment allocated to the same invoice",
+        "table": "payments"
+      },
+      {
+        "id": "PAY_2|INV_1",
+        "role": "allocation of the second payment",
+        "table": "payment_allocations"
+      }
+    ],
+    "family": "realistic_shape",
+    "known_contract_gap": null,
+    "must_not": [
+      "legitimate_check_clearing",
+      "no_exception"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {},
     "snapshot_rows": {}
   },
   "real_free_text_reference": {
@@ -997,18 +1304,98 @@
     },
     "snapshot_rows": {}
   },
+  "real_gl_payment_journal_mismatch": {
+    "absence_searches": [],
+    "abstention_reason": "payment_journal_amount_differs",
+    "calculations": [
+      {
+        "name": "payment_minus_payment_journals",
+        "unit": "EUR",
+        "value": "-29.60"
+      }
+    ],
+    "category": null,
+    "contract_section": "5 (all-clear prerequisites)",
+    "disposition": "abstained",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "unique posted debit",
+        "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation of the payment to an invoice in its currency (section 5)",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
+      },
+      {
+        "id": "APR_INV_1_A",
+        "role": "completed final approval of an allocated invoice",
+        "table": "approval_events"
+      },
+      {
+        "id": "J_PAY_PAY_1",
+        "role": "payment journal (by journal_id)",
+        "table": "gl_entries"
+      }
+    ],
+    "family": "realistic_shape",
+    "known_contract_gap": null,
+    "must_not": [
+      "legitimate_weekend_clearing",
+      "no_exception"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {},
+    "snapshot_rows": {}
+  },
   "real_identical_distinct_payments": {
     "absence_searches": [],
     "calculations": [
       {
-        "name": "committed_overpayment_inv_1",
+        "name": "delta",
         "unit": "EUR",
         "value": "0.00"
+      },
+      {
+        "name": "allocated",
+        "unit": "EUR",
+        "value": "450.00"
+      },
+      {
+        "name": "invoice_open_balance",
+        "unit": "EUR",
+        "value": "0.00"
+      },
+      {
+        "name": "business_day_lag",
+        "unit": "business_days",
+        "value": "2"
+      },
+      {
+        "name": "clearing_limit_ach",
+        "unit": "business_days",
+        "value": "3"
       }
     ],
-    "category": null,
-    "contract_section": "2 principle 4; PLAN.md section 4 (distinct payments stay distinct)",
-    "disposition": "out_of_scope",
+    "category": "no_exception",
+    "contract_section": "5.1 no exception; 2 principle 4; PLAN.md section 4 (distinct payments stay distinct)",
+    "disposition": "answered",
     "dropped_by_cutoff": {},
     "evidence": [
       {
@@ -1025,6 +1412,26 @@
         "id": "BT_1",
         "role": "posted debit",
         "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice",
+        "table": "invoices"
+      },
+      {
+        "id": "APR_INV_1_A",
+        "role": "completed final approval of an allocated invoice",
+        "table": "approval_events"
+      },
+      {
+        "id": "J_PAY_PAY_1",
+        "role": "payment journal (by journal_id)",
+        "table": "gl_entries"
       }
     ],
     "family": "realistic_shape",
@@ -1058,16 +1465,6 @@
     "calculations": [
       {
         "name": "delta",
-        "unit": "EUR",
-        "value": "12.50"
-      },
-      {
-        "name": "explained",
-        "unit": "EUR",
-        "value": "0.00"
-      },
-      {
-        "name": "unexplained",
         "unit": "EUR",
         "value": "12.50"
       }
@@ -1106,6 +1503,11 @@
     "absence_searches": [],
     "calculations": [
       {
+        "name": "delta",
+        "unit": "EUR",
+        "value": "0.00"
+      },
+      {
         "name": "allocated",
         "unit": "EUR",
         "value": "400.00"
@@ -1116,14 +1518,19 @@
         "value": "600.00"
       },
       {
-        "name": "delta",
-        "unit": "EUR",
-        "value": "0.00"
+        "name": "business_day_lag",
+        "unit": "business_days",
+        "value": "2"
+      },
+      {
+        "name": "clearing_limit_ach",
+        "unit": "business_days",
+        "value": "3"
       }
     ],
-    "category": null,
-    "contract_section": "4.1 (instalments; no partial-payment variant is defined)",
-    "disposition": "out_of_scope",
+    "category": "no_exception",
+    "contract_section": "5.1 no exception; 4.1 (instalments: a matched partial payment is not an exception)",
+    "disposition": "answered",
     "dropped_by_cutoff": {},
     "evidence": [
       {
@@ -1132,14 +1539,29 @@
         "table": "payments"
       },
       {
-        "id": "INV_1",
-        "role": "invoice",
-        "table": "invoices"
-      },
-      {
         "id": "BT_1",
         "role": "posted debit",
         "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice (open balance remains)",
+        "table": "invoices"
+      },
+      {
+        "id": "APR_INV_1_A",
+        "role": "completed final approval of an allocated invoice",
+        "table": "approval_events"
+      },
+      {
+        "id": "J_PAY_PAY_1",
+        "role": "payment journal (by journal_id)",
+        "table": "gl_entries"
       }
     ],
     "family": "realistic_shape",
@@ -1157,8 +1579,54 @@
     "quality_gaps": {},
     "snapshot_rows": {}
   },
+  "real_payment_without_allocation": {
+    "absence_searches": [
+      {
+        "count": 0,
+        "cutoff": "2026-06-30",
+        "id": "AL",
+        "predicate": "payment_id = PAY_1 AND allocation_date <= cutoff",
+        "table": "payment_allocations"
+      }
+    ],
+    "abstention_reason": "payment_without_invoice_allocation",
+    "calculations": [],
+    "category": null,
+    "contract_section": "5 (no invoice, no all-clear)",
+    "disposition": "abstained",
+    "dropped_by_cutoff": {},
+    "evidence": [
+      {
+        "id": "PAY_1",
+        "role": "payment",
+        "table": "payments"
+      },
+      {
+        "id": "BT_1",
+        "role": "bank row carrying the payment reference",
+        "table": "bank_transactions"
+      }
+    ],
+    "family": "realistic_shape",
+    "known_contract_gap": null,
+    "must_not": [
+      "legitimate_weekend_clearing",
+      "no_exception"
+    ],
+    "primary_entity": {
+      "id": "PAY_1",
+      "role": "primary",
+      "table": "payments"
+    },
+    "quality_gaps": {
+      "invoice_without_allocation": 1,
+      "payment_without_allocation": 1
+    },
+    "snapshot_rows": {}
+  },
   "real_reversal_then_repayment": {
     "absence_searches": [],
+    "abstention_reason": "reversal_followed_by_repayment",
     "calculations": [
       {
         "name": "debit_minus_credit",
@@ -1176,9 +1644,9 @@
         "value": "0.00"
       }
     ],
-    "category": "legitimate_payment_reversal",
-    "contract_section": "5 (payment reversal); PLAN.md section 4 (distinguish reversals from duplicates)",
-    "disposition": "answered",
+    "category": null,
+    "contract_section": "5 (payment reversal); PLAN.md section 4. Known gap: abstain until practitioner input (user decision 2026-11-01)",
+    "disposition": "abstained",
     "dropped_by_cutoff": {},
     "evidence": [
       {
@@ -1202,21 +1670,31 @@
         "table": "gl_entries"
       },
       {
+        "id": "PAY_1|INV_1",
+        "role": "allocation",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "invoice, paid again",
+        "table": "invoices"
+      },
+      {
         "id": "PAY_2",
         "role": "re-payment",
         "table": "payments"
       },
       {
-        "id": "INV_1",
-        "role": "invoice",
-        "table": "invoices"
+        "id": "PAY_2|INV_1",
+        "role": "allocation of the re-payment",
+        "table": "payment_allocations"
       }
     ],
     "family": "realistic_shape",
     "known_contract_gap": {
       "current_contract_outcome": "the reversal contract requires the allocated invoices not to be `paid`; here INV_1 is paid by PAY_2, so that condition fails and the contract does not confirm the reversal.",
       "gap": "reversal re-payment",
-      "target": "answer the reversal as legitimate; do not change the contract here",
+      "target": "abstain reversal_followed_by_repayment until practitioner input (user decision 2026-11-01); the contract is not changed here",
       "why": "The contract assumes a reversal leaves the invoice open; re-payment after a reversal is the normal next step."
     },
     "must_not": [
@@ -1457,6 +1935,21 @@
         "id": "BT_2",
         "role": "posted debit",
         "table": "bank_transactions"
+      },
+      {
+        "id": "APR_INV_1_A",
+        "role": "completed final approval of an allocated invoice",
+        "table": "approval_events"
+      },
+      {
+        "id": "J_PAY_PAY_1",
+        "role": "payment journal (by journal_id)",
+        "table": "gl_entries"
+      },
+      {
+        "id": "J_PAY_PAY_2",
+        "role": "payment journal (by journal_id)",
+        "table": "gl_entries"
       }
     ],
     "family": "legitimate_split_payment",
@@ -1473,7 +1966,7 @@
     "absence_searches": [],
     "calculations": [
       {
-        "name": "amount_difference",
+        "name": "delta",
         "unit": "EUR",
         "value": "0.00"
       },
@@ -1502,6 +1995,26 @@
         "id": "BT_1",
         "role": "unique posted debit",
         "table": "bank_transactions"
+      },
+      {
+        "id": "PAY_1|INV_1",
+        "role": "allocation of the payment to an invoice in its currency (section 5)",
+        "table": "payment_allocations"
+      },
+      {
+        "id": "INV_1",
+        "role": "allocated invoice, cited for its total (invoice-total check, section 5)",
+        "table": "invoices"
+      },
+      {
+        "id": "APR_INV_1_A",
+        "role": "completed final approval of an allocated invoice",
+        "table": "approval_events"
+      },
+      {
+        "id": "J_PAY_PAY_1",
+        "role": "payment journal (by journal_id)",
+        "table": "gl_entries"
       }
     ],
     "family": "legitimate_weekend_clearing",

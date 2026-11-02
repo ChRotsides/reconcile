@@ -32,7 +32,7 @@ CHECKS: dict[str, tuple[str, str, str, str]] = {
     "accounted_bank_fee": ("bank_fee", "BT_2", G, "fee_journal_equals_fee_row"),
     "batch_payment": ("batch", "PAY_1", G, "allocations_equal_payment_and_bank"),
     "check_clearing": ("check", "PAY_1", G, "within_clearing_window"),
-    "due_date_payment": ("due_date", "INV_1", G, "paid_on_due_date_no_overpayment"),
+    "due_date_payment": ("due_date", "INV_1", G, "paid_on_due_date_fully_allocated"),
     "f06_double_payment": ("f06", "INV_1", G, "committed_overpayment"),
     "f06_second_debit_post_cutoff": (
         "f06",
@@ -91,15 +91,27 @@ CHECKS: dict[str, tuple[str, str, str, str]] = {
         G,
         "absent_beyond_window",
     ),
-    # Out of scope: the checker must refute F06 and must not confirm a shortfall.
+    # No exception (contract 5.1): matched, in the window, invoice not over-allocated.
     "real_identical_distinct_payments": (
-        "f14",
+        "no_exception",
         "PAY_1",
-        C,
-        "no_amount_difference",
+        G,
+        "matched_no_exception",
     ),
     "real_netted_fee_no_journal": ("f14", "PAY_1", G, "unexplained_shortfall"),
-    "real_partial_payment": ("f14", "PAY_1", C, "no_amount_difference"),
+    # No invoice, no all-clear (contract section 5): clearing without an allocation.
+    "real_payment_without_allocation": ("clearing", "PAY_1", NG, "no_allocation"),
+    # All-clear prerequisites (contract section 5): the checker does not model them.
+    "real_approval_missing": ("clearing", "PAY_1", G, "within_clearing_window"),
+    "real_gl_payment_journal_mismatch": (
+        "clearing",
+        "PAY_1",
+        G,
+        "within_clearing_window",
+    ),
+    "real_approval_revoked": ("clearing", "PAY_1", G, "within_clearing_window"),
+    "real_check_double_payment": ("check", "PAY_1", G, "within_clearing_window"),
+    "real_partial_payment": ("no_exception", "PAY_1", G, "matched_no_exception"),
     # Documented contract gap: re-payment leaves the invoice paid.
     "real_reversal_then_repayment": ("reversal", "PAY_1", C, "invoice_still_paid"),
     "split_payment": ("split", "INV_1", G, "allocations_equal_invoice"),
@@ -147,7 +159,17 @@ def test_checker_agrees_with_expected_disposition(name: str) -> None:
     if gap is not None:
         # The contract and the expected outcome differ, as documented.
         assert gap["current_contract_outcome"]
-        assert (e["disposition"], status) in {("abstained", G), ("answered", C)}
+        assert (e["disposition"], status) in {("abstained", G), ("abstained", C)}
+    elif name in (
+        "real_approval_missing",
+        "real_approval_revoked",
+        "real_check_double_payment",
+        "real_gl_payment_journal_mismatch",
+    ):
+        # The all-clear prerequisites (approval, payment journal, invoice totals)
+        # are investigator rules the checker does not model; it sees a clean
+        # clearing case.
+        assert (e["disposition"], status) == ("abstained", G)
     elif name == "fx_settlement":
         # Detection only: the checker finds the mismatch; the answer is an abstention.
         assert (e["disposition"], status) == ("abstained", G)
@@ -327,3 +349,21 @@ def test_unbalanced_reversal_journal_not_gradable(tmp_path: Path) -> None:
         tmp_path, "payment_reversal", ("gl_entries.csv", "0.00,600.00", "0.00,500.00")
     )
     assert ecc.check_reversal(s, "PAY_1").status == NG
+
+
+def test_split_debit_tolerance_is_one_minor_unit(tmp_path: Path) -> None:
+    # Contract P4: a leg debit within one minor unit of its payment still
+    # matches; two minor units apart does not.
+    within = edited(
+        tmp_path / "a",
+        "split_payment",
+        ("bank_transactions.csv", "ACH debit,1200.00", "ACH debit,1200.01"),
+    )
+    assert ecc.check_split(within, "INV_1").status == G
+    beyond = edited(
+        tmp_path / "b",
+        "split_payment",
+        ("bank_transactions.csv", "ACH debit,1200.00", "ACH debit,1200.02"),
+    )
+    res = ecc.check_split(beyond, "INV_1")
+    assert (res.status, res.reason) == (C, "leg_bank_amount_differs")

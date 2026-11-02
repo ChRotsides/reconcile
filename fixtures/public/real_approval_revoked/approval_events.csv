@@ -1,0 +1,4 @@
+approval_event_id,invoice_id,approval_level,approver_role,action,event_timestamp,previous_status,new_status
+APR_INV_1_S,INV_1,0,workflow,submitted,2026-05-01T09:00:00,received,submitted
+APR_INV_1_A,INV_1,1,manager,approved,2026-05-02T11:00:00,submitted,approved
+APR_INV_1_R,INV_1,1,manager,rejected,2026-06-03T09:00:00,approved,rejected

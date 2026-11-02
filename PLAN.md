@@ -289,6 +289,13 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 
 **Gate:** Supported answers and abstentions work without API credentials. A false alarm on a legitimate pending payment is recorded as a failure.
 
+**Gate outcome (2026-11-02): conditional pass, approved by the user.** Evidence: `docs/dev-results.md` (run `m2-dev-7`), `docs/baseline-observable.md` (run `obs-5`), `docs/isolation.md`, and a mid-milestone review plus three Codex review rounds, with every finding verified and every fix checked before commit.
+- **Met:** answers and abstentions run with no API credentials, inside the isolation container (in-container absence check). On train and validation, 481 of 503 in-scope cases are correct with complete evidence, every answer is evidence-complete (497 of 497), there are 0 false alarms on 526 legitimate cases and 0 all-clears on 859 out-of-scope failures. On validation the investigator gets 119 of 123 against 109 for the observable-input classifier, which raises 25 false alarms on 139 legitimate cases. These are development results on synthetic data, not a sealed comparison.
+- **Partly:** hop depth is declared in provenance but not enforced in code; the row and time limits are enforced. The observable-input baseline reports a record-availability upper bound for evidence, not evidence packets or report templates. Isolation depends on the operator mounting the right directories (assumption), and the base image is not pinned by digest.
+- **Not met:** the practitioner packet review (no practitioner recruited yet).
+- **Open:** 5 hand-verified label conflicts (`evaluation/verified_label_conflicts.json`) are counted against the investigator in the headline view; 481 of 498 excludes them.
+- **Carried forward:** the practitioner packet review (whenever practitioners are available); baseline evidence packets and report templates (M5, with the HTML reports); hop-depth enforcement and image digest pinning (M6 hardening).
+
 ### M3 — Evaluation protocol and measurement
 
 - [ ] Implement section 7 metrics and check them against hand-calculated examples.
