@@ -18,7 +18,9 @@ are replicated from `dev_run.py` (`classify`, `cohort_metrics`,
 """
 
 import argparse
+import hashlib
 import json
+import os
 import resource
 import sqlite3
 import sys
@@ -161,6 +163,55 @@ def featurize(
     first: dict[str, str] = {}
     groups = [first.setdefault(g, c) for g, c in zip(raw_groups, ids, strict=True)]
     return ids, ents, xs, groups
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def predict_split(
+    model: Any,
+    names: list[str],
+    threshold: float,
+    pred_inputs: tuple[
+        list[str], list[tuple[str, str]], list[dict[str, float]], list[str]
+    ],
+    out: Path,
+) -> str:
+    """Prediction step: fitted model + threshold + operational inputs (from
+    `featurize` without `case_of`) -> predictions file, sorted by request_id,
+    written atomically. Returns its sha256. Touches no link or label file."""
+    ids, _, xs, _ = pred_inputs
+    proba = model.predict_proba(matrix(xs, names))
+    classes = list(model.classes_)
+    recs = [
+        {
+            "request_id": rid,
+            "predicted": classes[int(p.argmax())],
+            "confidence": float(p.max()),
+            "abstained": round(float(p.max()), 4) < threshold,
+        }
+        for rid, p in zip(ids, proba, strict=True)
+    ]
+    recs.sort(key=lambda r: r["request_id"])
+    tmp = out.with_name(out.name + ".tmp")
+    tmp.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in recs))
+    os.replace(tmp, out)
+    return sha256_file(out)
+
+
+def scored_predictions(
+    path: Path, sha: str, case_of: dict[str, str], case_ids: list[str]
+) -> tuple[list[str], list[float]]:
+    """Scoring step: refuse a predictions file that changed since it was
+    written, then return (label, confidence) in `case_ids` order."""
+    if sha256_file(path) != sha:
+        sys.exit(f"{path.name} changed since it was written; refusing to score")
+    by_case = {case_of[r["request_id"]]: r for r in read_jsonl(path)}
+    return (
+        [by_case[c]["predicted"] for c in case_ids],
+        [by_case[c]["confidence"] for c in case_ids],
+    )
 
 
 def join_cases(
@@ -336,6 +387,18 @@ def check_threshold(chosen: float, frozen: float) -> None:
         )
 
 
+def check_model(selected: str, protocol_path: Path) -> None:
+    """The protocol froze the baseline model in prose ("... HistGradientBoosting
+    lr=0.05 depth=3 l2=1.0, fit on train"); candidate names are "hgb <params>", so
+    the selected one must appear in that string with "hgb" spelled out."""
+    frozen = tomllib.loads(protocol_path.read_text())["systems"]["baseline"]
+    if selected.replace("hgb ", "HistGradientBoosting ", 1) not in frozen:
+        raise SystemExit(
+            f"selected model {selected!r} is not the protocol's frozen baseline "
+            f"({frozen!r}); the protocol needs a new version, not a silent change"
+        )
+
+
 def baseline_metrics(
     rows: list[dict[str, Any]],
     answered_fn: Any = lambda r: True,
@@ -350,9 +413,6 @@ def baseline_metrics(
     legit = [r for r in c if r["failure_type"] == "NO_FAILURE"]
     legit_all = [r for r in sr if r["failure_type"] == "NO_FAILURE"]
     ac = M.all_clear_risk(sr)
-
-    def fa(r: dict[str, Any]) -> bool:
-        return r["disposition"] == "answered" and r.get("kind") == "false_alarm"
 
     def fa_narrow(r: dict[str, Any]) -> bool:
         return r["disposition"] == "answered" and r["category"] in (
@@ -382,14 +442,14 @@ def baseline_metrics(
         ),
         "false_alarms_all_legit": M.frac(
             sum(
-                fa(r)
+                M.is_false_alarm(r)
                 for r in legit_all
                 if r["group"] in (*C.COHORT_GROUPS, "fx", "contradicted", "oos_legit")
             ),
             len(legit_all),
         ),
         "false_alarms_ap_side_legit": M.frac(
-            sum(fa(r) for r in legit_all if r["group"] == "oos_legit"),
+            sum(M.is_false_alarm(r) for r in legit_all if r["group"] == "oos_legit"),
             sum(r["group"] == "oos_legit" for r in legit_all),
         ),
         "all_clear_on_out_of_scope_failures": ac["overall"],
@@ -548,25 +608,10 @@ def main() -> None:
             best = (n, name, model)
     assert best is not None
     _, best_name, best_model = best
+    check_model(best_name, REPO / "evaluation/protocol.toml")
     t_fit = time.monotonic()
     model = clone_model(best_model).fit(Xtr, ytr)
     fit_seconds = time.monotonic() - t_fit
-    classes = list(model.classes_)
-    t_pred = time.monotonic()
-    proba = model.predict_proba(Xva)
-    batch_predict_seconds = time.monotonic() - t_pred
-    # per-case latency: one single-row predict_proba call per validation case
-    # (results above come from the batch call; these timings only measure)
-    per_case_seconds = []
-    for i in range(len(Xva)):
-        t = time.monotonic()
-        model.predict_proba(Xva[i : i + 1])
-        per_case_seconds.append(time.monotonic() - t)
-    pred = [classes[i] for i in proba.argmax(1)]
-    conf = list(proba.max(1))
-    rows = score_rows(pred, conf)
-    primary = both_views(rows)
-
     # 4. optional abstention threshold chosen on TRAIN by grouped cross-validation
     cv_pred_proba = cross_val_predict(
         clone_model(best_model), Xtr, ytr, groups=np.array(data["train"][3]),
@@ -604,9 +649,30 @@ def main() -> None:
     threshold = chosen if chosen is not None else thr_grid[-1]
     frozen_threshold = protocol_threshold(REPO / "evaluation/protocol.toml")
     check_threshold(threshold, frozen_threshold)
+    # 5. predictions: final before the validation split's links or labels are
+    # joined. Model selection above necessarily scored candidates on validation
+    # labels (M2 design); from here the selected model's output is fixed.
+    pred_path = root / "predictions_validation.jsonl"
+    t_pred = time.monotonic()
+    pred_sha = predict_split(model, names, threshold, pred_inputs, pred_path)
+    batch_predict_seconds = time.monotonic() - t_pred
+    # per-case latency: one single-row predict_proba call per validation case
+    # (results come from the predictions file; these timings only measure)
+    per_case_seconds = []
+    for i in range(len(Xva)):
+        t = time.monotonic()
+        model.predict_proba(Xva[i : i + 1])
+        per_case_seconds.append(time.monotonic() - t)
+    # 6. scoring (evaluator side): verify the hash, then join links and labels
+    pred, conf = scored_predictions(
+        pred_path, pred_sha, read_links(root, "validation"), data["validation"][0]
+    )
+    rows = score_rows(pred, conf)
+    primary = both_views(rows)
+
     with_abstention = both_views(rows, lambda r: r["confidence"] >= threshold)
 
-    # 5. reliance: permutation importance on validation, single and by family
+    # 7. reliance: permutation importance on validation, single and by family
     pi = permutation_importance(
         model, Xva, yva, n_repeats=10, random_state=SEED, scoring="accuracy"
     )
@@ -651,7 +717,7 @@ def main() -> None:
         for k, c in fam_cols.items()
     }
 
-    # 6. residual ablation: retrain the selected configuration without a residual group
+    # 8. residual ablation: retrain the selected configuration without a residual group
     ablation = {}
     resid_all: list[str] = []
     for k, prefixes in F.RESIDUAL_GROUPS.items():
@@ -812,12 +878,35 @@ def main() -> None:
     (root / "metrics.json").write_text(
         json.dumps(out, indent=2, sort_keys=True, default=str) + "\n"
     )
-    with (root / "cases.jsonl").open("w") as f:
-        for r in rows:
-            f.write(json.dumps(r, sort_keys=True) + "\n")
-    with (root / f"cases_threshold_{frozen_threshold}.jsonl").open("w") as f:
-        for r in as_scored(rows, lambda r: r["confidence"] >= frozen_threshold):
-            f.write(json.dumps(r, sort_keys=True) + "\n")
+    thr_file = f"cases_threshold_{frozen_threshold}.jsonl"
+    for name, cases in (
+        ("cases.jsonl", rows),
+        (thr_file, as_scored(rows, lambda r: r["confidence"] >= frozen_threshold)),
+    ):
+        with (root / name).open("w") as f:
+            for r in cases:
+                f.write(json.dumps(r, sort_keys=True) + "\n")
+    # written last: compare.py reads the case files through these hashes
+    manifest = {
+        "system": "observable_baseline",
+        "model": best_name,
+        "configurations": {
+            "answer_all": {
+                "cases_file": "cases.jsonl",
+                "cases_sha256": sha256_file(root / "cases.jsonl"),
+                "abstention_threshold": None,
+            },
+            f"threshold_{frozen_threshold}": {
+                "cases_file": thr_file,
+                "cases_sha256": sha256_file(root / thr_file),
+                "abstention_threshold": frozen_threshold,
+            },
+        },
+        "predictions_sha256": {"validation": pred_sha},
+    }
+    (root / "run-manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
     print(
         json.dumps(
             {k: out[k] for k in ("selected", "primary_no_abstention", "fx_slice")},

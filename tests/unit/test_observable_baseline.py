@@ -243,3 +243,87 @@ def test_threshold_rows_abstain_below_and_count_neither_success_nor_false_alarm(
     o = compare.outcomes(out)
     assert [o[k]["success"] for k in "abcd"] == [True, True, False, False]
     assert not o["d"]["false_alarm"]
+
+
+class _ToyModel:
+    classes_ = ["A", "B"]
+
+    def predict_proba(self, X: Any) -> Any:
+        import numpy as np
+
+        return np.array([[0.9, 0.1] if x[0] < 2 else [0.3, 0.7] for x in X])
+
+
+def test_predict_split_runs_without_evaluator_or_label_files(tmp_path: Path) -> None:
+    """The prediction step takes the fitted model, threshold and operational
+    inputs only: no evaluator/ directory, no label file exists, and the file
+    comes out sorted by request_id with the abstention flag at the threshold."""
+    import json
+
+    run = _load("run")
+    inputs = (
+        ["r2", "r1"],
+        [("p", "x"), ("p", "y")],
+        [{"x": 2.0}, {"x": 1.0}],
+        ["g", "h"],
+    )
+    out = tmp_path / "predictions_validation.jsonl"
+    sha = run.predict_split(_ToyModel(), ["x"], 0.8, inputs, out)
+    assert sorted(p.name for p in tmp_path.iterdir()) == [out.name]
+    assert sha == run.sha256_file(out)
+    recs = [json.loads(line) for line in out.read_text().splitlines()]
+    assert [r["request_id"] for r in recs] == ["r1", "r2"]
+    assert [r["predicted"] for r in recs] == ["A", "B"]
+    assert [r["abstained"] for r in recs] == [False, True]  # 0.9 >= 0.8 > 0.7
+
+
+def test_scoring_refuses_a_predictions_file_with_a_different_hash(
+    tmp_path: Path,
+) -> None:
+    run = _load("run")
+    inputs = (["r1", "r2"], [("p", "x")] * 2, [{"x": 1.0}, {"x": 2.0}], ["g", "h"])
+    out = tmp_path / "predictions_validation.jsonl"
+    sha = run.predict_split(_ToyModel(), ["x"], 0.5, inputs, out)
+    case_of = {"r1": "C2", "r2": "C1"}
+    assert run.scored_predictions(out, sha, case_of, ["C1", "C2"]) == (
+        ["B", "A"],
+        [0.7, 0.9],
+    )
+    out.write_text(out.read_text().replace('"A"', '"B"'))
+    with pytest.raises(SystemExit, match="changed since it was written"):
+        run.scored_predictions(out, sha, case_of, ["C1", "C2"])
+
+
+def test_baseline_false_alarms_use_the_shared_definition() -> None:
+    """A legitimate case in group 'contradicted' called a failure never gets
+    kind == 'false_alarm' from build_rows, but is one by metrics.is_false_alarm
+    and must be counted in the all-legit false-alarm rate."""
+    run = _load("run")
+    row = {
+        "case_id": "C1",
+        "failure_type": "NO_FAILURE",
+        "group": "contradicted",
+        "category": "F06",
+        "correct": False,
+        "confidence": 0.9,
+        "kind": "wrong_legit_variant",
+    }
+    m = run.baseline_metrics([row], groups=run.C.COHORT_GROUPS)
+    assert m["false_alarms_all_legit"]["n"] == 1
+    m = run.baseline_metrics(
+        [row | {"category": "no_exception"}], groups=run.C.COHORT_GROUPS
+    )
+    assert m["false_alarms_all_legit"]["n"] == 0
+
+
+def test_selected_model_must_be_the_protocols_frozen_baseline() -> None:
+    run = _load("run")
+    proto = Path(__file__).resolve().parents[2] / "evaluation/protocol.toml"
+    run.check_model("hgb lr=0.05 depth=3 l2=1.0", proto)
+    for other in (
+        "hgb lr=0.1 depth=3 l2=1.0",
+        "rf n=300",
+        "hgb lr=0.05 depth=3 l2=0.0",
+    ):
+        with pytest.raises(SystemExit, match="frozen baseline"):
+            run.check_model(other, proto)
