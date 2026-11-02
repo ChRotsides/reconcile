@@ -262,3 +262,20 @@ def test_sha256_helper_agrees_with_hashlib(tmp_path: Path) -> None:
     f = tmp_path / "f"
     f.write_bytes(b"abc")
     assert D.sha256_file(f) == hashlib.sha256(b"abc").hexdigest()
+
+
+@pytest.mark.parametrize("bad", ["missing", "null", "number", "no_request"])
+def test_a_packet_without_a_string_request_id_is_refused_with_its_line(
+    bad: str,
+) -> None:
+    labels, packets, requests, links = toy(["c1", "c2"])
+    if bad == "missing":
+        del packets[1]["request"]["request_id"]
+    elif bad == "null":
+        packets[1]["request"]["request_id"] = None
+    elif bad == "number":
+        packets[1]["request"]["request_id"] = 7
+    else:
+        del packets[1]["request"]
+    with pytest.raises(SystemExit, match="line 2"):
+        score(labels, packets, requests, links)

@@ -2265,6 +2265,10 @@ def load_split(
     Anything else is refused, never scored on a reduced set."""
     link_of = {r["request_id"]: r["case_id"] for r in links}
     request_of = {r["request_id"]: r for r in requests}
+    for n, p in enumerate(packets, 1):
+        req = p.get("request") if isinstance(p, dict) else None
+        if not (isinstance(req, dict) and isinstance(req.get("request_id"), str)):
+            sys.exit(f"{split}: packet on line {n} has no string request.request_id")
     ids = [p["request"]["request_id"] for p in packets]
     if len(link_of) != len(links) or len(request_of) != len(requests):
         sys.exit(f"{split}: duplicate request ids in requests or links")
