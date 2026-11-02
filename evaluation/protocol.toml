@@ -44,7 +44,7 @@ metric = "correct_and_evidence_complete"
 definition = "cases answered with the expected category whose packet meets every evidence-contract requirement, divided by all cohort cases; abstentions and failures are not successes"
 
 [systems]
-investigator = "deterministic_v2 at the frozen commit"
+investigator = "deterministic_v2 at the frozen commit"  # the headline claim is about this system only
 baseline = "observable-input HistGradientBoosting lr=0.05 depth=3 l2=1.0, fit on train"
 baseline_configurations = ["answer_all", "threshold_0.85"]
 baseline_evidence = "relaxed record-availability upper bound (evaluation/baselines/observable/evidence.py)"
@@ -55,6 +55,9 @@ baseline_evidence = "relaxed record-availability upper bound (evaluation/baselin
 min_primary_difference = 0.05  # paired point difference, investigator - baseline
 primary_interval_must_exclude_zero = true
 false_alarm_scope = "all legitimate cases of the split"
+# Observed-sample engineering criterion ("no observed increase"), not a
+# statistical non-inferiority claim: when both systems raise no false alarm
+# the interval is [0, 0] and carries no assurance about rates.
 max_false_alarm_difference_upper_bound = 0.0  # investigator - baseline
 list_every_false_alarm = true
 
@@ -84,13 +87,19 @@ max_transient_retries_per_case = 1
 # paid call, so that the projected sealed-run cost fits the remaining budget.
 
 [model_assistance]
+# A model-assisted system is never the headline. If one survives validation it
+# is a separate, secondary claim against this deterministic investigator on the
+# sealed split, with the rules below, and its variability is measured by
+# repeating a fixed validation subset before the sealed run.
 # A model path is kept only if, on validation against the deterministic
 # investigator: the paired primary point difference is > 0, false alarms do
 # not increase, no emitted claim is unsupported, and the budget holds. A
 # drafting-only path that cannot change the primary metric is kept only if a
 # recorded practitioner review finds a usefulness benefit. Otherwise removed.
 min_validation_primary_difference_exclusive = 0.0
-max_unsupported_claims = 0
+max_unsupported_claims = 0  # needs the predicate-level claim checker M4 must build
+variability_subset_cases = 30  # the validation headline-cohort cases with the smallest sha256(case_id)
+variability_repetitions = 3
 
 [ablations]
 reported = [
@@ -104,5 +113,5 @@ reported = [
 # once; record packet, timing and stats digests; rerun inference and require
 # identical packet digests; only then open sealed labels and score.
 record = ["code_commit", "protocol_sha256", "image_id", "snapshot_content_sha256", "requests_sha256", "packets_sha256", "timings_sha256", "run_stats_sha256"]
-require_deterministic_rerun = true
+require_deterministic_rerun = true  # deterministic investigator only
 require_same_image_id = true  # the rerun must use the run's own image
