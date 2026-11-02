@@ -148,3 +148,58 @@ def test_build_rows_carry_split_and_cluster(monkeypatch: pytest.MonkeyPatch) -> 
     )
     assert row["split"] == "validation"
     assert row["group_vendor_id"] == "vend-1"
+
+
+def test_threshold_is_parsed_from_the_protocol_and_drift_is_loud(
+    tmp_path: Path,
+) -> None:
+    run = _load("run")
+    proto = tmp_path / "protocol.toml"
+    proto.write_text(
+        '[systems]\nbaseline_configurations = ["answer_all", "threshold_0.85"]\n'
+    )
+    assert run.protocol_threshold(proto) == 0.85
+    run.check_threshold(0.85, 0.85)
+    with pytest.raises(SystemExit, match="differs from the protocol"):
+        run.check_threshold(0.8, 0.85)
+
+
+def test_threshold_rows_abstain_below_and_count_neither_success_nor_false_alarm() -> (
+    None
+):
+    import importlib
+
+    sys.path.insert(0, str(DIR.parents[1]))
+    try:
+        compare = importlib.import_module("compare")
+    finally:
+        sys.path.remove(str(DIR.parents[1]))
+    run = _load("run")
+
+    def row(cid: str, conf: float, ft: str) -> dict[str, Any]:
+        return {
+            "case_id": cid, "confidence": conf, "correct": True, "complete": True,
+            "kind": "false_alarm" if ft == "NO_FAILURE" else "correct",
+            "failure_type": ft, "group": "g", "group_vendor_id": "v",
+            "split": "validation",
+        }  # fmt: skip
+
+    rows = [
+        row("a", 0.9, "X"),
+        row("b", 0.85, "X"),
+        row("c", 0.84, "X"),
+        row("d", 0.5, "NO_FAILURE"),
+    ]
+    out = {
+        r["case_id"]: r for r in run.as_scored(rows, lambda r: r["confidence"] >= 0.85)
+    }
+    assert [out[k]["disposition"] for k in "abcd"] == [
+        "answered",
+        "answered",
+        "abstained",
+        "abstained",
+    ]
+    assert out["c"]["outcome"] == "abstained" and out["c"]["kind"] is None
+    o = compare.outcomes(out)
+    assert [o[k]["success"] for k in "abcd"] == [True, True, False, False]
+    assert not o["d"]["false_alarm"]

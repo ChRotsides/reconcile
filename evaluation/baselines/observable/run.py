@@ -23,6 +23,7 @@ import resource
 import sqlite3
 import sys
 import time
+import tomllib
 import warnings
 from collections import Counter
 from datetime import date
@@ -281,6 +282,32 @@ def as_scored(rows: list[dict[str, Any]], answered_fn: Any) -> list[dict[str, An
             }
         )
     return out
+
+
+def protocol_threshold(protocol_path: Path) -> float:
+    """The abstention threshold the protocol froze, parsed from the name of its
+    `threshold_<x>` baseline configuration so the number has one source."""
+    names = tomllib.loads(protocol_path.read_text())["systems"][
+        "baseline_configurations"
+    ]
+    found = [
+        float(n.removeprefix("threshold_")) for n in names if n.startswith("threshold_")
+    ]
+    if len(found) != 1:
+        raise SystemExit(
+            f"{protocol_path}: expected one threshold_<x> configuration, got {names}"
+        )
+    return found[0]
+
+
+def check_threshold(chosen: float, frozen: float) -> None:
+    """The protocol froze `frozen` because the train-CV rule chose it; if the rule
+    now chooses something else the frozen comparison no longer follows the rule."""
+    if chosen != frozen:
+        raise SystemExit(
+            f"CV-chosen abstention threshold {chosen} differs from the protocol's "
+            f"frozen {frozen}; the protocol needs a new version, not a silent change"
+        )
 
 
 def baseline_metrics(
@@ -543,6 +570,8 @@ def main() -> None:
         if chosen is None and kept and prec / kept >= args.cv_precision_target:
             chosen = pt["threshold"]
     threshold = chosen if chosen is not None else thr_grid[-1]
+    frozen_threshold = protocol_threshold(REPO / "evaluation/protocol.toml")
+    check_threshold(threshold, frozen_threshold)
     with_abstention = both_views(rows, lambda r: r["confidence"] >= threshold)
 
     # 5. reliance: permutation importance on validation, single and by family
@@ -753,6 +782,9 @@ def main() -> None:
     )
     with (root / "cases.jsonl").open("w") as f:
         for r in rows:
+            f.write(json.dumps(r, sort_keys=True) + "\n")
+    with (root / f"cases_threshold_{frozen_threshold}.jsonl").open("w") as f:
+        for r in as_scored(rows, lambda r: r["confidence"] >= frozen_threshold):
             f.write(json.dumps(r, sort_keys=True) + "\n")
     print(
         json.dumps(
