@@ -18,13 +18,18 @@ are replicated from `dev_run.py` (`classify`, `cohort_metrics`,
 """
 
 import argparse
+import hashlib
 import json
+import os
+import resource
 import sqlite3
 import sys
 import time
+import tomllib
 import warnings
 from collections import Counter
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -42,8 +47,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import cohort as C  # noqa: E402  (shared with evaluation/dev_run.py)
+import dev_run  # noqa: E402  (code identity, same digests as dev runs)
 import evidence  # noqa: E402
 import features as F  # noqa: E402
+import metrics as M  # noqa: E402  (shared metric definitions, PLAN.md section 7)
 
 from reconcile.adapters.finrca import create_key_file, prepare_finrca_snapshot  # noqa: E402
 from reconcile.adapters.finrca_requests import prepare_finrca_requests  # noqa: E402
@@ -119,25 +126,127 @@ def prepare(tag: str, upstream: Path) -> tuple[Path, Path]:
 # ------------------------------------------------------------------ features
 
 
+def read_links(root: Path, split: str) -> dict[str, str]:
+    """request_id -> case_id. Evaluator side: training and scoring only."""
+    return {
+        r["request_id"]: r["case_id"]
+        for r in read_jsonl(root / "evaluator" / split / "links.jsonl")
+    }
+
+
 def featurize(
-    root: Path, snap: F.Snapshot, split: str
+    root: Path,
+    snap: F.Snapshot,
+    split: str,
+    case_of: dict[str, str] | None = None,
 ) -> tuple[list[str], list[tuple[str, str]], list[dict[str, float]], list[str]]:
-    """Per request: (request_id, (table, record_id), features, vendor group).
-    Reads the requests file and the snapshot only."""
-    reqs = sorted(
-        read_jsonl(root / "prepared/requests" / split / "requests.jsonl"),
-        key=lambda r: r["request_id"],
-    )
-    ids, ents, xs, groups = [], [], [], []
+    """Per request: (id, (table, record_id), features, vendor group).
+
+    Without `case_of` (prediction) this reads only the requests file and the
+    snapshot; ids are opaque request ids in file order and no evaluator file is
+    opened, so it can run on a sealed split. With `case_of` (training) ids are
+    case ids and rows are in case_id order: tokens, request ids and so their
+    file order depend on the HMAC key, so sample order and group names must come
+    from case ids: same inputs, same fit, any key."""
+    reqs = read_jsonl(root / "prepared/requests" / split / "requests.jsonl")
+    if case_of is not None:
+        reqs.sort(key=lambda r: case_of[r["request_id"]])
+    ids, ents, xs, raw_groups = [], [], [], []
     for r in reqs:
         table, rid = r["primary_entity"]["table"], r["primary_entity"]["record_id"]
-        ids.append(r["request_id"])
+        ids.append(r["request_id"] if case_of is None else case_of[r["request_id"]])
         ents.append((table, rid))
         xs.append(F.extract(snap, table, rid))
-        groups.append(
+        raw_groups.append(
             F.vendor_of(F.resolve(snap, table, rid)) if table != "gl_entries" else rid
         )
+    # GroupKFold breaks ties by group name, so name each group by its first case
+    first: dict[str, str] = {}
+    groups = [first.setdefault(g, c) for g, c in zip(raw_groups, ids, strict=True)]
     return ids, ents, xs, groups
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def predict_split(
+    model: Any,
+    names: list[str],
+    threshold: float,
+    pred_inputs: tuple[
+        list[str], list[tuple[str, str]], list[dict[str, float]], list[str]
+    ],
+    out: Path,
+) -> str:
+    """Prediction step: fitted model + threshold + operational inputs (from
+    `featurize` without `case_of`) -> predictions file, sorted by request_id,
+    written atomically. Returns its sha256. Touches no link or label file.
+    Frozen convention: abstain iff the raw (unrounded) maximum class
+    probability is below the threshold."""
+    ids, _, xs, _ = pred_inputs
+    proba = model.predict_proba(matrix(xs, names))
+    classes = list(model.classes_)
+    recs = [
+        {
+            "request_id": rid,
+            "predicted": classes[int(p.argmax())],
+            "confidence": float(p.max()),
+            "abstained": float(p.max()) < threshold,
+        }
+        for rid, p in zip(ids, proba, strict=True)
+    ]
+    recs.sort(key=lambda r: r["request_id"])
+    tmp = out.with_name(out.name + ".tmp")
+    tmp.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in recs))
+    os.replace(tmp, out)
+    return sha256_file(out)
+
+
+def scored_predictions(
+    path: Path,
+    sha: str,
+    case_of: dict[str, str],
+    case_ids: list[str],
+    threshold: float,
+) -> tuple[list[str], list[float], list[bool]]:
+    """Scoring step: read the file once, refuse it if its bytes changed since
+    they were written, parse those same bytes, and refuse a recorded
+    `abstained` flag that disagrees with `confidence < threshold`. Returns
+    (label, raw confidence, abstained) in `case_ids` order."""
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != sha:
+        sys.exit(f"{path.name} changed since it was written; refusing to score")
+    recs = [json.loads(line) for line in data.decode().splitlines() if line.strip()]
+    for r in recs:
+        if r["abstained"] != (r["confidence"] < threshold):
+            sys.exit(
+                f"{path.name}: abstained flag of {r['request_id']} disagrees with "
+                f"confidence {r['confidence']} < {threshold}; refusing to score"
+            )
+    by_case = {case_of[r["request_id"]]: r for r in recs}
+    return (
+        [by_case[c]["predicted"] for c in case_ids],
+        [by_case[c]["confidence"] for c in case_ids],
+        [by_case[c]["abstained"] for c in case_ids],
+    )
+
+
+def join_cases(
+    pred_side: tuple[
+        list[str], list[tuple[str, str]], list[dict[str, float]], list[str]
+    ],
+    case_of: dict[str, str],
+) -> tuple[list[str], list[tuple[str, str]], list[dict[str, float]]]:
+    """Scoring step: attach case ids to request-keyed prediction inputs and put
+    them in case_id order (the order the scored rows and metrics use)."""
+    ids, ents, xs, _ = pred_side
+    order = sorted(range(len(ids)), key=lambda i: case_of[ids[i]])
+    return (
+        [case_of[ids[i]] for i in order],
+        [ents[i] for i in order],
+        [xs[i] for i in order],
+    )
 
 
 def matrix(xs: list[dict[str, float]], names: list[str]) -> np.ndarray:
@@ -203,12 +312,15 @@ def build_rows(
     ents: list[tuple[str, str]],
     pred: list[str],
     conf: list[float],
+    abstained: list[bool],
     snap: F.Snapshot,
     labels: dict[str, dict[str, Any]],
     conflicts: C.Conflicts,
 ) -> list[dict[str, Any]]:
     rows = []
-    for case_id, (table, rid), p, c in zip(case_ids, ents, pred, conf, strict=True):
+    for case_id, (table, rid), p, c, ab in zip(
+        case_ids, ents, pred, conf, abstained, strict=True
+    ):
         lab = labels[case_id]
         group = C.group_of(
             lab["failure_type"], lab["scenario_variant"], case_id, conflicts.verified
@@ -216,14 +328,18 @@ def build_rows(
         cat = category_of(p)
         reqs = evidence.retrieve(snap, cat, table, rid)
         row = {
+            "split": "validation",
             "case_id": case_id,
             "failure_type": lab["failure_type"],
             "variant": lab["scenario_variant"],
+            "difficulty": lab.get("difficulty"),
+            "group_vendor_id": lab.get("group_vendor_id"),
             "group": group,
             "entity_table": table,
             "predicted": p,
             "category": cat,
-            "confidence": round(float(c), 4),
+            "confidence": float(c),  # raw: the abstention decision uses it
+            "abstained": ab,
             "expected_category": C.expected_category(
                 lab["failure_type"], lab["scenario_variant"]
             ),
@@ -246,80 +362,117 @@ def build_rows(
     return rows
 
 
-def frac(n: int, d: int) -> dict[str, Any]:
-    return {"n": n, "d": d, "rate": round(n / d, 4) if d else None}
+def as_scored(rows: list[dict[str, Any]], answered_fn: Any) -> list[dict[str, Any]]:
+    """Rows in the shape the shared metrics (evaluation/metrics.py) read: the
+    classifier answers a case or, by `answered_fn`, abstains from it."""
+    out = []
+    for r in rows:
+        a = bool(answered_fn(r))
+        out.append(
+            r
+            | {
+                "disposition": "answered" if a else "abstained",
+                "reason": None,
+                "searches_mismatch": [],
+                "outcome": ("correct" if r["correct"] else "wrong")
+                if a
+                else "abstained",
+                "kind": r.get("kind") if a else None,
+            }
+        )
+    return out
 
 
-def metrics(
+def protocol_threshold(protocol_path: Path) -> float:
+    """The abstention threshold the protocol froze, parsed from the name of its
+    `threshold_<x>` baseline configuration so the number has one source."""
+    names = tomllib.loads(protocol_path.read_text())["systems"][
+        "baseline_configurations"
+    ]
+    found = [
+        float(n.removeprefix("threshold_")) for n in names if n.startswith("threshold_")
+    ]
+    if len(found) != 1:
+        raise SystemExit(
+            f"{protocol_path}: expected one threshold_<x> configuration, got {names}"
+        )
+    return found[0]
+
+
+def check_threshold(chosen: float, frozen: float) -> None:
+    """The protocol froze `frozen` because the train-CV rule chose it; if the rule
+    now chooses something else the frozen comparison no longer follows the rule."""
+    if chosen != frozen:
+        raise SystemExit(
+            f"CV-chosen abstention threshold {chosen} differs from the protocol's "
+            f"frozen {frozen}; the protocol needs a new version, not a silent change"
+        )
+
+
+def check_model(selected: str, protocol_path: Path) -> None:
+    """The protocol froze the baseline model in prose ("... HistGradientBoosting
+    lr=0.05 depth=3 l2=1.0, fit on train"); candidate names are "hgb <params>", so
+    the selected one must appear in that string with "hgb" spelled out."""
+    frozen = tomllib.loads(protocol_path.read_text())["systems"]["baseline"]
+    if selected.replace("hgb ", "HistGradientBoosting ", 1) not in frozen:
+        raise SystemExit(
+            f"selected model {selected!r} is not the protocol's frozen baseline "
+            f"({frozen!r}); the protocol needs a new version, not a silent change"
+        )
+
+
+def baseline_metrics(
     rows: list[dict[str, Any]],
     answered_fn: Any = lambda r: True,
     groups: tuple[str, ...] = VIEWS["all_cases"],
 ) -> dict[str, Any]:
-    """Same definitions as dev_run.cohort_metrics, with `answered_fn` deciding
-    abstention (default: the classifier always answers) and `groups` the view."""
-    c = [r for r in rows if r["group"] in groups]
-    ans = [r for r in c if answered_fn(r)]
-    cor = [r for r in ans if r["correct"]]
-    comp = [r for r in cor if r["complete"]]
+    """The shared definitions of evaluation/metrics.py applied to the baseline's
+    rows, with `answered_fn` deciding abstention (default: the classifier always
+    answers) and `groups` the view."""
+    sr = as_scored(rows, answered_fn)
+    cm = M.cohort_metrics(sr, groups)
+    c = [r for r in sr if r["group"] in groups]
     legit = [r for r in c if r["failure_type"] == "NO_FAILURE"]
-    legit_all = [r for r in rows if r["failure_type"] == "NO_FAILURE"]
-    oos = [r for r in rows if r["group"] == "oos_failure"]
-    coarse = [
-        r
-        for r in ans
-        if is_failure(r["category"]) == (r["failure_type"] != "NO_FAILURE")
-    ]
-
-    def fa(r: dict[str, Any]) -> bool:
-        return answered_fn(r) and r.get("kind") == "false_alarm"
+    legit_all = [r for r in sr if r["failure_type"] == "NO_FAILURE"]
+    ac = M.all_clear_risk(sr)
 
     def fa_narrow(r: dict[str, Any]) -> bool:
-        return answered_fn(r) and r["category"] in ("F06", "F12", "F14")
+        return r["disposition"] == "answered" and r["category"] in (
+            "F06",
+            "F12",
+            "F14",
+        )
 
     return {
-        "cohort_cases": len(c),
-        "answered": frac(len(ans), len(c)),
-        "answer_precision_exact": frac(len(cor), len(ans)),
-        "failure_vs_no_failure_accuracy_answered": frac(len(coarse), len(ans)),
-        "evidence_complete_among_answered": frac(
-            sum(r["complete"] for r in ans), len(ans)
+        "cohort_cases": cm["cases"],
+        "answered": cm["answered"],
+        "answer_precision_exact": cm["answer_precision"],
+        "failure_vs_no_failure_accuracy_answered": cm[
+            "failure_vs_no_failure_accuracy_answered"
+        ],
+        "evidence_complete_among_answered": cm["evidence_complete_among_answered"],
+        "evidence_complete_among_correct": cm["evidence_complete_among_correct"],
+        "correct_and_evidence_complete_over_cohort": cm[
+            "correct_and_evidence_complete"
+        ],
+        "correct_over_cohort": M.frac(
+            sum(r["outcome"] == "correct" for r in c), len(c)
         ),
-        "evidence_complete_among_correct": frac(len(comp), len(cor)),
-        "correct_and_evidence_complete_over_cohort": frac(len(comp), len(c)),
-        "correct_over_cohort": frac(len(cor), len(c)),
-        "false_alarms_cohort_legit": frac(sum(map(fa, legit)), len(legit)),
-        "false_alarms_cohort_legit_F06_F12_F14_only": frac(
+        "false_alarms_cohort_legit": cm["false_alarms"],
+        "false_alarms_cohort_legit_F06_F12_F14_only": M.frac(
             sum(map(fa_narrow, legit)), len(legit)
         ),
-        "false_alarms_all_legit": frac(
-            sum(
-                fa(r)
-                for r in legit_all
-                if r["group"] in (*C.COHORT_GROUPS, "fx", "contradicted", "oos_legit")
-            ),
+        "false_alarms_all_legit": M.frac(
+            sum(M.is_false_alarm(r) for r in legit_all),
             len(legit_all),
         ),
-        "false_alarms_ap_side_legit": frac(
-            sum(fa(r) for r in legit_all if r["group"] == "oos_legit"),
+        "false_alarms_ap_side_legit": M.frac(
+            sum(M.is_false_alarm(r) for r in legit_all if r["group"] == "oos_legit"),
             sum(r["group"] == "oos_legit" for r in legit_all),
         ),
-        "all_clear_on_out_of_scope_failures": frac(
-            sum(answered_fn(r) and is_no_failure(r["category"]) for r in oos), len(oos)
-        ),
-        "all_clear_per_family": {
-            f: frac(
-                sum(
-                    answered_fn(r) and is_no_failure(r["category"])
-                    for r in oos
-                    if r["failure_type"] == f
-                ),
-                sum(r["failure_type"] == f for r in oos),
-            )
-            for f in sorted({r["failure_type"] for r in oos})
-        },
-        "wrong_by_kind": dict(
-            Counter(r["kind"] for r in ans if not r["correct"] and r["group"] in groups)
-        ),
+        "all_clear_on_out_of_scope_failures": ac["overall"],
+        "all_clear_per_family": ac["per_family"],
+        "wrong_by_kind": cm["wrong_by_kind"],
     }
 
 
@@ -327,7 +480,7 @@ def both_views(
     rows: list[dict[str, Any]], answered_fn: Any = lambda r: True
 ) -> dict[str, Any]:
     """The metrics in both cohort views, from the shared definitions."""
-    return {name: metrics(rows, answered_fn, g) for name, g in VIEWS.items()}
+    return {name: baseline_metrics(rows, answered_fn, g) for name, g in VIEWS.items()}
 
 
 def fx_slice(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -339,30 +492,17 @@ def fx_slice(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def per_label(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    out = {}
-    cohort = [r for r in rows if r["group"] in C.COHORT_GROUPS]
-    for k in sorted(
-        {
-            r["failure_type"] if r["failure_type"] != "NO_FAILURE" else r["variant"]
-            for r in cohort
+def baseline_per_label(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    shared = M.per_label(as_scored(rows, lambda r: True), C.COHORT_GROUPS)
+    return {
+        k: {
+            "cases": v["cases"],
+            "correct": v["correct"],
+            "complete_correct": v["complete_correct"],
+            "predicted": v["answered_categories"],
         }
-    ):
-        sub = [
-            r
-            for r in cohort
-            if (
-                r["failure_type"] if r["failure_type"] != "NO_FAILURE" else r["variant"]
-            )
-            == k
-        ]
-        out[k] = {
-            "cases": len(sub),
-            "correct": sum(r["correct"] for r in sub),
-            "complete_correct": sum(r["correct"] and r["complete"] for r in sub),
-            "predicted": dict(Counter(r["category"] for r in sub)),
-        }
-    return out
+        for k, v in shared.items()
+    }
 
 
 def investigator_rows(tag: str, conflicts: C.Conflicts) -> list[dict[str, Any]]:
@@ -422,8 +562,14 @@ def main() -> None:
     snap = F.Snapshot(snap_dir / "snapshot.sqlite", CUTOFF)
 
     # 1. features: snapshot and requests only (no label file open yet)
-    data = {s: featurize(root, snap, s) for s in SPLITS}
-    names = F.feature_names(data["train"][2][0])
+    # Prediction inputs (validation) use no evaluator file; training reads case
+    # ids to fix sample order.
+    train = featurize(root, snap, "train", read_links(root, "train"))
+    pred_inputs = featurize(root, snap, "validation")
+    names = F.feature_names(train[2][0])
+    # scoring step (evaluator side): join case ids to the request-keyed rows
+    va = join_cases(pred_inputs, read_links(root, "validation"))
+    data = {"train": train, "validation": va}
     Xtr, Xva = (matrix(data[s][2], names) for s in SPLITS)
 
     # 2. labels: opened only now, after every feature exists
@@ -434,11 +580,7 @@ def main() -> None:
                 args.upstream / "data/benchmark" / split / "rca_ground_truth.jsonl"
             )
         }
-        links = {
-            r["request_id"]: r["case_id"]
-            for r in read_jsonl(root / "evaluator" / split / "links.jsonl")
-        }
-        return [by_case[links[rid]] | {"case_id": links[rid]} for rid in data[split][0]]
+        return [by_case[c] | {"case_id": c} for c in data[split][0]]
 
     ltr, lva = labels_for("train"), labels_for("validation")
     ytr = np.array([fine_label(r) for r in ltr])
@@ -456,13 +598,18 @@ def main() -> None:
     case_va = [r["case_id"] for r in lva]
     ent_va = data["validation"][1]
 
-    def score_rows(model_pred: list[str], conf: list[float]) -> list[dict[str, Any]]:
-        return build_rows(case_va, ent_va, model_pred, conf, snap, lab_va, conflicts)
+    def score_rows(
+        model_pred: list[str], conf: list[float], abstained: list[bool] | None = None
+    ) -> list[dict[str, Any]]:
+        ab = abstained if abstained is not None else [False] * len(model_pred)
+        return build_rows(
+            case_va, ent_va, model_pred, conf, ab, snap, lab_va, conflicts
+        )
 
     def cohort_acc(pred: np.ndarray) -> tuple[int, int]:
         rows = score_rows(list(pred), [1.0] * len(pred))
         # model selection keeps the pre-conflict definition: all in-scope cases
-        m = metrics(rows, groups=C.COHORT_GROUPS)
+        m = baseline_metrics(rows, groups=C.COHORT_GROUPS)
         return m["answer_precision_exact"]["n"], m["answer_precision_exact"]["d"]
 
     # 3. model selection on validation: exact cohort accuracy, first best wins
@@ -484,14 +631,10 @@ def main() -> None:
             best = (n, name, model)
     assert best is not None
     _, best_name, best_model = best
+    check_model(best_name, REPO / "evaluation/protocol.toml")
+    t_fit = time.monotonic()
     model = clone_model(best_model).fit(Xtr, ytr)
-    classes = list(model.classes_)
-    proba = model.predict_proba(Xva)
-    pred = [classes[i] for i in proba.argmax(1)]
-    conf = list(proba.max(1))
-    rows = score_rows(pred, conf)
-    primary = both_views(rows)
-
+    fit_seconds = time.monotonic() - t_fit
     # 4. optional abstention threshold chosen on TRAIN by grouped cross-validation
     cv_pred_proba = cross_val_predict(
         clone_model(best_model), Xtr, ytr, groups=np.array(data["train"][3]),
@@ -509,29 +652,54 @@ def main() -> None:
         in C.COHORT_GROUPS
     ]
     thr_grid = [round(0.5 + 0.05 * k, 2) for k in range(10)]
+    curve = M.precision_coverage_curve(
+        [(c, category_of(a) == category_of(b)) for a, b, c in cohort_tr], thr_grid
+    )
     chosen = None
     cv_table = []
-    for th in thr_grid:
-        kept = [(a, b) for a, b, c in cohort_tr if c >= th]
-        prec = (
-            sum(category_of(a) == category_of(b) for a, b in kept) / len(kept)
-            if kept
-            else float("nan")
-        )
+    for pt in curve:
+        kept, prec = pt["precision"]["d"], pt["precision"]["n"]
         cv_table.append(
             {
-                "threshold": th,
-                "cv_cohort_answered": len(kept),
-                "cv_cohort": len(cohort_tr),
-                "cv_precision": round(prec, 4),
+                "threshold": pt["threshold"],
+                "cv_cohort_answered": kept,
+                "cv_cohort": pt["coverage"]["d"],
+                "cv_precision": round(prec / kept, 4) if kept else float("nan"),
             }
         )
-        if chosen is None and kept and prec >= args.cv_precision_target:
-            chosen = th
+        if chosen is None and kept and prec / kept >= args.cv_precision_target:
+            chosen = pt["threshold"]
     threshold = chosen if chosen is not None else thr_grid[-1]
-    with_abstention = both_views(rows, lambda r: r["confidence"] >= threshold)
+    frozen_threshold = protocol_threshold(REPO / "evaluation/protocol.toml")
+    check_threshold(threshold, frozen_threshold)
+    # 5. predictions: final before the validation split's links or labels are
+    # joined. Model selection above necessarily scored candidates on validation
+    # labels (M2 design); from here the selected model's output is fixed.
+    pred_path = root / "predictions_validation.jsonl"
+    t_pred = time.monotonic()
+    pred_sha = predict_split(model, names, threshold, pred_inputs, pred_path)
+    batch_predict_seconds = time.monotonic() - t_pred
+    # per-case latency: one single-row predict_proba call per validation case
+    # (results come from the predictions file; these timings only measure)
+    per_case_seconds = []
+    for i in range(len(Xva)):
+        t = time.monotonic()
+        model.predict_proba(Xva[i : i + 1])
+        per_case_seconds.append(time.monotonic() - t)
+    # 6. scoring (evaluator side): verify the hash, then join links and labels
+    pred, conf, abst = scored_predictions(
+        pred_path,
+        pred_sha,
+        read_links(root, "validation"),
+        data["validation"][0],
+        threshold,
+    )
+    rows = score_rows(pred, conf, abst)
+    primary = both_views(rows)
 
-    # 5. reliance: permutation importance on validation, single and by family
+    with_abstention = both_views(rows, lambda r: not r["abstained"])
+
+    # 7. reliance: permutation importance on validation, single and by family
     pi = permutation_importance(
         model, Xva, yva, n_repeats=10, random_state=SEED, scoring="accuracy"
     )
@@ -576,7 +744,7 @@ def main() -> None:
         for k, c in fam_cols.items()
     }
 
-    # 6. residual ablation: retrain the selected configuration without a residual group
+    # 8. residual ablation: retrain the selected configuration without a residual group
     ablation = {}
     resid_all: list[str] = []
     for k, prefixes in F.RESIDUAL_GROUPS.items():
@@ -669,7 +837,28 @@ def main() -> None:
             "cv_table": cv_table,
             "validation_with_abstention": with_abstention,
         },
-        "per_label_no_abstention": per_label(rows),
+        "per_label_no_abstention": baseline_per_label(rows),
+        "root_cause_accuracy_by_family": M.root_cause_accuracy_by(
+            as_scored(rows, lambda r: True), "failure_type"
+        ),
+        "root_cause_accuracy_by_difficulty": M.root_cause_accuracy_by(
+            as_scored(rows, lambda r: True), "difficulty"
+        ),
+        "false_alarms_by": M.false_alarms_by(
+            [
+                r
+                for r in as_scored(rows, lambda r: True)
+                if r["failure_type"] == "NO_FAILURE"
+            ]
+        ),
+        "validation_precision_coverage_curve": M.precision_coverage_curve(
+            [
+                (r["confidence"], r["correct"])
+                for r in rows
+                if r["group"] in C.COHORT_GROUPS
+            ],
+            thr_grid,
+        ),
         "permutation_importance_top20_exact_label_accuracy_drop": top,
         "feature_family_permutation_relative_cohort_drop": group_perm,
         "residual_ablation": ablation,
@@ -692,6 +881,21 @@ def main() -> None:
             "relaxed record-availability upper bound, not a packet check "
             "(evidence.py docstring, docs/baseline-observable.md section 2)"
         ),
+        "efficiency": {
+            **M.efficiency(
+                per_case_seconds,
+                resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,  # KiB on Linux
+                Decimal("0"),  # no paid calls
+                primary["all_cases"]["correct_and_evidence_complete_over_cohort"]["n"],
+            ),
+            "latency_basis": (
+                "per validation case: one single-row predict_proba call on the "
+                "selected fitted model, features already extracted"
+            ),
+            "train_fit_seconds_selected_model": round(fit_seconds, 3),
+            "validation_batch_predict_seconds": round(batch_predict_seconds, 4),
+            "peak_rss_note": "whole script process, including grid search",
+        },
         "seconds": round(time.monotonic() - t0, 1),
         "command": (
             "uv run --group eval python evaluation/baselines/observable/run.py "
@@ -701,9 +905,36 @@ def main() -> None:
     (root / "metrics.json").write_text(
         json.dumps(out, indent=2, sort_keys=True, default=str) + "\n"
     )
-    with (root / "cases.jsonl").open("w") as f:
-        for r in rows:
-            f.write(json.dumps(r, sort_keys=True) + "\n")
+    thr_file = f"cases_threshold_{frozen_threshold}.jsonl"
+    for name, cases in (
+        ("cases.jsonl", rows),
+        (thr_file, as_scored(rows, lambda r: not r["abstained"])),
+    ):
+        with (root / name).open("w") as f:
+            for r in cases:
+                f.write(json.dumps(r, sort_keys=True) + "\n")
+    # written last: compare.py reads the case files through these hashes
+    manifest = {
+        "code": dev_run.code_commit(),
+        "system": "observable_baseline",
+        "model": best_name,
+        "configurations": {
+            "answer_all": {
+                "cases_file": "cases.jsonl",
+                "cases_sha256": sha256_file(root / "cases.jsonl"),
+                "abstention_threshold": None,
+            },
+            f"threshold_{frozen_threshold}": {
+                "cases_file": thr_file,
+                "cases_sha256": sha256_file(root / thr_file),
+                "abstention_threshold": frozen_threshold,
+            },
+        },
+        "predictions_sha256": {"validation": pred_sha},
+    }
+    (root / "run-manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
     print(
         json.dumps(
             {k: out[k] for k in ("selected", "primary_no_abstention", "fx_slice")},

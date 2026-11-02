@@ -1,0 +1,121 @@
+# Evaluation protocol (PLAN.md section 7; explained in docs/evaluation-protocol.md).
+# Frozen at the git tag `protocol-v1`. After the freeze, any change needs a new
+# protocol version and an uncontaminated holdout (PLAN.md section 7).
+
+[protocol]
+version = "1"
+status = "frozen"  # tagged protocol-v1, approved by the user on 2026-11-02
+date = "2026-11-02"
+
+[data]
+source = "FinRCA-AI-Bench"
+source_revision = "76c93ec32536e29826e2ab9e68b58e0351410bc7"
+cutoff = "2026-06-30"
+policy_version = "evidence-contract-0.5"
+input_transform = "docs/data-audit.md section 3.1 allowlist, keyed opaque tokens"
+
+[splits]
+development = ["train", "validation"]  # labels may be read; tuning allowed
+selection = "validation"  # baseline model, thresholds and M4 choices
+reproduction = "test"  # exposed in M0; reproduction only, never called unseen
+sealed = "challenge_test"  # opened once, in M7, after predictions are final
+
+[cohort]
+# Release cohort: every sealed case whose label is one of these families or
+# legitimate variants (evaluation/cohort.py FAMILY_KEYS, VARIANT_CATEGORY),
+# excluding legitimate_fx_settlement, which is its own slice.
+families = ["F06_INVOICE_PAID_TWICE", "F12_ERP_PAYMENT_MISSING_FROM_BANK", "F14_BANK_ERP_AMOUNT_MISMATCH"]
+legitimate_variants = [
+  "legitimate_pending_settlement", "legitimate_weekend_clearing",
+  "legitimate_check_clearing", "legitimate_due_date_payment",
+  "legitimate_split_payment", "legitimate_batch_payment",
+  "legitimate_payment_reversal", "legitimate_net_fee_accounting",
+  "legitimate_accounted_bank_fee",
+]
+headline_view = "all_cases"  # no exclusion of any cohort case
+sensitivity_view = "sensitivity_without_verified_conflicts"
+# Sensitivity view only: leaves out label conflicts verified by hand after
+# scoring, each recorded with its evidence; it never changes the headline.
+fx_slice = "legitimate_fx_settlement"  # correct outcome: abstention
+cluster_field = "group_vendor_id"  # upstream vendor group, from the labels
+
+[primary]
+metric = "correct_and_evidence_complete"
+definition = "cases answered with the expected category whose packet meets every evidence-contract requirement, divided by all cohort cases; abstentions and failures are not successes"
+
+[systems]
+investigator = "deterministic_v2 at the frozen commit"  # the headline claim is about this system only
+baseline = "observable-input HistGradientBoosting lr=0.05 depth=3 l2=1.0, fit on train"
+baseline_configurations = ["answer_all", "threshold_0.85"]
+baseline_evidence = "relaxed record-availability upper bound (evaluation/baselines/observable/evidence.py)"
+
+[decision]
+# The investigator's claim holds only if both rules hold against EVERY baseline
+# configuration, on the sealed headline view. User decision 2026-11-02.
+min_primary_difference = 0.05  # paired point difference, investigator - baseline;
+# a point difference below it fails even when too few clusters give no interval
+primary_interval_must_exclude_zero = true
+false_alarm_scope = "all legitimate cases of the split"
+# Observed-sample engineering criterion ("no observed increase"), not a
+# statistical non-inferiority claim: when both systems raise no false alarm
+# the interval is [0, 0] and carries no assurance about rates.
+max_false_alarm_difference_upper_bound = 0.0  # investigator - baseline
+list_every_false_alarm = true
+# A release verdict also requires every scorer hard gate (docs/evaluation-protocol.md section 7).
+release_hard_gates = ["absence_check_passed", "rerun_identical_same_image", "all_answered_packets_well_formed", "all_citations_resolve", "all_calculations_exact", "all_day_counts_exact"]
+
+[statistics]
+method = "cluster_percentile_bootstrap"  # evaluation/paired.py
+seed = 20261102
+reps = 10000
+# Nominal 98% interval: the percentile cluster bootstrap undercovers, and with
+# the real validation and train cluster sizes a nominal 95% interval measured
+# 0.908-0.956 coverage, a nominal 98% one 0.954-0.978 at 20+ clusters
+# (evaluation/bootstrap_coverage.py; docs/evaluation-protocol.md). With a
+# stronger vendor effect (cluster SD 2.0) the 98% interval measured 0.934-0.946
+# at 20 clusters but 0.944-0.969 at 30+, so an interval needs 30 clusters;
+# below that the claim is "not established".
+alpha = 0.02
+min_clusters = 30
+
+[budgets.deterministic]
+max_rows_per_query = 200
+max_seconds_per_case = 10
+max_hops_declared = 3  # declared, not enforced (carried to M6)
+
+[budgets.model]
+total_usd = 25  # all paid calls in M4 and M7 together; a run stops at the cap
+max_calls_per_case = 1
+max_transient_retries_per_case = 1
+# Per-case token and wall-time caps are set in the M4 configuration before any
+# paid call, so that the projected sealed-run cost fits the remaining budget.
+
+[model_assistance]
+# A model-assisted system is never the headline. If one survives validation it
+# is a separate, secondary claim against this deterministic investigator on the
+# sealed split, with the rules below, and its variability is measured by
+# repeating a fixed validation subset before the sealed run.
+# A model path is kept only if, on validation against the deterministic
+# investigator: the paired primary point difference is > 0, false alarms do
+# not increase, no emitted claim is unsupported, and the budget holds. A
+# drafting-only path that cannot change the primary metric is kept only if a
+# recorded practitioner review finds a usefulness benefit. Otherwise removed.
+min_validation_primary_difference_exclusive = 0.0
+max_unsupported_claims = 0  # needs the predicate-level claim checker M4 must build
+variability_subset_cases = 30  # the validation headline-cohort cases with the smallest sha256(case_id)
+variability_repetitions = 3
+
+[ablations]
+reported = [
+  "baseline threshold_0.85 versus answer_all",
+  "model assistance on versus off (M4)",
+  "oracle-evidence diagnostic (M4; never a headline)",
+]
+
+[integrity]
+# Sealed run order: tag and digest the protocol; prepare inputs; run inference
+# once; record packet, timing and stats digests; rerun inference and require
+# identical packet digests; only then open sealed labels and score.
+record = ["code_commit", "protocol_sha256", "image_id", "snapshot_content_sha256", "requests_sha256", "packets_sha256", "timings_sha256", "run_stats_sha256"]
+require_deterministic_rerun = true  # deterministic investigator only
+require_same_image_id = true  # the rerun must use the run's own image

@@ -198,7 +198,7 @@ reconcile/
   evaluation/
     adapters/finrca_labels.py
     baselines/, metrics/
-    compare.py, protocol.yaml
+    compare.py, protocol.toml
   tests/
     unit/, integration/, leakage/, regression/
   fixtures/public/
@@ -303,13 +303,36 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 - [ ] Define the release cohort, legitimate-case slices and out-of-scope challenge report, including exclusions and denominators.
 - [ ] Implement paired comparisons and vendor-cluster resampling with a fixed analysis seed.
 - [ ] Measure baseline quality, cost, latency and memory.
-- [ ] Freeze `evaluation/protocol.yaml`: primary metric, practical improvement threshold, false-alarm margin, splits, budgets and ablations.
+- [ ] Freeze `evaluation/protocol.toml` (TOML, read by the standard library's `tomllib`; changed from YAML on 2026-11-02 to avoid a parser dependency): primary metric, practical improvement threshold, false-alarm margin, splits, budgets and ablations.
 - [ ] Record code/data/config digests and deterministic reruns where applicable.
 - [ ] Add CI regression checks for leakage, exact arithmetic, citation integrity and legitimate-case handling.
 
 **Deliverables:** Versioned protocol, evaluator, baseline results card and regression fixtures.
 
 **Gate:** An independent run can regenerate the table from saved predictions. Success criteria are declared before sealed test evaluation.
+
+**Gate outcome (2026-11-02): pass, approved by the user; protocol frozen and tagged `protocol-v1`.** Evidence: `evaluation/protocol.toml`, `docs/evaluation-protocol.md`, `docs/results-card-m3.md`, `docs/decisions/0007-metric-choice.md`; three Codex review rounds (28 findings, all fixed and verified by the parent; none changed a development result).
+- **Met:**
+  - Section 7 metrics are shared by both scorers and checked against hand-calculated examples.
+  - Predictions are finalized before scoring. Every input is digest-bound and read once. The scorer runs inference, then a same-image rerun, then scoring.
+  - The release cohort, views, slices and denominators are declared.
+  - The paired vendor-cluster bootstrap uses alpha 0.02 and at least 30 clusters, chosen by a coverage simulation with a sensitivity check.
+  - Baseline quality, latency and memory are measured, with cost 0 USD.
+  - Code, protocol and data digests are recorded.
+  - CI runs the regression checks. Leakage, exact arithmetic, citation integrity and legitimate-case handling are covered.
+  - Regeneration: re-scoring the saved packets of `m3-dev-8` gave a byte-identical `cases.jsonl` and identical comparison statistics.
+- **Decision rule (user, 2026-11-02, with the parent's stricter readings accepted at the gate):** against both baseline configurations, the paired primary difference must be at least +5 points with the nominal 98% interval above 0. False alarms must show no observed increase (an aggregate, descriptive criterion). A release verdict also needs all six hard gates. Model budget: $25 in total.
+- **Development rehearsal:** investigator 119/123 against baseline 109/123 (`answer_all`) and 94/123 (`threshold_0.85`); false alarms 0/139 against 25/139 and 3/139. Verdict `holds`, labelled a rehearsal, not evidence for the claim.
+- **Carried to M7, as written acceptance conditions (protocol section 12):**
+  - the sealed-split unlock bound to the tag;
+  - execution-identity binding of code, images, models, thresholds and inputs;
+  - isolated baseline inference with an absence check.
+- **Carried to M4:** predicate-level claim checking before any model-written claim is scored.
+- **Open:**
+  - The CI workflow has not run on GitHub (no remote).
+  - The sealed cohort's cluster count is unknown; below 30 the verdict is `not_established`.
+  - The coverage simulation's outcome model is chosen, not fitted (A064).
+  - The practitioner packet review is still pending from M2.
 
 ### M4 — Bounded AI assistance
 
@@ -399,8 +422,8 @@ Map required evidence to the audited evaluator. For legitimate cases lacking a n
 | Answer precision | Correct answered cases / answered cases; undefined when no cases are answered |
 | Coverage and abstention | Answered and abstained fractions of all attempted cases |
 | Root-cause accuracy | Exact supported category, broken down by family/difficulty |
-| Evidence precision/recall | Correct required citations / cited records and / required records; declare empty-set conventions |
-| Claim support | Unsupported or ungradable factual claims / emitted claims; citation presence alone is insufficient |
+| Evidence recall and citation resolution | Recall: evidence-contract requirement items met / required items. Citation resolution: cited records that exist in the snapshot with the recorded values / cited records. Declare empty-set conventions. (Changed on 2026-11-02 from record-set precision, "correct required citations / cited records": the contract states requirements as items, and it allows context citations that this formula would count as errors.) |
+| Claim support | Unsupported or ungradable factual claims / emitted claims; citation presence alone is insufficient. (M3 measures only reference and calculation integrity: findings whose citations resolve and whose calculations recompute. Checking that each finding's assertion is true is carried to M4, before any model-written claim is scored.) |
 | False-alarm rate | Legitimate cases diagnosed as failures / all legitimate cases |
 | Monetary correctness | Exact validated calculations / reported calculations, alongside calculation coverage |
 | Scope handling | Unsupported classes deferred versus incorrectly called legitimate or in scope |
@@ -470,7 +493,7 @@ reconcile data fetch --dataset finrca --revision <pinned-commit> --output data/u
 reconcile data prepare --source data/upstream --output data/prepared --config configs/development.yaml
 reconcile investigate --snapshot data/prepared/inputs --request fixtures/public/request.json --mode deterministic --output artifacts/demo
 reconcile batch --snapshot data/prepared/inputs --requests data/prepared/requests.jsonl --config configs/evaluation.yaml --output artifacts/run-001
-reconcile evaluate --predictions artifacts/run-001/predictions.jsonl --labels data/evaluator/test --protocol evaluation/protocol.yaml --output artifacts/run-001/evaluation
+reconcile evaluate --predictions artifacts/run-001/predictions.jsonl --labels data/evaluator/test --protocol evaluation/protocol.toml --output artifacts/run-001/evaluation
 reconcile report --run artifacts/run-001 --format html
 reconcile demo --offline
 ```

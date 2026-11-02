@@ -61,15 +61,24 @@ ABSENCE = {  # fixture -> number of absence searches its category requires
 }
 
 
+FIXTURE_NAMES = sorted({*ALL_CLEAR, *ABSENCE, "f06_double_payment"})
+
+
 @pytest.fixture(scope="module")
 def packets(tmp_path_factory: pytest.TempPathFactory) -> dict[str, tuple[Packet, Any]]:
+    return build_packets(tmp_path_factory)
+
+
+def build_packets(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> dict[str, tuple[Packet, Any]]:
     """fixture name -> (investigator packet as a dict, Snap of its snapshot)."""
     root = tmp_path_factory.mktemp("completeness")
     key = tmp_path_factory.mktemp("key") / "key"
     create_key_file(key)
     tokens = _Tokens(_load_key(key))
     out: dict[str, tuple[Packet, Any]] = {}
-    for name in sorted({*ALL_CLEAR, *ABSENCE}):
+    for name in FIXTURE_NAMES:
         m = prepare_finrca_snapshot(
             FIXTURES / name,
             root / name,
@@ -89,7 +98,7 @@ def packets(tmp_path_factory: pytest.TempPathFactory) -> dict[str, tuple[Packet,
             "policy_test",
         )
         packet = json.loads(investigate(path, request).to_json())
-        out[name] = (packet, dev_run.Snap(path))
+        out[name] = (packet, dev_run.Snap(path, digest))
     return out
 
 
@@ -123,7 +132,7 @@ def table(e: Packet) -> str | None:
     return e["record"]["table"] if e["record"] else None
 
 
-@pytest.mark.parametrize("name", sorted({*ALL_CLEAR, *ABSENCE}))
+@pytest.mark.parametrize("name", FIXTURE_NAMES)
 def test_unmodified_packet_is_complete(
     packets: dict[str, tuple[Packet, Any]], name: str
 ) -> None:
@@ -461,7 +470,9 @@ def test_journals_that_are_not_operands_of_the_payment_calculation_are_not_check
 ) -> None:
     """A split cites the other payment's journal, a fee case a bank-fee journal,
     a reversal its reversal journal: their attribution is not this check's
-    business, so re-attributing them leaves the packet complete."""
+    business, so re-attributing them leaves the contract requirements met. The
+    packet audit still rejects the altered citation (the journal has no such
+    lines), so the packet is no longer complete."""
     packet, snap = packets[name]
     operands = {
         o["evidence_id"]
@@ -470,12 +481,17 @@ def test_journals_that_are_not_operands_of_the_payment_calculation_are_not_check
         for o in c["operands"]
     }
     p = copy.deepcopy(packet)
+    altered = 0
     for e in p["evidence"]:
         if e["record"] and e["record"]["table"] == "gl_entries":
             if e["evidence_id"] not in operands:
                 e["values"]["source"] = "SOMETHING_ELSE"
                 e["values"]["gl_type"] = "bank_fee"
-    assert check(p, snap)["complete"]
+                altered += 1
+    result = check(p, snap)
+    assert result["contract_complete"]
+    assert result["complete"] == (altered == 0)
+    assert ("packet_audit" in result["missing"]) == (altered > 0)
 
 
 def mutated(snap: Any, tmp_path: Path, *sql: str) -> Any:
@@ -489,7 +505,7 @@ def mutated(snap: Any, tmp_path: Path, *sql: str) -> Any:
         con.execute(statement)
     con.commit()
     con.close()
-    return dev_run.Snap(copy_)
+    return dev_run.Snap(copy_, snap.digest)
 
 
 def cited_approval(packet: Packet, snap: Any) -> dict[str, Any]:

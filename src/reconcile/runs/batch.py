@@ -4,9 +4,13 @@
 No resume or cache yet (M6).
 """
 
+import json
 import os
+import platform
+import resource
 import sys
 import tempfile
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -19,6 +23,8 @@ from reconcile.domain.contracts import (
 )
 
 PACKETS_FILE = "packets.jsonl"
+TIMINGS_FILE = "timings.jsonl"
+STATS_FILE = "run-stats.json"
 SNAPSHOT_FILE = "snapshot.sqlite"
 RUNNER = "batch_v1"
 
@@ -48,11 +54,32 @@ def _read_requests(path: Path) -> list[InvestigationRequest]:
     return requests
 
 
+def _write_atomic(out_dir: Path, name: str, text: str) -> None:
+    fd, tmp = tempfile.mkstemp(prefix=f".{name}-", dir=out_dir)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, out_dir / name)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+def _peak_rss_kib() -> int:
+    # Linux reports ru_maxrss in KiB (man getrusage); macOS reports bytes.
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak // 1024 if sys.platform == "darwin" else peak
+
+
 def run_requests(
     snapshot_dir: Path, requests_file: Path, out_dir: Path
 ) -> dict[str, int]:
     """Write `out_dir/packets.jsonl` (one packet per request, sorted by
     request_id) and return the count per disposition.
+
+    Wall time per request goes to `timings.jsonl` and run totals and peak
+    memory to `run-stats.json`, never into the packets, so the packets are
+    byte-identical across reruns of the same inputs.
 
     `out_dir` must be absent or an empty directory (a container mount point
     always exists); anything else is refused. A malformed request file stops
@@ -63,21 +90,34 @@ def run_requests(
     requests = sorted(_read_requests(requests_file), key=lambda r: r.request_id)
     snapshot = snapshot_dir / SNAPSHOT_FILE
     packets = []
+    timings = []
+    loop_start = time.perf_counter()
     for request in requests:
+        start = time.perf_counter()
         try:
             packets.append(investigate(snapshot, request))
         except Exception as e:  # one bad case must not lose the others
             packets.append(_failed(request, e))
+        timings.append((request.request_id, time.perf_counter() - start))
+    total_seconds = time.perf_counter() - loop_start
     out_dir.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".packets-", dir=out_dir)
-    try:
-        with os.fdopen(fd, "w") as f:
-            for p in packets:
-                f.write(p.to_json() + "\n")
-        os.replace(tmp, out_dir / PACKETS_FILE)
-    except BaseException:
-        os.unlink(tmp)
-        raise
+    _write_atomic(out_dir, PACKETS_FILE, "".join(p.to_json() + "\n" for p in packets))
+    _write_atomic(
+        out_dir,
+        TIMINGS_FILE,
+        "".join(
+            json.dumps({"request_id": rid, "seconds": sec}) + "\n"
+            for rid, sec in timings
+        ),
+    )
+    stats = {
+        "requests": len(requests),
+        "total_seconds": total_seconds,
+        "peak_rss_kib": _peak_rss_kib(),
+        "python_version": platform.python_version(),
+        "runner": RUNNER,
+    }
+    _write_atomic(out_dir, STATS_FILE, json.dumps(stats, indent=2) + "\n")
     return dict(Counter(p.diagnosis.disposition.value for p in packets))
 
 

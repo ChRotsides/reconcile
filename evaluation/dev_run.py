@@ -6,6 +6,7 @@ adapters (which are evaluator-side code; the inference image deletes them).
 
     uv run python evaluation/dev_run.py run TAG [--upstream PATH]
     uv run python evaluation/dev_run.py evaluate TAG      # recompute metrics only
+    uv run python evaluation/dev_run.py rerun TAG         # determinism check
 
 `run` refuses an existing TAG. Steps, in order:
 
@@ -15,8 +16,12 @@ adapters (which are evaluator-side code; the inference image deletes them).
    directories (the sealed splits are never requested; the preparation code
    refuses challenge_test, and SPLITS here lists only these two);
 4. image build, then inference in the container for both splits;
-5. only after both packets.jsonl files exist: labels are opened, packets are
-   joined to cases, metrics are written (metrics.json, errors.json, report.txt).
+5. run manifest with every input digest, then the same-image rerun (the
+   packets must be byte-identical); the rerun result is recorded in the
+   manifest;
+6. only then: labels are opened, packets are joined to cases, metrics are
+   written (cases.jsonl, then metrics.json, errors.json, report.txt).
+   `evaluate` refuses a manifest without an ok same-image rerun.
 
 Labels are read by `evaluate` only. The top-level combined label files and the
 test and challenge_test directories are never opened.
@@ -28,23 +33,43 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
-from collections import Counter, defaultdict
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime
-from decimal import Decimal
+from decimal import Context, Decimal, Inexact, InvalidOperation
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cohort as C  # noqa: E402  (shared cohort, groups and label conflicts)
+import metrics as M  # noqa: E402  (shared metric definitions, PLAN.md section 7)
+from metrics import (  # noqa: E402
+    all_clear_risk,
+    classify,
+    cohort_metrics,
+    confusion,
+    frac,
+    per_label,
+)
 
 from reconcile.adapters.finrca import create_key_file, prepare_finrca_snapshot  # noqa: E402
 from reconcile.adapters.finrca_requests import prepare_finrca_requests  # noqa: E402
-from reconcile.diagnosis.policy import POLICY_VERSION, SCOPE_LIMITATION, quantum  # noqa: E402
+from reconcile.diagnosis.policy import (  # noqa: E402
+    CLEARING_LIMITS,
+    POLICY_VERSION,
+    SCOPE_LIMITATION,
+    clearing_policy,
+    quantum,
+)
+from reconcile.domain.calendar import business_days  # noqa: E402
+from reconcile.domain.money import MAX_DIGITS  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_UPSTREAM = Path(
@@ -55,8 +80,34 @@ CUTOFF = date(2026, 6, 30)
 SPLITS = ("train", "validation")  # the only splits this script ever names
 IMAGE = "reconcile-inference:dev"
 SCRIPT = REPO / "deploy/inference/run_inference.sh"
+TIMINGS_FILE = "timings.jsonl"  # names written by reconcile.runs.batch
+STATS_FILE = "run-stats.json"
+SNAPSHOT_FILE = "snapshot.sqlite"
+CURRENCY = "USD"
+# Evaluator-side bound on one search query: 10_000 ticks of 10_000 VM
+# instructions each (about 1e8 instructions, seconds at most).
+TICK_INSTRUCTIONS = 10_000
+SEARCH_BUDGET_TICKS = 10_000
 is_failure = C.is_failure
 is_no_failure = C.is_no_failure
+
+# Exact evaluator arithmetic: the precision the money type needs for a sum or
+# difference of two MAX_DIGITS-digit amounts (reconcile.domain.money), with
+# rounding trapped. The default 28-digit context would silently round the
+# 30-digit amounts the money type allows.
+EXACT = Context(prec=2 * MAX_DIGITS + 5, traps=[Inexact, InvalidOperation])
+
+
+def dsum(values: Iterable[Decimal]) -> Decimal:
+    total = Decimal(0)
+    for v in values:
+        total = EXACT.add(total, v)
+    return total
+
+
+def dsub(a: Decimal, b: Decimal) -> Decimal:
+    return EXACT.subtract(a, b)
+
 
 # ------------------------------------------------------------ orchestration
 
@@ -65,11 +116,20 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def code_commit() -> dict[str, str]:
-    """HEAD of this worktree read from the .git files (no git command)."""
+def tree_sha256(repo: Path, files: Iterable[Path]) -> str:
+    h = hashlib.sha256()
+    for p in sorted(files):
+        h.update(str(p.relative_to(repo)).encode() + b"\0" + p.read_bytes())
+    return h.hexdigest()
+
+
+def code_commit(repo: Path = REPO) -> dict[str, str]:
+    """HEAD of this worktree read from the .git files (no git command), plus
+    digests of the code that defines the system, the scorer and the container,
+    so a run made with uncommitted changes is still identified."""
     info: dict[str, str] = {}
     try:
-        gitdir = Path((REPO / ".git").read_text().split("gitdir:")[1].strip())
+        gitdir = Path((repo / ".git").read_text().split("gitdir:")[1].strip())
         head = (gitdir / "HEAD").read_text().strip()
         if head.startswith("ref:"):
             ref = head.split()[1]
@@ -81,10 +141,20 @@ def code_commit() -> dict[str, str]:
             info["commit"] = head
     except (OSError, IndexError) as e:
         info["commit"] = f"unknown ({type(e).__name__})"
-    h = hashlib.sha256()
-    for p in sorted((REPO / "src/reconcile").rglob("*.py")):
-        h.update(str(p.relative_to(REPO)).encode() + b"\0" + p.read_bytes())
-    info["src_sha256"] = h.hexdigest()
+    ev = repo / "evaluation"
+    info["src_sha256"] = tree_sha256(repo, (repo / "src/reconcile").rglob("*.py"))
+    info["evaluation_sha256"] = tree_sha256(
+        repo,
+        [
+            *ev.rglob("*.py"),
+            ev / "protocol.toml",
+            ev / "verified_label_conflicts.json",
+        ],
+    )
+    deploy = repo / "deploy/inference"
+    info["deploy_sha256"] = tree_sha256(
+        repo, (p for p in deploy.rglob("*") if p.is_file())
+    )
     return info
 
 
@@ -166,6 +236,7 @@ def run(tag: str, upstream: Path) -> None:
     (root / "absence-check.txt").write_text(check.stdout + check.stderr)
     if check.returncode != 0:
         sys.exit(f"absence check failed:\n{check.stdout}{check.stderr}")
+    absence_digest = hashlib.sha256((check.stdout + check.stderr).encode()).hexdigest()
     t = lap("absence_check", t)
 
     for split in SPLITS:
@@ -183,7 +254,7 @@ def run(tag: str, upstream: Path) -> None:
         "started_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         "code": code_commit(),
         "snapshot_content_sha256": manifest["snapshot"]["content_sha256"],
-        "snapshot_file_sha256": manifest["snapshot"]["file_sha256"],
+        "snapshot_file_sha256": sha256_file(snap_dir / SNAPSHOT_FILE),
         "source_revision": SOURCE_REVISION,
         "cutoff": CUTOFF.isoformat(),
         "policy_version": POLICY_VERSION,
@@ -193,14 +264,193 @@ def run(tag: str, upstream: Path) -> None:
         "packets_sha256": {
             s: sha256_file(root / "inference" / s / "packets.jsonl") for s in SPLITS
         },
+        "requests_file_sha256": {
+            s: sha256_file(prepared / "requests" / s / "requests.jsonl") for s in SPLITS
+        },
+        "links_file_sha256": {
+            s: sha256_file(root / "evaluator" / s / "links.jsonl") for s in SPLITS
+        },
+        "timings_sha256": {
+            s: sha256_file(root / "inference" / s / TIMINGS_FILE) for s in SPLITS
+        },
+        "run_stats_sha256": {
+            s: sha256_file(root / "inference" / s / STATS_FILE) for s in SPLITS
+        },
+        "absence_check": {"passed": True, "output_sha256": absence_digest},
         "timing_seconds": timing,
         "command": f"uv run python evaluation/dev_run.py run {tag}",
     }
-    (root / "run-manifest.json").write_text(
-        json.dumps(run_manifest, indent=2, sort_keys=True) + "\n"
-    )
-    # Packets are final from here on. Only now are labels opened.
+    write_manifest(root, run_manifest)
+    # Protocol order: the same-image rerun comes before any label is opened.
+    result = rerun_check(root, run_manifest)
+    if not result["ok"]:
+        sys.exit(f"rerun-{result['rerun']} failed; labels were not opened")
+    run_manifest["rerun"] = {
+        k: result[k]
+        for k in ("rerun", "ok", "image_id", "image_id_matches_manifest", "splits")
+    }
+    write_manifest(root, run_manifest)
     evaluate(tag, upstream)
+
+
+def write_manifest(root: Path, manifest: dict) -> None:
+    (root / "run-manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def image_problem(manifest_id: str, found_id: str | None) -> str | None:
+    """Why the rerun cannot be a valid check, or None. The rerun is only valid
+    on the run's own image (protocol integrity.require_same_image_id)."""
+    if found_id is None:
+        return f"image {manifest_id} is no longer present locally"
+    if found_id != manifest_id:
+        return f"image id {found_id} differs from the manifest's {manifest_id}"
+    return None
+
+
+def rerun(tag: str) -> None:
+    """Standalone determinism check of a finished run (see `rerun_check`)."""
+    root = REPO / "artifacts/dev-runs" / tag
+    manifest = json.loads((root / "run-manifest.json").read_text())
+    result = rerun_check(root, manifest)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    if not result["ok"]:
+        sys.exit(f"rerun-{result['rerun']}: {result.get('reason') or 'packets differ'}")
+
+
+def rerun_check(root: Path, manifest: dict) -> dict:
+    """Re-run the container inference on the run's own snapshot and requests
+    into fresh directories and compare packet digests with the run manifest.
+    The actual bytes of packets, requests and links are verified against the
+    manifest first (the same verifier evaluation uses), so a changed requests
+    file cannot pass because the inference output happens to be identical."""
+    tag = manifest["tag"]
+    verify_digests(root, manifest)
+    for split in SPLITS:
+        read_split_inputs(root, manifest, split)
+    # Pin the run's own image by id (run_inference.sh honours $IMAGE), so a
+    # rebuilt shared tag cannot change what is checked.
+    have = subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", manifest["image_id"]],
+        text=True,
+        capture_output=True,
+    )
+    problem = image_problem(
+        manifest["image_id"], have.stdout.strip() if have.returncode == 0 else None
+    )
+    n = 1
+    while (root / f"rerun-{n}").exists() or (root / f"rerun-{n}.json").exists():
+        n += 1
+    if problem:
+        result = {"tag": tag, "rerun": n, "ok": False, "reason": problem}
+        (root / f"rerun-{n}.json").write_text(
+            json.dumps(result, indent=2, sort_keys=True) + "\n"
+        )
+        return result
+    result: dict = {
+        "tag": tag,
+        "rerun": n,
+        "ok": True,
+        "image_id": have.stdout.strip(),
+        "image_id_matches_manifest": True,
+        "splits": {},
+    }
+    for split in SPLITS:
+        out = root / f"rerun-{n}" / split
+        run_cmd(
+            [str(SCRIPT), str(root / "prepared/snapshot"),
+             str(root / "prepared/requests" / split), str(out)],
+            env={**os.environ, "IMAGE": manifest["image_id"]},
+        )  # fmt: skip
+        new = sha256_file(out / "packets.jsonl")
+        result["splits"][split] = {
+            "expected_sha256": manifest["packets_sha256"][split],
+            "rerun_sha256": new,
+            "identical": new == manifest["packets_sha256"][split],
+        }
+    result["identical"] = all(v["identical"] for v in result["splits"].values())
+    result["ok"] = result["identical"]
+    (root / f"rerun-{n}.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n"
+    )
+    return result
+
+
+def verify_digests(root: Path, manifest: dict, snapshot: bool = True) -> None:
+    """The run manifest must bind every scoring input, for every split: packets,
+    requests and evaluator links (checked by `read_split_inputs`, on the bytes
+    that are then scored) and the snapshot file. A manifest without them (an
+    older run) is refused: re-run rather than score unbound inputs. Timings and
+    run stats are checked when recorded."""
+    for key in ("packets_sha256", "requests_file_sha256", "links_file_sha256"):
+        if set(manifest.get(key) or {}) != set(SPLITS):
+            sys.exit(
+                f"run manifest has no {key} for every split; "
+                "it predates input binding, so it cannot be evaluated: re-run"
+            )
+    path = root / "prepared/snapshot" / SNAPSHOT_FILE
+    want = manifest.get("snapshot_file_sha256")
+    if not want or (snapshot and (not path.exists() or sha256_file(path) != want)):
+        sys.exit(f"{SNAPSHOT_FILE} differs from the run manifest")
+    for key, name in (
+        ("timings_sha256", TIMINGS_FILE),
+        ("run_stats_sha256", STATS_FILE),
+    ):
+        for split, want in manifest.get(key, {}).items():
+            path = root / "inference" / split / name
+            if not path.exists() or sha256_file(path) != want:
+                sys.exit(f"{split}: {name} differs from the run manifest")
+
+
+def read_split_inputs(
+    root: Path, manifest: dict, split: str
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """(packets, requests, links) of a split. Each file is read once: the bytes
+    hashed against the run manifest are the bytes parsed and scored."""
+    out = []
+    for key, path in (
+        ("packets_sha256", root / "inference" / split / "packets.jsonl"),
+        ("requests_file_sha256", root / "prepared/requests" / split / "requests.jsonl"),
+        ("links_file_sha256", root / "evaluator" / split / "links.jsonl"),
+    ):
+        data = path.read_bytes() if path.exists() else b""
+        if hashlib.sha256(data).hexdigest() != manifest[key][split]:
+            sys.exit(f"{split}: {path.name} differs from the run manifest")
+        out.append(parse_jsonl(data))
+    return out[0], out[1], out[2]
+
+
+def efficiency_block(
+    root: Path, manifest: dict, correct_complete: dict[str, int]
+) -> dict:
+    """Per-split and all-split efficiency from the batch runner's timings and
+    run stats. `correct_complete` is the headline-view correct and
+    evidence-complete count per split. Runs recorded before these files existed
+    give None with a note. The investigator makes no paid calls, so the cost
+    per case is zero."""
+    if "timings_sha256" not in manifest or "run_stats_sha256" not in manifest:
+        return {"efficiency": None, "note": "run predates timings.jsonl/run-stats.json"}
+    seconds: dict[str, list[float]] = {}
+    rss: dict[str, int] = {}
+    for split in SPLITS:
+        d = root / "inference" / split
+        seconds[split] = [r["seconds"] for r in read_jsonl(d / TIMINGS_FILE)]
+        rss[split] = json.loads((d / STATS_FILE).read_text())["peak_rss_kib"]
+
+    def one(secs: list[float], peak: int, ok: int) -> dict:
+        e = M.efficiency(secs, peak, Decimal("0"), ok)
+        return {k: str(v) if isinstance(v, Decimal) else v for k, v in e.items()} | {
+            "currency": CURRENCY
+        }
+
+    out = {s: one(seconds[s], rss[s], correct_complete[s]) for s in SPLITS}
+    out["all_splits"] = one(
+        [x for s in SPLITS for x in seconds[s]],
+        max(rss.values()),
+        sum(correct_complete.values()),
+    )
+    return {"efficiency": out, "note": None}
 
 
 # -------------------------------------------------------------- evaluation
@@ -209,12 +459,68 @@ def run(tag: str, upstream: Path) -> None:
 # category the packet claims). Upstream evidence_ids are not used.
 
 
+def journal_totals(
+    lines: list[dict], source: str, kind: str
+) -> tuple[str, Decimal, Decimal] | None:
+    """(currency, attributable debit, whole-journal debit) of a journal given ALL
+    its observable lines, or None. Both contract conditions are required: (a)
+    one currency, no negative line amount, and the whole journal's debit equals
+    its credit and is positive; (b) the lines of type `kind` sourced to `source`
+    are themselves balanced and positive (docs/evidence-contract.md section 3)."""
+    if len({x["currency"] for x in lines}) != 1:
+        return None
+    own = [
+        x
+        for x in lines
+        if x["source_transaction_id"] == source and x["transaction_type"] == kind
+    ]
+    try:
+        if any(Decimal(x[side]) < 0 for x in lines for side in ("debit", "credit")):
+            return None
+        total = (
+            dsum(Decimal(x["debit"]) for x in lines),
+            dsum(Decimal(x["credit"]) for x in lines),
+        )
+        mine = (
+            dsum(Decimal(x["debit"]) for x in own),
+            dsum(Decimal(x["credit"]) for x in own),
+        )
+    except ArithmeticError:
+        return None
+    if total[0] != total[1] or total[0] <= 0 or mine[0] != mine[1] or mine[0] <= 0:
+        return None
+    return lines[0]["currency"], mine[0], total[0]
+
+
 class Snap:
     """Read-only view of the prepared snapshot (tokens only)."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, digest: str) -> None:
+        # `digest` is the snapshot content digest every cited record must carry.
+        self.digest = digest
         self.con = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
         self.con.row_factory = sqlite3.Row
+
+    def bounded_count(self, table: str, predicate: str) -> int:
+        """COUNT(*) of an already-recognised search, aborted after a fixed VM
+        budget (defence in depth: recognition is the primary control). Raises
+        sqlite3.Error when the query fails or runs over budget."""
+        ticks = 0
+
+        def over_budget() -> int:
+            nonlocal ticks
+            ticks += 1
+            return int(ticks > SEARCH_BUDGET_TICKS)
+
+        self.con.set_progress_handler(over_budget, TICK_INSTRUCTIONS)
+        try:
+            return int(
+                self.con.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE {predicate}"  # noqa: S608
+                ).fetchone()[0]
+            )
+        finally:
+            self.con.set_progress_handler(None, 0)
 
     def q(self, sql: str, *params: str) -> list[dict]:
         return [dict(r) for r in self.con.execute(sql, params)]
@@ -249,25 +555,31 @@ class Snap:
             if r["direction"] == "debit" and r["status"] == "posted"
         ]
 
+    def journal_lines(self, journal: str) -> list[dict]:
+        """Every observable line of the journal, whatever its source or type."""
+        return self.q(
+            "SELECT * FROM gl_entries WHERE journal_id = ? AND posting_date <= ?",
+            journal,
+            CUTOFF.isoformat(),
+        )
+
     def balanced_journals(self, source: str, kind: str) -> list[str]:
-        lines = self.q(
-            "SELECT * FROM gl_entries WHERE source_transaction_id = ?"
-            " AND transaction_type = ?",
+        """Every journal with a line of type `kind` sourced to `source`, when ALL
+        of them pass `journal_totals` (docs/evidence-contract.md section 3,
+        conditions a, b); else none. One invalid relevant journal must fail the
+        requirement, not drop out of the expected citations and operands."""
+        ids = self.q(
+            "SELECT DISTINCT journal_id FROM gl_entries WHERE source_transaction_id = ?"
+            " AND transaction_type = ? AND posting_date <= ? ORDER BY journal_id",
             source,
             kind,
+            CUTOFF.isoformat(),
         )
-        by: dict[str, list[dict]] = defaultdict(list)
-        for ln in lines:
-            by[ln["journal_id"]].append(ln)
-        out = []
-        for jid, ls in sorted(by.items()):
-            if len({x["currency"] for x in ls}) != 1:
-                continue
-            d = sum(Decimal(x["debit"]) for x in ls)
-            c = sum(Decimal(x["credit"]) for x in ls)
-            if d == c and d > 0:
-                out.append(jid)
-        return out
+        found = [r["journal_id"] for r in ids]
+        valid = [
+            j for j in found if journal_totals(self.journal_lines(j), source, kind)
+        ]
+        return valid if len(valid) == len(found) else []
 
     def twins(self, pay: dict) -> list[str]:
         return [
@@ -302,10 +614,6 @@ class View:
         self.searches = [
             e["search"] for e in packet["evidence"] if e["search"] is not None
         ]
-        self.calcs = []
-        for c in packet["calculations"]:
-            cited = {self._key(o["evidence_id"]) for o in c["operands"]}
-            self.calcs.append((c["calculation_id"], cited))
         self.findings = [
             (
                 f["check_id"],
@@ -317,15 +625,7 @@ class View:
         ]
         self.limitations = list(packet["limitations"])
         self.calc_by_id = {c["calculation_id"]: c for c in packet["calculations"]}
-        self.day_counts = [
-            (
-                d["calculation_id"],
-                self._key(d["start_evidence"]),
-                d["result"],
-                d["limit"],
-            )
-            for d in packet["day_counts"]
-        ]
+        self.day_counts = {d["calculation_id"]: d for d in packet["day_counts"]}
 
     def _key(self, evidence_id: str) -> tuple[str, str] | None:
         e = self.by_id.get(evidence_id)
@@ -338,11 +638,15 @@ class View:
     def cites(self, table: str, ids: list[str]) -> bool:
         return bool(ids) and all((table, i) in self.records for i in ids)
 
-    def search(self, table: str, count: int, *needles: str) -> bool:
+    def search(self, table: str, count: int, predicate: str) -> bool:
+        """A search of `table` with exactly the predicate the evaluator built for
+        this requirement (whitespace aside) and the stated count. A predicate that
+        contains the right condition plus a restriction is a different search."""
+        want = " ".join(predicate.split())
         return any(
             s["table"] == table
             and s["observed_count"] == count
-            and all(n in s["predicate"] for n in needles)
+            and " ".join(s["predicate"].split()) == want
             for s in self.searches
         )
 
@@ -370,20 +674,35 @@ class View:
         c = self.calc_by_id.get(calc_id)
         if c is None or c["operation"] != operation or not c["tolerance"]:
             return None
-        ops = [
-            (self._key(o["evidence_id"]), o["field"], Decimal(o["amount"].split()[0]))
-            for o in c["operands"]
-        ]
-        return ops, Decimal(c["result"].split()[0]), Decimal(c["tolerance"].split()[0])
+        tolerance = c["tolerance"]
+        # The tolerance is money in the calculation's own currency, never a bare
+        # number lifted out of another currency's text.
+        if not (
+            isinstance(tolerance, str)
+            and MONEY.fullmatch(tolerance)
+            and MONEY.fullmatch(c["result"])
+            and tolerance.split()[1] == c["result"].split()[1]
+        ):
+            return None
+        try:
+            ops = [
+                (
+                    self._key(o["evidence_id"]),
+                    o["field"],
+                    Decimal(o["amount"].split()[0]),
+                )
+                for o in c["operands"]
+            ]
+            return (
+                ops,
+                Decimal(c["result"].split()[0]),
+                Decimal(tolerance.split()[0]),
+            )
+        except (ArithmeticError, IndexError):  # malformed amount text
+            return None
 
-    def calc_over(self, *keys: tuple[str, str]) -> bool:
-        return any(set(keys) <= cited for _, cited in self.calcs)
-
-    def day_count_from(self, key: tuple[str, str]) -> tuple[int, int] | None:
-        for _, start, result, limit in self.day_counts:
-            if start == key:
-                return result, limit
-        return None
+    def day_count(self, calc_id: str) -> dict | None:
+        return self.day_counts.get(calc_id)
 
 
 def alloc_ids(rows: list[dict]) -> list[str]:
@@ -392,6 +711,285 @@ def alloc_ids(rows: list[dict]) -> list[str]:
 
 def bank_ids(rows: list[dict]) -> list[str]:
     return [r["bank_transaction_id"] for r in rows]
+
+
+# The absence searches a category requires, with the exact predicate text the
+# evaluator expects (docs/evidence-contract.md section 4.2 and 4.3). Built here,
+# not copied from the packet: a search that also carries an extra restriction
+# is a different, narrower search.
+
+
+def a1_predicate(ref: str) -> str:
+    return (
+        f"payment_reference = '{ref}' AND transaction_type <> 'bank fee'"
+        f" AND posted_date <= '{CUTOFF.isoformat()}'"
+    )
+
+
+def a2_predicate(ref: str) -> str:
+    return f"reference_number = '{ref}'"
+
+
+def a3_predicate(pay: dict) -> str:
+    return (
+        "direction = 'debit' AND transaction_type <> 'bank fee'"
+        f" AND currency = '{pay['payment_currency']}'"
+        f" AND amount = '{pay['payment_amount']}'"
+        f" AND counterparty_token = '{pay['bank_account_id']}'"
+        f" AND posted_date <= '{CUTOFF.isoformat()}'"
+        " AND payment_reference matches no payment"
+    )
+
+
+def fee_search_predicate(bank_id: str) -> str:
+    return (
+        f"transaction_type = 'bank_fee' AND source_transaction_id = '{bank_id}'"
+        f" AND posting_date <= '{CUTOFF.isoformat()}'"
+    )
+
+
+def lag_ok(v: View, pay: dict, deb_key: tuple[str, str] | None) -> bool:
+    """`business_day_lag`: payment date to the debit's posted date, within the
+    method's clearing limit."""
+    return deb_key is not None and day_count_ok(
+        v, pay, "business_day_lag", (deb_key, "posted_date"), over_limit=False
+    )
+
+
+def committed_overpayment_ok(
+    s: Snap, v: View, inv: dict | None, committed_allocs: list[dict]
+) -> bool:
+    """F06 (contract 4.1): `invoice_total_minus_committed` is the invoice total
+    minus exactly the committed allocations (operation `difference`), every
+    operand equal to the snapshot, the result recomputed, and below minus one
+    quantum of the invoice currency (committed exceeds the invoice total)."""
+    got = v.calculation("invoice_total_minus_committed", "difference")
+    if got is None or inv is None or not committed_allocs or not got[0]:
+        return False
+    ops, result, tol = got
+    q = quantum(inv["currency"]).amount
+    first = ops[0]
+    return (
+        first[:2] == (("invoices", inv["invoice_id"]), "invoice_total")
+        and first[2] == Decimal(inv["invoice_total"])
+        and operands_match(
+            ops[1:], "allocated_amount", allocation_amounts(s, committed_allocs)
+        )
+        and result == dsub(first[2], dsum(a for _, _, a in ops[1:]))
+        and tol == q
+        and result < q.copy_negate()
+    )
+
+
+def delta_ok(v: View, pay: dict, debit: dict | None, shortfall: bool) -> bool:
+    """`delta` is payment amount minus bank amount, exactly those two operands
+    (a sum of the same two figures does not do), operands equal to the snapshot.
+    `shortfall`: delta above one quantum (F14); else |delta| within one quantum
+    (the amounts match)."""
+    got = v.calculation("delta", "difference")
+    if got is None or debit is None:
+        return False
+    ops, result, tol = got
+    q = _quantum(pay)
+    debit_key = ("bank_transactions", debit["bank_transaction_id"])
+    if not (
+        len(ops) == 2
+        and ops[0][:2] == (("payments", pay["payment_id"]), "payment_amount")
+        and ops[0][2] == Decimal(pay["payment_amount"])
+        and operands_match(ops[1:], "amount", {debit_key: Decimal(debit["amount"])})
+        and result == dsub(ops[0][2], ops[1][2])
+        and tol == q
+    ):
+        return False
+    return result > q if shortfall else result.copy_abs() <= q
+
+
+def journal_amounts(s: Snap, source: str, kind: str) -> dict[tuple[str, str], Decimal]:
+    """Journal id -> total debit of the journal's lines of type `kind` sourced to
+    `source`: the figure a calculation compares (a journal can also carry lines
+    sourced elsewhere)."""
+    out: dict[tuple[str, str], Decimal] = {}
+    for j in s.balanced_journals(source, kind):
+        totals = journal_totals(s.journal_lines(j), source, kind)
+        if totals:
+            out[("gl_entries", j)] = totals[1]
+    return out
+
+
+def difference_within(
+    v: View,
+    calc_id: str,
+    head: list[tuple[tuple[str, str], str, Decimal]],
+    rest: dict[tuple[str, str], Decimal],
+    rest_field: str,
+    q: Decimal,
+) -> bool:
+    """`calc_id` is a `difference` whose operands are exactly `head` in order
+    (record, field, snapshot amount) followed by the `rest` records (any order,
+    field `rest_field`, snapshot amounts), whose result is recomputed as the
+    first operand minus the others, with tolerance one quantum, and that lies
+    within one quantum of zero."""
+    got = v.calculation(calc_id, "difference")
+    if got is None:
+        return False
+    ops, result, tol = got
+    n = len(head)
+    return (
+        len(ops) >= n
+        and ops[:n] == head
+        and operands_match(ops[n:], rest_field, rest)
+        and result == dsub(ops[0][2], dsum(a for _, _, a in ops[1:]))
+        and tol == q
+        and result.copy_abs() <= q
+    )
+
+
+def net_fee_ok(s: Snap, v: View, pay: dict, debit: dict) -> bool:
+    """Net-fee accounting (contract 4.3, 5): `delta` is a shortfall and
+    `unexplained` = payment - debit - the bank_fee journals sourced to the
+    debit, within one quantum."""
+    bid = debit["bank_transaction_id"]
+    head = [
+        (
+            ("payments", pay["payment_id"]),
+            "payment_amount",
+            Decimal(pay["payment_amount"]),
+        ),
+        (("bank_transactions", bid), "amount", Decimal(debit["amount"])),
+    ]
+    return delta_ok(v, pay, debit, shortfall=True) and difference_within(
+        v,
+        "unexplained",
+        head,
+        journal_amounts(s, bid, "bank_fee"),
+        "amount",
+        _quantum(pay),
+    )
+
+
+def accounted_fee_ok(s: Snap, v: View, row: dict) -> bool:
+    """Accounted bank fee (contract 5): `fee_row_minus_journals` = fee row amount
+    minus the bank_fee journals sourced to the fee row, within one quantum."""
+    bid = row["bank_transaction_id"]
+    head = [(("bank_transactions", bid), "amount", Decimal(row["amount"]))]
+    return difference_within(
+        v,
+        "fee_row_minus_journals",
+        head,
+        journal_amounts(s, bid, "bank_fee"),
+        "amount",
+        quantum(row["currency"]).amount,
+    )
+
+
+def reversal_ok(s: Snap, v: View, pay: dict, debit: dict, credit: dict) -> bool:
+    """Payment reversal (contract 5): debit = credit = the reversal journal
+    amount = the payment amount, each as a difference of exactly those two
+    records, within one quantum. The caller supplies the one posted debit and
+    the one posted reversal credit."""
+    pid = pay["payment_id"]
+    journals = journal_amounts(s, pid, "payment_reversal")
+    # ISO dates: the order is checked here, not left to the investigator
+    if len(journals) != 1 or credit["posted_date"] < debit["posted_date"]:
+        return False
+    ((jkey, jamt),) = journals.items()
+    d = (
+        ("bank_transactions", debit["bank_transaction_id"]),
+        "amount",
+        Decimal(debit["amount"]),
+    )
+    c = (
+        ("bank_transactions", credit["bank_transaction_id"]),
+        "amount",
+        Decimal(credit["amount"]),
+    )
+    j = (jkey, "amount", jamt)
+    p = (("payments", pid), "payment_amount", Decimal(pay["payment_amount"]))
+    q = _quantum(pay)
+    steps = [
+        ("debit_minus_credit", [d, c]),
+        ("credit_minus_journal", [c, j]),
+        ("journal_minus_payment", [j, p]),
+    ]
+    return all(difference_within(v, cid, h, {}, "amount", q) for cid, h in steps)
+
+
+def own_debits_ok(s: Snap, pays: list[dict]) -> bool:
+    """Each payment's reference belongs to it alone. A bank debit carries one
+    payment reference, so unique references give each payment a distinct debit;
+    a shared reference would let one debit evidence several payments (the
+    investigator abstains with `ambiguous_reference`). One payment covering
+    several invoices is unaffected."""
+    return all(
+        s.q(
+            "SELECT payment_id FROM payments WHERE reference_number = ?",
+            p["reference_number"],
+        )
+        == [{"payment_id": p["payment_id"]}]
+        for p in pays
+    )
+
+
+def debit_equals_payment_ok(s: Snap, v: View, pay: dict, inv: dict) -> bool:
+    """`debit_minus_payment:<payment>` is the payment's one posted debit minus
+    the payment amount, exactly those two operands in that order, equal to the
+    snapshot, within one quantum of the invoice currency (contract 5, split and
+    due-date)."""
+    debits = s.posted_debits(pay["reference_number"])
+    if len(debits) != 1:
+        return False
+    head = [
+        (
+            ("bank_transactions", debits[0]["bank_transaction_id"]),
+            "amount",
+            Decimal(debits[0]["amount"]),
+        ),
+        (
+            ("payments", pay["payment_id"]),
+            "payment_amount",
+            Decimal(pay["payment_amount"]),
+        ),
+    ]
+    return difference_within(
+        v,
+        f"debit_minus_payment:{pay['payment_id']}",
+        head,
+        {},
+        "amount",
+        quantum(inv["currency"]).amount,
+    )
+
+
+def day_count_ok(
+    v: View,
+    pay: dict,
+    calc_id: str,
+    end: tuple[tuple[str, str], str] | None,
+    over_limit: bool,
+) -> bool:
+    """The day count `calc_id` runs from the payment's `payment_date` to `end`
+    (a cited record and field; None = the cutoff), carries the method-specific
+    limit and policy name declared in reconcile.diagnosis.policy (not whatever
+    limit the packet states), and is above that limit (`over_limit`) or not.
+    The count itself is checked against the snapshot dates by the packet audit."""
+    d = v.day_count(calc_id)
+    method = pay["payment_method"]
+    limit = CLEARING_LIMITS.get(method)
+    if d is None or limit is None:
+        return False
+    same_end = (
+        d["end_evidence"] is None
+        if end is None
+        else (v._key(d["end_evidence"] or "") == end[0] and d["end_field"] == end[1])
+    )
+    return (
+        v._key(d["start_evidence"]) == ("payments", pay["payment_id"])
+        and d["start_field"] == "payment_date"
+        and same_end
+        and d["limit"] == limit
+        and d["limit_policy"] == clearing_policy(method)
+        and (d["result"] > limit) == over_limit
+    )
 
 
 def _category_requirements(
@@ -423,6 +1021,7 @@ def _category_requirements(
             len(pays) == 1 and v.cites("payments", [pays[0]["payment_id"]]),
         )
         add("fee_journal", v.cites("gl_entries", s.balanced_journals(rid, "bank_fee")))
+        add("fee_calculation", row is not None and accounted_fee_ok(s, v, row))
         fee_allocs = (
             s.allocs_of_payment(pays[0]["payment_id"]) if len(pays) == 1 else []
         )
@@ -458,10 +1057,13 @@ def _category_requirements(
                 for b in bank_ids(s.posted_debits(p["reference_number"]))
             ]
             add("committed_debits", v.cites("bank_transactions", debits))
-            alloc_keys = [("payment_allocations", i) for i in alloc_ids(allocs)]
+            add("committed_payments_own_debits", own_debits_ok(s, committed))
+            committed_ids = {p["payment_id"] for p in committed}
             add(
                 "overpayment_calculation",
-                v.calc_over(("invoices", rid), *alloc_keys[:1]),
+                committed_overpayment_ok(
+                    s, v, inv, [a for a in allocs if a["payment_id"] in committed_ids]
+                ),
             )
         elif category in ("legitimate_split_payment", "legitimate_due_date_payment"):
             eff = [p for p in pays if effective(p)]
@@ -473,6 +1075,44 @@ def _category_requirements(
                 b for p in eff for b in bank_ids(s.posted_debits(p["reference_number"]))
             ]
             add("posted_debits", v.cites("bank_transactions", debits))
+            add("payments_own_debits", own_debits_ok(s, eff))
+            live_pays, live_allocs = _balance_parts(s, rid)
+            add(
+                "allocation_total_calculation",
+                inv is not None
+                and difference_within(
+                    v,
+                    "invoice_total_minus_allocated",
+                    [
+                        (
+                            ("invoices", rid),
+                            "invoice_total",
+                            Decimal(inv["invoice_total"]),
+                        )
+                    ],
+                    allocation_amounts(s, live_allocs),
+                    "allocated_amount",
+                    quantum(inv["currency"]).amount,
+                )
+                and bool(live_allocs),
+            )
+            add(
+                "debit_equality_calculations",
+                inv is not None
+                and bool(live_pays)
+                and all(debit_equals_payment_ok(s, v, p, inv) for p in live_pays),
+            )
+            if category == "legitimate_split_payment":
+                add("two_or_more_allocations", len(live_allocs) >= 2)
+            else:
+                add(
+                    "payment_on_due_date",
+                    inv is not None
+                    and any(
+                        p["payment_date"][:10] == str(inv["due_date"])[:10]
+                        for p in live_pays
+                    ),
+                )
         else:
             return []
         return out
@@ -480,7 +1120,7 @@ def _category_requirements(
     pay = s.payment(rid)
     if pay is None:
         return []
-    ref, pkey = pay["reference_number"], ("payments", rid)
+    ref = pay["reference_number"]
     add("payment", v.cites("payments", [rid]))
     allocs = s.allocs_of_payment(rid)
     debits = s.posted_debits(ref)
@@ -497,38 +1137,32 @@ def _category_requirements(
             v.cites("gl_entries", s.balanced_journals(rid, "payment")),
         )
         add(
-            "search_a1_no_bank_row",
-            v.search("bank_transactions", 0, f"payment_reference = '{ref}'"),
+            "search_a1_no_bank_row", v.search("bank_transactions", 0, a1_predicate(ref))
         )
-        add(
-            "search_a2_unique_reference",
-            v.search("payments", 1, f"reference_number = '{ref}'"),
-        )
+        add("search_a2_unique_reference", v.search("payments", 1, a2_predicate(ref)))
         add(
             "search_a3_no_candidate",
-            v.search(
-                "bank_transactions",
-                0,
-                f"counterparty_token = '{pay['bank_account_id']}'",
-                "matches no payment",
-            ),
+            v.search("bank_transactions", 0, a3_predicate(pay)),
         )
-        dc = v.day_count_from(pkey)
-        want_over = category == "F12"
-        add("business_day_age", dc is not None and ((dc[0] > dc[1]) == want_over))
+        add(
+            "business_day_age",
+            day_count_ok(v, pay, "business_day_age", None, category == "F12"),
+        )
     elif category == "F14":
         add(
             "posted_debit", one_debit and v.cites("bank_transactions", bank_ids(debits))
         )
-        add("delta_calculation", deb_key is not None and v.calc_over(pkey, deb_key))
+        add(
+            "delta_calculation",
+            one_debit and delta_ok(v, pay, debits[0], shortfall=True),
+        )
         add(
             "search_no_fee_journal",
             one_debit
             and v.search(
                 "gl_entries",
                 0,
-                f"source_transaction_id = '{debits[0]['bank_transaction_id']}'",
-                "bank_fee",
+                fee_search_predicate(debits[0]["bank_transaction_id"]),
             ),
         )
     elif category in ("legitimate_weekend_clearing", "legitimate_check_clearing"):
@@ -537,9 +1171,9 @@ def _category_requirements(
         )
         add(
             "amount_equality_calculation",
-            deb_key is not None and v.calc_over(pkey, deb_key),
+            one_debit and delta_ok(v, pay, debits[0], shortfall=False),
         )
-        add("business_day_lag", v.day_count_from(pkey) is not None)
+        add("business_day_lag", lag_ok(v, pay, deb_key))
         add(
             "allocations",
             bool(allocs) and v.cites("payment_allocations", alloc_ids(allocs)),
@@ -549,7 +1183,35 @@ def _category_requirements(
         add(
             "allocated_invoices", v.cites("invoices", [a["invoice_id"] for a in allocs])
         )
-        add("posted_debit", v.cites("bank_transactions", bank_ids(debits)))
+        add(
+            "posted_debit", one_debit and v.cites("bank_transactions", bank_ids(debits))
+        )
+        add(
+            "two_or_more_invoices",
+            len({a["invoice_id"] for a in allocs}) >= 2,
+        )
+        add(
+            "allocation_sum_calculation",
+            bool(allocs)
+            and difference_within(
+                v,
+                "payment_minus_allocated",
+                [
+                    (
+                        ("payments", rid),
+                        "payment_amount",
+                        Decimal(pay["payment_amount"]),
+                    )
+                ],
+                allocation_amounts(s, allocs),
+                "allocated_amount",
+                _quantum(pay),
+            ),
+        )
+        add(
+            "amount_equality_calculation",
+            one_debit and delta_ok(v, pay, debits[0], shortfall=False),
+        )
     elif category == "legitimate_payment_reversal":
         add("posted_debit", v.cites("bank_transactions", bank_ids(debits)))
         credits = [
@@ -558,6 +1220,11 @@ def _category_requirements(
             if r["direction"] == "credit" and r["status"] == "posted"
         ]
         add("posted_credit", v.cites("bank_transactions", bank_ids(credits)))
+        rev = [r for r in credits if r["transaction_type"] == "payment reversal"]
+        add(
+            "reversal_calculations",
+            one_debit and len(rev) == 1 and reversal_ok(s, v, pay, debits[0], rev[0]),
+        )
         add(
             "reversal_journal",
             v.cites("gl_entries", s.balanced_journals(rid, "payment_reversal")),
@@ -576,6 +1243,10 @@ def _category_requirements(
         )
         add("fee_journals", v.cites("gl_entries", fee))
         add(
+            "unexplained_calculation",
+            one_debit and net_fee_ok(s, v, pay, debits[0]),
+        )
+        add(
             "allocations",
             bool(allocs) and v.cites("payment_allocations", alloc_ids(allocs)),
         )
@@ -584,8 +1255,11 @@ def _category_requirements(
             "posted_debit", one_debit and v.cites("bank_transactions", bank_ids(debits))
         )
         add("allocations", v.cites("payment_allocations", alloc_ids(allocs)))
-        add("delta_calculation", deb_key is not None and v.calc_over(pkey, deb_key))
-        add("business_day_lag", v.day_count_from(pkey) is not None)
+        add(
+            "delta_calculation",
+            one_debit and delta_ok(v, pay, debits[0], shortfall=False),
+        )
+        add("business_day_lag", lag_ok(v, pay, deb_key))
         invs = [a["invoice_id"] for a in allocs]
         eff_allocs = [
             a
@@ -713,20 +1387,8 @@ def allocation_amounts(s: Snap, allocs: list[dict]) -> dict[tuple[str, str], Dec
 
 
 def attributable_journal_amounts(s: Snap, p: dict) -> dict[tuple[str, str], Decimal]:
-    """Journal id -> total debit of the journal's lines of type payment sourced to
-    the payment: the figure to compare with the payment (a journal can also carry
-    lines sourced elsewhere)."""
-    pid = p["payment_id"]
-    out: dict[tuple[str, str], Decimal] = {}
-    for j in s.balanced_journals(pid, "payment"):
-        lines = s.q(
-            "SELECT * FROM gl_entries WHERE journal_id = ?"
-            " AND source_transaction_id = ? AND transaction_type = 'payment'",
-            j,
-            pid,
-        )
-        out[("gl_entries", j)] = sum((Decimal(x["debit"]) for x in lines), Decimal(0))
-    return out
+    """The payment journals' amounts: the figure to compare with the payment."""
+    return journal_amounts(s, p["payment_id"], "payment")
 
 
 def journal_attribution_ok(v: View, p: dict) -> bool:
@@ -802,9 +1464,9 @@ def chk_journal_calculation(s: Snap, v: View, p: dict) -> bool:
         return False
     return (
         journal_attribution_ok(v, p)
-        and result == ops[0][2] - sum((a for _, _, a in rest), Decimal(0))
+        and result == dsub(ops[0][2], dsum(a for _, _, a in rest))
         and tol == _quantum(p)
-        and abs(result) <= tol
+        and result.copy_abs() <= tol
     )
 
 
@@ -852,7 +1514,7 @@ def chk_totals_calculation(s: Snap, v: View, p: dict) -> bool:
             and first[:2] == (("invoices", inv), "invoice_total")
             and first[2] == Decimal(row["invoice_total"])
             and operands_match(rest, "allocated_amount", allocation_amounts(s, allocs))
-            and result == first[2] - sum((a for _, _, a in rest), Decimal(0))
+            and result == dsub(first[2], dsum(a for _, _, a in rest))
             and tol == _quantum(p)
             and result >= -tol
             and v.cites("payments", [x["payment_id"] for x in pays])
@@ -899,7 +1561,7 @@ def chk_payment_allocation_calculation(s: Snap, v: View, p: dict) -> bool:
         and ops[0][:2] == (("payments", pid), "payment_amount")
         and ops[0][2] == Decimal(p["payment_amount"])
         and operands_match(rest, "allocated_amount", allocation_amounts(s, allocs))
-        and result == ops[0][2] - sum((a for _, _, a in rest), Decimal(0))
+        and result == dsub(ops[0][2], dsum(a for _, _, a in rest))
         and tol == _quantum(p)
         and result >= -tol
     )
@@ -956,20 +1618,460 @@ def required(
     return [*base, *guard_requirements(pays, s, v)]
 
 
+def _str(x: object) -> bool:
+    return isinstance(x, str)
+
+
+def _int(x: object) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
+def _opt(ok: Callable[[Any], bool]) -> Callable[[Any], bool]:
+    return lambda x: x is None or ok(x)
+
+
+def _list_of(ok: Callable[[Any], bool]) -> Callable[[Any], bool]:
+    return lambda x: isinstance(x, list) and all(ok(i) for i in x)
+
+
+def _text_map(x: object) -> bool:
+    return isinstance(x, dict) and all(_str(k) and _str(v) for k, v in x.items())
+
+
+def _shape(obj: object, **fields: Callable[[Any], bool]) -> bool:
+    """`obj` is a dict holding every named field with a value of the right type."""
+    return isinstance(obj, dict) and all(
+        k in obj and ok(obj[k]) for k, ok in fields.items()
+    )
+
+
+DISPOSITIONS = ("answered", "abstained", "out_of_scope", "failed")
+OPERATIONS = ("sum", "difference")
+
+
+def _field_problem(packet: dict) -> str | None:
+    """The first field the scorer reads that is missing or of the wrong type."""
+    checks: list[tuple[str, bool]] = [
+        (
+            "diagnosis",
+            _shape(
+                packet.get("diagnosis"),
+                disposition=lambda x: x in DISPOSITIONS,
+                category=_opt(_str),
+                reason=_opt(_str),
+                findings=_list_of(
+                    lambda f: _shape(
+                        f,
+                        check_id=_str,
+                        state=_str,
+                        evidence_ids=_list_of(_str),
+                        calculation_ids=_list_of(_str),
+                    )
+                ),
+            ),
+        ),
+        ("limitations", _shape(packet, limitations=_list_of(_str))),
+        (
+            "request",
+            _shape(packet.get("request"), request_id=_str, cutoff=_str)
+            and _date_ok(packet["request"]["cutoff"]),
+        ),
+        (
+            "evidence item",
+            all(
+                _shape(
+                    e,
+                    evidence_id=_str,
+                    record=_opt(
+                        lambda r: _shape(r, table=_str, record_id=_str, snapshot=_str)
+                    ),
+                    search=_opt(
+                        lambda s: _shape(
+                            s, table=_str, predicate=_str, observed_count=_int
+                        )
+                    ),
+                    values=_opt(_text_map),
+                )
+                and ("timestamps" not in e or _opt(_text_map)(e["timestamps"]))
+                for e in packet["evidence"]
+            ),
+        ),
+        (
+            "calculation",
+            _shape(
+                packet,
+                calculations=_list_of(
+                    lambda c: _shape(
+                        c,
+                        calculation_id=_str,
+                        operation=lambda x: x in OPERATIONS,
+                        operands=_list_of(
+                            lambda o: _shape(
+                                o, evidence_id=_str, field=_str, amount=_str
+                            )
+                        ),
+                        result=_str,
+                        tolerance=_opt(_str),
+                    )
+                ),
+            ),
+        ),
+        (
+            "day count",
+            _shape(
+                packet,
+                day_counts=_list_of(
+                    lambda d: _shape(
+                        d,
+                        calculation_id=_str,
+                        start_evidence=_str,
+                        start_field=_str,
+                        end_evidence=_opt(_str),
+                        end_field=_opt(_str),
+                        result=_int,
+                        limit=_int,
+                        limit_policy=_str,
+                    )
+                ),
+            ),
+        ),
+    ]
+    return next((name for name, ok in checks if not ok), None)
+
+
+def _date_ok(text: str) -> bool:
+    try:
+        date.fromisoformat(text)
+    except ValueError:
+        return False
+    return True
+
+
+def packet_structure_problem(packet: dict) -> str | None:
+    """Why the packet cannot be audited, or None. Checked before anything reads
+    the packet: every field the scorer consumes must be present with its type
+    (a wrong shape is an unsuccessful case, never a crash), then duplicates,
+    which a later dict entry would otherwise hide. Calculation and day-count ids
+    share one namespace; a calculation needs at least one operand (the semantic
+    checks reject a one-operand difference)."""
+    if not isinstance(packet, dict):
+        return "missing or mistyped packet field: packet"
+    # Looked at first: the field checks iterate it.
+    if not isinstance(packet.get("evidence"), list):
+        return "missing or mistyped packet field: evidence"
+    wrong = _field_problem(packet)
+    if wrong:
+        return f"missing or mistyped packet field: {wrong}"
+    ids = {
+        "evidence": [e["evidence_id"] for e in packet["evidence"]],
+        "calculation": [c["calculation_id"] for c in packet["calculations"]],
+        "day count": [d["calculation_id"] for d in packet["day_counts"]],
+    }
+    for name, values in ids.items():
+        if len(set(values)) != len(values):
+            return f"duplicate {name} id"
+    if set(ids["calculation"]) & set(ids["day count"]):
+        return "an id names both a calculation and a day count"
+    for c in packet["calculations"]:
+        if not c["operands"]:
+            return f"calculation {c['calculation_id']} has no operands"
+    return None
+
+
+def malformed_result(reason: str) -> dict:
+    """The completeness result of a packet that cannot be audited."""
+    return {
+        "well_formed": False,
+        "malformed_reason": reason,
+        "contract_defined": False,
+        "req_total": 0,
+        "req_met": 0,
+        "contract_complete": False,
+        "complete": False,
+        "missing": ["malformed_packet"],
+        "cited_total": 0,
+        "cited_resolved": 0,
+        "findings": 0,
+        "findings_reference_ok": 0,
+        "calcs": 0,
+        "calcs_exact": 0,
+        "day_counts": 0,
+        "day_counts_exact": 0,
+        "searches_mismatch": [],
+        "audit_ok": False,
+    }
+
+
 def completeness(packet: dict, entity: tuple[str, str], snap: Snap) -> dict:
     """Evidence completeness of an answered packet: every contract requirement
-    of its category holds and every absence search it states reproduces on the
-    snapshot (a false absence claim makes the packet incomplete)."""
+    of its category holds, every absence search it states reproduces on the
+    snapshot (a false absence claim makes the packet incomplete), AND the packet
+    audit passes (every cited record resolves, every calculation and day count
+    is exact, every finding's references are valid). A packet that fails the
+    audit is not an evidence-complete success, whatever it cites."""
+    problem = packet_structure_problem(packet)
+    if problem:
+        return malformed_result(problem)
     reqs = required(packet["diagnosis"]["category"], entity, snap, View(packet))
-    mismatch = searches_reproduce(packet, snap)
+    audit = packet_audit(packet, snap)
     missing = [n for n, ok in reqs if not ok]
-    if mismatch:
+    if audit["searches_mismatch"]:
         missing.append("searches_reproduce")
+    contract_met = bool(reqs) and not missing
+    if not audit["audit_ok"]:
+        missing.append("packet_audit")
     return {
+        "well_formed": True,
         "contract_defined": bool(reqs),
-        "complete": bool(reqs) and not missing,
+        "req_total": len(reqs),
+        "req_met": sum(ok for _, ok in reqs),
+        "contract_complete": contract_met,
+        "complete": contract_met and audit["audit_ok"],
         "missing": missing,
+        **audit,
+    }
+
+
+# ------------------------------------------------------------ packet audit
+# Per-packet facts for the PLAN.md section 7 metrics (citation resolution,
+# reference integrity, monetary correctness). Aggregation lives in metrics.py.
+
+KEY_COLUMN = {
+    "payments": "payment_id",
+    "invoices": "invoice_id",
+    "bank_transactions": "bank_transaction_id",
+    "approval_events": "approval_event_id",
+}
+MONEY = re.compile(r"-?\d+(\.\d+)? [A-Z]{3}")
+JOURNAL_VALUES = {"amount", "journal_total", "currency", "source", "gl_type"}
+JOURNAL_TIMESTAMPS = {"posting_date"}
+
+
+def _value_matches(packet_val: str, snap_val: str, currency: str | None) -> bool:
+    """Money strings ("12.50 USD") compare as Decimal amount plus currency, any
+    other value as text."""
+    if MONEY.fullmatch(packet_val):
+        amount, cur = packet_val.split()
+        try:
+            return currency in (None, cur) and Decimal(amount) == Decimal(snap_val)
+        except ArithmeticError:
+            return False
+    return packet_val == snap_val
+
+
+def _journal_matches(values: dict, timestamps: dict, journal: str, snap: Snap) -> bool:
+    """A journal item: `source`/`gl_type` name lines of the journal, `amount` is
+    the total debit of those lines, `journal_total` the whole journal's debit,
+    `posting_date` its latest posting date. Only these fields exist; any other
+    field, or a journal that is not balanced as a whole and on the named lines,
+    does not resolve."""
+    lines = snap.journal_lines(journal)
+    totals = journal_totals(lines, values.get("source", ""), values.get("gl_type", ""))
+    if (
+        totals is None
+        or not set(values) <= JOURNAL_VALUES
+        or not set(timestamps) <= JOURNAL_TIMESTAMPS
+        or values.get("currency") != totals[0]
+    ):
+        return False
+    if "posting_date" in timestamps and timestamps["posting_date"] != max(
+        x["posting_date"] for x in lines
+    ):
+        return False
+    currency, amount, total = totals
+    expected = {"amount": amount, "journal_total": total}
+    return all(
+        k not in values
+        or (
+            MONEY.fullmatch(values[k]) is not None
+            and values[k].split()[1] == currency
+            and Decimal(values[k].split()[0]) == v
+        )
+        for k, v in expected.items()
+    )
+
+
+def evidence_resolves(e: dict, snap: Snap) -> bool:
+    """The cited record is in this run's snapshot (digest), exists there, and
+    every recorded value and timestamp is a field of it with the snapshot's
+    value. Search-only items have no record and are not handled here."""
+    table, rid = e["record"]["table"], e["record"]["record_id"]
+    if e["record"].get("snapshot") != snap.digest:
+        return False
+    values = e["values"] or {}
+    timestamps = e.get("timestamps") or {}
+    if table == "gl_entries":
+        return _journal_matches(values, timestamps, rid, snap)
+    if table == "payment_allocations":
+        pid, _, iid = rid.partition("|")
+        row = snap.one(
+            "SELECT * FROM payment_allocations WHERE payment_id = ? AND invoice_id = ?",
+            pid,
+            iid,
+        )
+        pay = snap.payment(pid)
+        currency = pay["payment_currency"] if pay else None
+    elif table in KEY_COLUMN:
+        row = snap.one(f"SELECT * FROM {table} WHERE {KEY_COLUMN[table]} = ?", rid)  # noqa: S608
+        currency = (row or {}).get("currency") or (row or {}).get("payment_currency")
+    else:
+        return False
+    return (
+        row is not None
+        and all(
+            k in row and _value_matches(v, str(row[k]), currency)
+            for k, v in values.items()
+        )
+        and all(k in row and v == str(row[k]) for k, v in timestamps.items())
+    )
+
+
+def calculation_exact(c: dict, by_id: dict, resolved: dict[str, bool]) -> bool:
+    """Every operand is a resolved evidence item whose recorded `field` equals
+    the operand's amount, all in one currency, and the stated result equals the
+    sum (first minus the rest for a difference) of the operands exactly, in the
+    exact Decimal context (no rounding)."""
+    amounts: list[Decimal] = []
+    cur: set[str] = set()
+    for o in c["operands"]:
+        e = by_id.get(o["evidence_id"])
+        if (
+            e is None
+            or not e["record"]
+            or not resolved[o["evidence_id"]]
+            or (e["values"] or {}).get(o["field"]) != o["amount"]
+            or not MONEY.fullmatch(o["amount"])
+        ):
+            return False
+        a, k = o["amount"].split()
+        amounts.append(Decimal(a))
+        cur.add(k)
+    if not amounts or not MONEY.fullmatch(c["result"]):
+        return False
+    r, k = c["result"].split()
+    if cur != {k}:
+        return False
+    tol = c.get("tolerance")
+    if tol is not None and not (
+        isinstance(tol, str) and MONEY.fullmatch(tol) and tol.split()[1] == k
+    ):
+        return False
+    try:
+        if c["operation"] == "sum":
+            want = dsum(amounts)
+        elif c["operation"] == "difference":
+            want = dsub(amounts[0], dsum(amounts[1:]))
+        else:
+            return False
+    except ArithmeticError:  # more digits than the money type allows
+        return False
+    return Decimal(r) == want
+
+
+def _snapshot_day(e: dict, field: str, snap: Snap) -> date | None:
+    """The date the snapshot holds in `field` of the cited record, None if the
+    record has no such field or it is not a date. A journal has one date field,
+    `posting_date` (its latest line)."""
+    table, rid = e["record"]["table"], e["record"]["record_id"]
+    if table == "gl_entries":
+        if field != "posting_date":
+            return None
+        value = max((x["posting_date"] for x in snap.journal_lines(rid)), default=None)
+    elif table == "payment_allocations":
+        pid, _, iid = rid.partition("|")
+        row = snap.one(
+            "SELECT * FROM payment_allocations WHERE payment_id = ? AND invoice_id = ?",
+            pid,
+            iid,
+        )
+        value = (row or {}).get(field)
+    elif table in KEY_COLUMN:
+        row = snap.one(f"SELECT * FROM {table} WHERE {KEY_COLUMN[table]} = ?", rid)  # noqa: S608
+        value = (row or {}).get(field)
+    else:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def day_count_exact(
+    d: dict, by_id: dict, resolved: dict[str, bool], snap: Snap, cutoff: date
+) -> bool:
+    """Both cited dates are the snapshot's (cited items resolve) and `result` is
+    the business-day count between them (weekdays in (start, end]); an absent end
+    runs to the request cutoff."""
+    ends = [(d["start_evidence"], d["start_field"])]
+    if d["end_evidence"] is not None:
+        ends.append((d["end_evidence"], d["end_field"]))
+    days: list[date] = []
+    for ev, field in ends:
+        e = by_id.get(ev)
+        day = (
+            _snapshot_day(e, field, snap)
+            if e is not None and e["record"] and resolved[ev]
+            else None
+        )
+        if day is None:
+            return False
+        days.append(day)
+    if d["end_evidence"] is None:
+        days.append(cutoff)
+    return days[1] >= days[0] and business_days(days[0], days[1]) == d["result"]
+
+
+def packet_audit(packet: dict, snap: Snap) -> dict:
+    """Counts for an answered packet: cited record items and how many resolve;
+    calculations and day counts and how many are exact; findings and how many
+    have valid references (see metrics.reference_integrity: this is NOT a check
+    that the finding's assertion is true). `audit_ok` is the hard gate for a
+    primary success; `completeness` also requires every stated search to
+    reproduce (reported apart, as `searches_mismatch`)."""
+    by_id = {e["evidence_id"]: e for e in packet["evidence"]}
+    mismatch = searches_reproduce(packet, snap)
+    bad_search = {n.split(":")[0] for n in mismatch}
+    resolved = {
+        i: (evidence_resolves(e, snap) if e["record"] else i not in bad_search)
+        for i, e in by_id.items()
+    }
+    exact = {
+        c["calculation_id"]: calculation_exact(c, by_id, resolved)
+        for c in packet["calculations"]
+    }
+    cutoff = date.fromisoformat(packet["request"]["cutoff"])
+    counts = {
+        d["calculation_id"]: day_count_exact(d, by_id, resolved, snap, cutoff)
+        for d in packet["day_counts"]
+    }
+    valid = exact | counts
+    findings = packet["diagnosis"]["findings"]
+    # A finding that cites nothing (no evidence, no calculation) establishes
+    # nothing: it is counted as not valid, not passed by an empty `all`.
+    referenced_ok = sum(
+        bool(f["evidence_ids"] or f["calculation_ids"])
+        and all(resolved.get(i, False) for i in f["evidence_ids"])
+        and all(valid.get(i, False) for i in f["calculation_ids"])
+        for f in findings
+    )
+    cited_total = sum(bool(e["record"]) for e in by_id.values())
+    cited_resolved = sum(bool(e["record"]) and resolved[i] for i, e in by_id.items())
+    return {
+        "cited_total": cited_total,
+        "cited_resolved": cited_resolved,
+        "findings": len(findings),
+        "findings_reference_ok": referenced_ok,
+        "calcs": len(packet["calculations"]),
+        "calcs_exact": sum(exact.values()),
+        "day_counts": len(counts),
+        "day_counts_exact": sum(counts.values()),
         "searches_mismatch": mismatch,
+        "audit_ok": (
+            cited_resolved == cited_total
+            and sum(exact.values()) == len(exact)
+            and sum(counts.values()) == len(counts)
+            and referenced_ok == len(findings)
+        ),
     }
 
 
@@ -981,86 +2083,84 @@ def read_jsonl(path: Path) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def classify(row: dict) -> None:
-    """Fill row['outcome'] (and 'kind' for wrong ones)."""
-    disp, cat, grp = row["disposition"], row["category"], row["group"]
-    label_fail = row["failure_type"] != "NO_FAILURE"
-    expected = row["expected_category"]
-    if grp in ("cohort", "label_conflict"):
-        if disp != "answered":
-            row["outcome"] = disp  # abstained | out_of_scope | failed
-        elif cat == expected:
-            row["outcome"] = "correct"
-        else:
-            row["outcome"] = "wrong"
-            if not label_fail and is_failure(cat):
-                row["kind"] = "false_alarm"
-            elif label_fail and is_no_failure(cat):
-                row["kind"] = "failure_called_no_failure"
-            elif label_fail:
-                row["kind"] = "wrong_failure_class"
-            elif cat == "no_exception":
-                row["kind"] = "legit_variant_called_no_exception"
-            else:
-                row["kind"] = "wrong_legit_variant"
-    elif grp == "fx":
-        if disp == "abstained" and row["reason"] == "unsupported_fx":
-            row["outcome"] = "correct_abstention"
-        elif disp == "answered":
-            row["outcome"] = "wrong"
-            row["kind"] = "false_alarm" if is_failure(cat) else "answered_fx_pair"
-        else:
-            row["outcome"] = disp
-            row["kind"] = "abstained_other_reason"
-    elif grp == "not_gradable":
-        row["outcome"] = "answered_not_gradable" if disp == "answered" else disp
-    elif grp == "contradicted":
-        row["outcome"] = disp
-        if disp == "answered":
-            row["kind"] = (
-                "answered_label_category" if cat == expected else "answered_other"
-            )
-    elif grp == "oos_failure":
-        if disp == "answered":
-            row["outcome"] = "answered_oos"
-            row["kind"] = (
-                "failure_class_on_other_family"
-                if is_failure(cat)
-                else "failure_called_no_failure"
-            )
-        else:
-            row["outcome"] = disp
-    else:  # oos_legit
-        if disp == "answered":
-            row["outcome"] = "answered_oos"
-            if is_failure(cat):
-                row["kind"] = "false_alarm"
-            elif cat == "no_exception":
-                row["kind"] = "no_exception_on_ap_side_legit"
-            else:
-                row["kind"] = "payment_variant_on_ap_side_legit"
-        else:
-            row["outcome"] = disp
+def parse_jsonl(data: bytes) -> list[dict]:
+    return [json.loads(line) for line in data.decode().splitlines() if line.strip()]
+
+
+_TOKEN = r"[A-Za-z0-9_.:|=+/-]+"  # no quote, space, paren or semicolon
+_DAY = r"\d{4}-\d{2}-\d{2}"
+# The only search forms the investigator emits (src/reconcile/diagnosis), keyed
+# by table. A predicate is executed only when it matches one of these in full:
+# every free part is a quote-free token, so it cannot carry any other SQL.
+RECOGNISED_SEARCHES: dict[str, list[re.Pattern[str]]] = {
+    "bank_transactions": [
+        re.compile(p)
+        for p in (
+            rf"payment_reference = '{_TOKEN}' AND transaction_type <> 'bank fee'"
+            rf" AND posted_date <= '{_DAY}'",
+            rf"payment_reference = '{_TOKEN}' AND transaction_type <> 'bank fee'"
+            rf" AND direction = 'debit' AND status = 'posted'"
+            rf" AND posted_date <= '{_DAY}'",
+            rf"direction = 'debit' AND transaction_type <> 'bank fee'"
+            rf" AND currency = '[A-Z]{{3}}' AND amount = '-?\d+(\.\d+)?'"
+            rf" AND counterparty_token = '{_TOKEN}' AND posted_date <= '{_DAY}'"
+            r" AND payment_reference matches no payment",
+        )
+    ],
+    "payments": [re.compile(rf"reference_number = '{_TOKEN}'")],
+    "gl_entries": [
+        re.compile(
+            rf"transaction_type = '(bank_fee|payment)'"
+            rf" AND source_transaction_id = '{_TOKEN}' AND posting_date <= '{_DAY}'"
+        )
+    ],
+    "approval_events": [
+        re.compile(
+            rf"invoice_id = '{_TOKEN}' AND action IN \('approved', 'auto_approved'\)"
+            r" AND new_status = 'approved'"
+            r" AND CAST\(approval_level AS INTEGER\) >= \d+"
+            rf" AND substr\(event_timestamp, 1, 10\) <= '{_DAY}'"
+        )
+    ],
+    "payment_allocations": [
+        re.compile(rf"payment_id = '{_TOKEN}' AND allocation_date <= '{_DAY}'")
+    ],
+}
+
+
+def search_recognised(table: str, predicate: str) -> bool:
+    forms = RECOGNISED_SEARCHES.get(table, [])
+    return any(f.fullmatch(" ".join(predicate.split())) for f in forms)
 
 
 def searches_reproduce(packet: dict, snap: Snap) -> list[str]:
     """Searches whose stated count differs when the predicate is re-run on the
-    snapshot (docs/evidence-contract.md principle 3). Returns mismatch notes."""
+    snapshot (docs/evidence-contract.md principle 3). Returns mismatch notes.
+    Only recognised search forms are executed; any other predicate is invalid
+    evidence (`:unrecognised`), never run. A recognised search that fails or runs
+    over budget is `:malformed`, never an exception."""
     bad = []
     for e in packet["evidence"]:
         s = e["search"]
         if s is None:
             continue
-        pred = s["predicate"]
-        if "payment_reference matches no payment" in pred:
-            pred = pred.replace(
-                " AND payment_reference matches no payment",
-                " AND (payment_reference IS NULL OR payment_reference NOT IN"
-                " (SELECT reference_number FROM payments))",
-            )
-        n = snap.con.execute(
-            f"SELECT COUNT(*) FROM {s['table']} WHERE {pred}"  # noqa: S608
-        ).fetchone()[0]
+        if not (
+            isinstance(s["table"], str)
+            and isinstance(s["predicate"], str)
+            and search_recognised(s["table"], s["predicate"])
+        ):
+            bad.append(f"{e['evidence_id']}:unrecognised")
+            continue
+        pred = s["predicate"].replace(
+            " AND payment_reference matches no payment",
+            " AND (payment_reference IS NULL OR payment_reference NOT IN"
+            " (SELECT reference_number FROM payments))",
+        )
+        try:
+            n = snap.bounded_count(s["table"], pred)
+        except sqlite3.Error:
+            bad.append(f"{e['evidence_id']}:malformed")
+            continue
         if n != s["observed_count"]:
             bad.append(f"{e['evidence_id']}:{s['observed_count']}!={n}")
     return bad
@@ -1082,177 +2182,132 @@ def fx_abstention_cites(packet: dict) -> bool:
     )
 
 
+def readable_diagnosis(packet: object) -> dict:
+    """Disposition, category and reason of a packet that failed the structural
+    check, where they are readable. A malformed answered packet must stay an
+    answered row (so the well-formed hard gate sees it); an unreadable
+    disposition is a failed case."""
+    raw = packet.get("diagnosis") if isinstance(packet, dict) else None
+    raw = raw if isinstance(raw, dict) else {}
+    disposition = raw.get("disposition")
+    if disposition not in DISPOSITIONS:
+        disposition = "failed"
+    category = raw.get("category")
+    if not _str(category):  # an answered row is classified by its category
+        category = "" if disposition == "answered" else None
+    return {
+        "disposition": disposition,
+        "category": category,
+        "reason": raw.get("reason") if _str(raw.get("reason")) else None,
+    }
+
+
+def case_row(
+    split: str,
+    case_id: str,
+    lab: dict,
+    packet: dict,
+    entity: dict,
+    snap: Snap,
+    conflicts: C.Conflicts,
+) -> dict:
+    """The scored row of one case: label facts, the packet's disposition and,
+    for an answered packet, evidence completeness including the packet audit."""
+    problem = packet_structure_problem(packet)
+    d = packet["diagnosis"] if problem is None else readable_diagnosis(packet)
+    group = C.group_of(
+        lab["failure_type"], lab["scenario_variant"], case_id, conflicts.verified
+    )
+    row = {
+        "split": split,
+        "case_id": case_id,
+        "failure_type": lab["failure_type"],
+        "variant": lab["scenario_variant"],
+        "difficulty": lab.get("difficulty"),
+        "group_vendor_id": lab.get("group_vendor_id"),
+        "group": group,
+        "disposition": d["disposition"],
+        "category": d["category"],
+        "reason": d["reason"],
+        "label_conflict_with": conflicts.verified.get(case_id, []),
+        "conflict_candidate_with": conflicts.candidates.get(case_id, []),
+        "review_candidate_with": conflicts.review.get(case_id, []),
+        "entity_table": entity["table"],
+        "expected_category": C.expected_category(
+            lab["failure_type"], lab["scenario_variant"]
+        ),
+    }
+    classify(row)
+    row["well_formed"] = problem is None
+    if problem:  # explicit unsuccessful case: complete False, with the reason
+        return row | malformed_result(problem)
+    row["searches_mismatch"] = searches_reproduce(packet, snap)
+    if group == "fx" and d["disposition"] == "abstained":
+        row["fx_cites_ok"] = fx_abstention_cites(packet)
+    if d["disposition"] == "answered":
+        row |= completeness(packet, (entity["table"], entity["record_id"]), snap)
+    return row
+
+
 def load_split(
-    root: Path,
     split: str,
     labels_by_case: dict,
     snap: Snap,
     conflicts: C.Conflicts,
+    packets: list[dict],
+    requests: list[dict],
+    links: list[dict],
 ) -> list[dict]:
-    links = {
-        r["request_id"]: r["case_id"]
-        for r in read_jsonl(root / "evaluator" / split / "links.jsonl")
-    }
-    requests = {
-        r["request_id"]: r
-        for r in read_jsonl(root / "prepared/requests" / split / "requests.jsonl")
-    }
-    packets = read_jsonl(root / "inference" / split / "packets.jsonl")
+    """Score one split from its already-verified packets, requests and links.
+    The scored case set must be exactly the label roster of the split (every
+    label case has one request, one link and one packet), and every packet must
+    answer the request it was prepared for: same request, snapshot and cutoff.
+    Anything else is refused, never scored on a reduced set."""
+    link_of = {r["request_id"]: r["case_id"] for r in links}
+    request_of = {r["request_id"]: r for r in requests}
+    for n, p in enumerate(packets, 1):
+        req = p.get("request") if isinstance(p, dict) else None
+        if not (isinstance(req, dict) and isinstance(req.get("request_id"), str)):
+            sys.exit(f"{split}: packet on line {n} has no string request.request_id")
     ids = [p["request"]["request_id"] for p in packets]
-    if sorted(ids) != sorted(links) or set(ids) != set(requests):
+    if len(link_of) != len(links) or len(request_of) != len(requests):
+        sys.exit(f"{split}: duplicate request ids in requests or links")
+    if sorted(ids) != sorted(link_of) or set(ids) != set(request_of):
         sys.exit(f"{split}: packets, requests and links do not cover the same cases")
+    cases = sorted(link_of.values())
+    if cases != sorted(labels_by_case):
+        missing = sorted(set(labels_by_case) - set(cases))[:5]
+        extra = sorted(set(cases) - set(labels_by_case))[:5]
+        sys.exit(
+            f"{split}: scored cases differ from the label roster"
+            f" (missing {missing}, extra {extra})"
+        )
     rows = []
     for p in packets:
         rid = p["request"]["request_id"]
-        case_id = links[rid]
-        lab = labels_by_case[case_id]
-        d = p["diagnosis"]
-        ent = requests[rid]["primary_entity"]
-        group = C.group_of(
-            lab["failure_type"], lab["scenario_variant"], case_id, conflicts.verified
+        req = request_of[rid]
+        if (
+            p["request"] != req
+            or req["snapshot"] != snap.digest
+            or req["cutoff"] != CUTOFF.isoformat()
+        ):
+            sys.exit(f"{split}: packet {rid} does not answer its prepared request")
+        case_id = link_of[rid]
+        rows.append(
+            case_row(
+                split,
+                case_id,
+                labels_by_case[case_id],
+                p,
+                req["primary_entity"],
+                snap,
+                conflicts,
+            )
         )
-        row = {
-            "split": split,
-            "case_id": case_id,
-            "failure_type": lab["failure_type"],
-            "variant": lab["scenario_variant"],
-            "group": group,
-            "disposition": d["disposition"],
-            "category": d["category"],
-            "reason": d["reason"],
-            "label_conflict_with": conflicts.verified.get(case_id, []),
-            "conflict_candidate_with": conflicts.candidates.get(case_id, []),
-            "review_candidate_with": conflicts.review.get(case_id, []),
-            "entity_table": ent["table"],
-            "expected_category": C.expected_category(
-                lab["failure_type"], lab["scenario_variant"]
-            ),
-        }
-        classify(row)
-        row["searches_mismatch"] = searches_reproduce(p, snap)
-        if group == "fx" and d["disposition"] == "abstained":
-            row["fx_cites_ok"] = fx_abstention_cites(p)
-        if d["disposition"] == "answered":
-            row |= completeness(p, (ent["table"], ent["record_id"]), snap)
-        rows.append(row)
     return rows
 
 
 # ------------------------------------------------------------------ metrics
-
-
-def frac(n: int, d: int) -> dict:
-    return {"n": n, "d": d, "rate": (round(n / d, 4) if d else None)}
-
-
-def cohort_metrics(
-    rows: list[dict],
-    groups: tuple[str, ...] = C.COHORT_VIEWS["all_cases"],
-) -> dict:
-    """Metrics over the gradable in-scope cohort. Default: the headline view,
-    every such case. C.COHORT_VIEWS["sensitivity_without_verified_conflicts"]
-    leaves out the hand-verified label conflicts; the baseline reports the same
-    two views from the same module."""
-    c = [r for r in rows if r["group"] in groups]
-    answered = [r for r in c if r["disposition"] == "answered"]
-    correct = [r for r in answered if r["outcome"] == "correct"]
-    complete = [r for r in correct if r.get("complete")]
-    legit = [r for r in c if r["failure_type"] == "NO_FAILURE"]
-    coarse_ok = [
-        r
-        for r in answered
-        if is_failure(r["category"]) == (r["failure_type"] != "NO_FAILURE")
-    ]
-    return {
-        "cases": len(c),
-        "dispositions": dict(Counter(r["disposition"] for r in c)),
-        "answered": frac(len(answered), len(c)),
-        "abstained": frac(sum(r["disposition"] == "abstained" for r in c), len(c)),
-        "out_of_scope": frac(
-            sum(r["disposition"] == "out_of_scope" for r in c), len(c)
-        ),
-        "failed": frac(sum(r["disposition"] == "failed" for r in c), len(c)),
-        "answer_precision": frac(len(correct), len(answered)),
-        "category_accuracy_answered": frac(len(correct), len(answered)),
-        "failure_vs_no_failure_accuracy_answered": frac(len(coarse_ok), len(answered)),
-        "correct_and_evidence_complete": frac(len(complete), len(c)),
-        "evidence_complete_among_correct": frac(len(complete), len(correct)),
-        "evidence_complete_among_answered": frac(
-            sum(bool(r.get("complete")) for r in answered), len(answered)
-        ),
-        "false_alarms": frac(
-            sum(r.get("kind") == "false_alarm" for r in legit), len(legit)
-        ),
-        "search_counts_reproduce_among_answered": frac(
-            sum(not r["searches_mismatch"] for r in answered), len(answered)
-        ),
-        "wrong_by_kind": dict(Counter(r["kind"] for r in c if r["outcome"] == "wrong")),
-        "abstain_or_nonanswer_reasons": dict(
-            Counter(
-                f"{r['disposition']}:{r['reason']}"
-                for r in c
-                if r["disposition"] != "answered"
-            )
-        ),
-    }
-
-
-def per_label(rows: list[dict], groups: tuple[str, ...]) -> dict:
-    out: dict[str, dict] = {}
-
-    def key(r: dict) -> str:
-        return r["failure_type"] if r["failure_type"] != "NO_FAILURE" else r["variant"]
-
-    for k in sorted({key(r) for r in rows if r["group"] in groups}):
-        sub = [r for r in rows if r["group"] in groups and key(r) == k]
-        ans = [r for r in sub if r["disposition"] == "answered"]
-        cor = [r for r in ans if r["outcome"] == "correct"]
-        out[k] = {
-            "cases": len(sub),
-            "answered": len(ans),
-            "correct": len(cor),
-            "complete_correct": sum(bool(r.get("complete")) for r in cor),
-            "abstained": sum(r["disposition"] == "abstained" for r in sub),
-            "out_of_scope": sum(r["disposition"] == "out_of_scope" for r in sub),
-            "failed": sum(r["disposition"] == "failed" for r in sub),
-            "answered_categories": dict(Counter(r["category"] for r in ans)),
-        }
-    return out
-
-
-def label_key(r: dict) -> str:
-    return r["failure_type"] if r["failure_type"] != "NO_FAILURE" else r["variant"]
-
-
-def confusion(rows: list[dict], groups: tuple[str, ...]) -> dict:
-    """label -> {answered category or non-answer disposition: count}."""
-    out: dict[str, Counter] = defaultdict(Counter)
-    for r in rows:
-        if r["group"] in groups:
-            out[label_key(r)][
-                r["category"] if r["disposition"] == "answered" else r["disposition"]
-            ] += 1
-    return {k: dict(v) for k, v in sorted(out.items())}
-
-
-def all_clear_risk(rows: list[dict]) -> dict:
-    """Headline risk: failures outside the cohort that the tool answered
-    legitimate_* or no_exception, i.e. a false all-clear. Per upstream family."""
-    oos = [r for r in rows if r["group"] == "oos_failure"]
-
-    def given(r: dict) -> bool:
-        return r["disposition"] == "answered" and is_no_failure(r["category"])
-
-    return {
-        "overall": frac(sum(map(given, oos)), len(oos)),
-        "per_family": {
-            f: frac(
-                sum(given(r) for r in oos if r["failure_type"] == f),
-                sum(r["failure_type"] == f for r in oos),
-            )
-            for f in sorted({r["failure_type"] for r in oos})
-        },
-    }
 
 
 def all_metrics(rows: list[dict]) -> dict:
@@ -1335,11 +2390,11 @@ def all_metrics(rows: list[dict]) -> dict:
         ],
         "false_alarms_all_legitimate": {
             "any_legitimate": frac(
-                sum(r.get("kind") == "false_alarm" for r in legit_all), len(legit_all)
+                sum(M.is_false_alarm(r) for r in legit_all), len(legit_all)
             ),
             "in_cohort_variants_incl_fx": frac(
                 sum(
-                    r.get("kind") == "false_alarm"
+                    M.is_false_alarm(r)
                     for r in legit_all
                     if r["group"] in ("cohort", "label_conflict", "fx", "contradicted")
                 ),
@@ -1350,14 +2405,22 @@ def all_metrics(rows: list[dict]) -> dict:
             ),
             "ap_side_variants_out_of_scope": frac(
                 sum(
-                    r.get("kind") == "false_alarm"
-                    for r in legit_all
-                    if r["group"] == "oos_legit"
+                    M.is_false_alarm(r) for r in legit_all if r["group"] == "oos_legit"
                 ),
                 sum(r["group"] == "oos_legit" for r in legit_all),
             ),
         },
         "all_clear_on_out_of_scope_failures": all_clear_risk(rows),
+        "root_cause_accuracy_by_family": M.root_cause_accuracy_by(rows, "failure_type"),
+        "root_cause_accuracy_by_difficulty": M.root_cause_accuracy_by(
+            rows, "difficulty"
+        ),
+        "evidence_recall": M.evidence_recall(rows),
+        "citation_resolution": M.citation_resolution(rows),
+        "reference_integrity": M.reference_integrity(rows),
+        "monetary_correctness": M.monetary_correctness(rows),
+        "execution_reliability": M.execution_reliability(rows),
+        "false_alarms_by": M.false_alarms_by(legit_all),
         "out_of_scope_families": {
             "failure_families": {
                 "cases": sum(r["group"] == "oos_failure" for r in rows),
@@ -1541,47 +2604,138 @@ def render(m: dict) -> str:
                 f"{v['answered_categories']}"
             )
         lines.append(f"special cases: {a['special_cases']}")
+    eff = m.get("efficiency")
+    lines.append("")
+    if eff is None:
+        lines.append(f"efficiency: none ({m.get('note')})")
+    else:
+        lines.append(
+            "== efficiency (attempted cases, investigator makes no paid calls) =="
+        )
+        for name, e in eff.items():
+            lines.append(
+                f"  {name:11s} n={e['attempted']} p50={e['latency_p50_s']}s"
+                f" p95={e['latency_p95_s']}s"
+                f" throughput={e['throughput_cases_per_s']} cases/s"
+            )
+            lines.append(
+                f"    peak_rss_kib={e['peak_rss_kib']}"
+                f" cost/case={e['cost_per_attempted_case']} {e['currency']}"
+                f" cost/correct-complete={e['cost_per_correct_complete_packet']}"
+            )
     return "\n".join(lines) + "\n"
+
+
+def rerun_problem(manifest: dict) -> str | None:
+    """Why scoring must not start: the manifest has no ok rerun on the run's own
+    image (protocol integrity.require_deterministic_rerun, require_same_image_id)."""
+    r = manifest.get("rerun")
+    if not (
+        isinstance(r, dict)
+        and r.get("ok") is True
+        and r.get("image_id_matches_manifest") is True
+        and r.get("image_id") == manifest.get("image_id")
+        and all(
+            (r.get("splits") or {}).get(s, {}).get("identical") is True for s in SPLITS
+        )
+    ):
+        return "the run manifest records no identical same-image rerun"
+    return None
+
+
+def verified_snapshot_copy(root: Path, manifest: dict, directory: Path) -> Path:
+    """Read the snapshot bytes once, check them against the manifest and write
+    a private read-only copy of exactly those bytes: the snapshot that is scored
+    is the one that was verified."""
+    data = (root / "prepared/snapshot" / SNAPSHOT_FILE).read_bytes()
+    if hashlib.sha256(data).hexdigest() != manifest["snapshot_file_sha256"]:
+        sys.exit(f"{SNAPSHOT_FILE} differs from the run manifest")
+    copy = directory / SNAPSHOT_FILE
+    copy.write_bytes(data)
+    copy.chmod(0o400)
+    return copy
+
+
+def hard_gates(rows: list[dict], manifest: dict) -> dict:
+    """Release hard gates over every answered packet of every scored split."""
+    answered = [r for r in rows if r["disposition"] == "answered"]
+
+    def every(ok: Callable[[dict], bool]) -> bool:
+        return all(r["well_formed"] and ok(r) for r in answered)
+
+    return {
+        "absence_check_passed": bool(manifest.get("absence_check", {}).get("passed")),
+        "rerun_identical_same_image": rerun_problem(manifest) is None,
+        "all_answered_packets_well_formed": all(r["well_formed"] for r in answered),
+        "all_citations_resolve": every(
+            lambda r: r["cited_resolved"] == r["cited_total"]
+        ),
+        "all_calculations_exact": every(lambda r: r["calcs_exact"] == r["calcs"]),
+        "all_day_counts_exact": every(
+            lambda r: r["day_counts_exact"] == r["day_counts"]
+        ),
+    }
 
 
 def evaluate(tag: str, upstream: Path = DEFAULT_UPSTREAM) -> None:
     root = REPO / "artifacts/dev-runs" / tag
     manifest = json.loads((root / "run-manifest.json").read_text())
-    # Packets must be final: refuse if they changed since the run manifest.
-    for split in SPLITS:
-        if (
-            sha256_file(root / "inference" / split / "packets.jsonl")
-            != manifest["packets_sha256"][split]
-        ):
-            sys.exit(f"{split}: packets.jsonl differs from the run manifest")
-    snap = Snap(root / "prepared/snapshot/snapshot.sqlite")
-    rows: list[dict] = []
-    labels_by_split = {  # labels opened only here, dev splits only
-        split: {
-            r["case_id"]: r
-            for r in read_jsonl(
+    problem = rerun_problem(manifest)
+    if problem:
+        sys.exit(f"{tag}: {problem}; run `rerun` first or re-run the whole tag")
+    # Inputs must be final: refuse if any changed since the run manifest, and
+    # read them before any label is opened.
+    verify_digests(root, manifest, snapshot=False)
+    inputs = {s: read_split_inputs(root, manifest, s) for s in SPLITS}
+    with tempfile.TemporaryDirectory() as tmp:
+        snap_path = verified_snapshot_copy(root, manifest, Path(tmp))
+        snap = Snap(snap_path, manifest["snapshot_content_sha256"])
+        label_bytes = {  # labels opened only here, dev splits only
+            split: (
                 upstream / "data/benchmark" / split / "rca_ground_truth.jsonl"
-            )
+            ).read_bytes()
+            for split in SPLITS
         }
-        for split in SPLITS
-    }
-    all_labels = {c: lab for ls in labels_by_split.values() for c, lab in ls.items()}
-    conflicts = C.conflict_report(
-        all_labels, snap.con, REPO / "data/private" / tag / "key"
-    )
-    for split in SPLITS:
-        rows += load_split(root, split, labels_by_split[split], snap, conflicts)
+        labels_by_split = {
+            split: {r["case_id"]: r for r in parse_jsonl(label_bytes[split])}
+            for split in SPLITS
+        }
+        all_labels = {
+            c: lab for ls in labels_by_split.values() for c, lab in ls.items()
+        }
+        conflicts = C.conflict_report(
+            all_labels, snap.con, REPO / "data/private" / tag / "key"
+        )
+        rows: list[dict] = []
+        for split in SPLITS:
+            rows += load_split(
+                split, labels_by_split[split], snap, conflicts, *inputs[split]
+            )
+        snap.con.close()
     rows.sort(key=lambda r: (r["split"], r["case_id"]))
     metrics = {
         "tag": tag,
         "all_splits": all_metrics(rows),
         **{s: all_metrics([r for r in rows if r["split"] == s]) for s in SPLITS},
     }
+    ok = {s: metrics[s]["cohort"]["correct_and_evidence_complete"]["n"] for s in SPLITS}
+    metrics |= efficiency_block(root, manifest, ok)
+    cases_bytes = "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows).encode()
+    (root / "cases.jsonl").write_bytes(cases_bytes)
+    metrics["hard_gates"] = hard_gates(rows, manifest)
+    metrics["provenance"] = {
+        "tag": tag,
+        "code": code_commit(),
+        "protocol_sha256": sha256_file(REPO / "evaluation/protocol.toml"),
+        "snapshot_file_sha256": manifest["snapshot_file_sha256"],
+        "labels_sha256": {
+            s: hashlib.sha256(label_bytes[s]).hexdigest() for s in SPLITS
+        },
+        "verified_conflicts_sha256": sha256_file(C.VERIFIED_FILE),
+        "cases_sha256": hashlib.sha256(cases_bytes).hexdigest(),
+    }
     (root / "metrics.json").write_text(
         json.dumps(metrics, indent=2, sort_keys=True) + "\n"
-    )
-    (root / "cases.jsonl").write_text(
-        "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows)
     )
     errors = [
         r
@@ -1605,12 +2759,14 @@ def evaluate(tag: str, upstream: Path = DEFAULT_UPSTREAM) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("command", choices=("run", "evaluate"))
+    ap.add_argument("command", choices=("run", "evaluate", "rerun"))
     ap.add_argument("tag")
     ap.add_argument("--upstream", type=Path, default=DEFAULT_UPSTREAM)
     args = ap.parse_args()
     if args.command == "run":
         run(args.tag, args.upstream)
+    elif args.command == "rerun":
+        rerun(args.tag)
     else:
         evaluate(args.tag, args.upstream)
 

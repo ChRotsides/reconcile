@@ -1,6 +1,7 @@
 """Batch runner: one packet per request, sorted, atomic, never crashes on a case."""
 
 import json
+import platform
 from datetime import date
 from pathlib import Path
 
@@ -49,7 +50,11 @@ def test_one_sorted_packet_per_request(tmp_path: Path) -> None:
     packets = read_packets(tmp_path / "out")
     assert [p.request.request_id for p in packets] == ["req_a", "req_b", "req_c"]
     assert summary == {"failed": 3}
-    assert [f.name for f in (tmp_path / "out").iterdir()] == [batch.PACKETS_FILE]
+    assert {f.name for f in (tmp_path / "out").iterdir()} == {
+        batch.PACKETS_FILE,
+        batch.TIMINGS_FILE,
+        batch.STATS_FILE,
+    }
 
 
 def test_packets_match_investigate(tmp_path: Path) -> None:
@@ -124,3 +129,63 @@ def test_malformed_or_duplicate_requests_write_nothing(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="duplicate"):
         batch.run_requests(tmp_path, dup, tmp_path / "out2")
     assert not (tmp_path / "out1").exists() and not (tmp_path / "out2").exists()
+
+
+def read_timings(out: Path) -> list[dict[str, object]]:
+    lines = (out / batch.TIMINGS_FILE).read_text().splitlines()
+    return [json.loads(line) for line in lines]
+
+
+def test_packets_byte_identical_across_runs(tmp_path: Path) -> None:
+    reqs = write_requests(
+        tmp_path / "r.jsonl", request("req_b"), request("req_a"), request("req_c")
+    )
+    batch.run_requests(tmp_path, reqs, tmp_path / "out1")
+    batch.run_requests(tmp_path, reqs, tmp_path / "out2")
+    first = (tmp_path / "out1" / batch.PACKETS_FILE).read_bytes()
+    assert first == (tmp_path / "out2" / batch.PACKETS_FILE).read_bytes()
+
+
+def test_timings_cover_exactly_the_requests(tmp_path: Path) -> None:
+    reqs = write_requests(tmp_path / "r.jsonl", request("req_b"), request("req_a"))
+    batch.run_requests(tmp_path, reqs, tmp_path / "out")
+    rows = read_timings(tmp_path / "out")
+    assert [r["request_id"] for r in rows] == ["req_a", "req_b"]
+    for row in rows:
+        assert set(row) == {"request_id", "seconds"}
+        assert isinstance(row["seconds"], float) and row["seconds"] >= 0
+
+
+def test_failing_request_still_timed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(path: Path, r: InvestigationRequest) -> EvidencePacket:
+        raise RuntimeError("x")
+
+    monkeypatch.setattr("reconcile.runs.batch.investigate", boom)
+    reqs = write_requests(tmp_path / "r.jsonl", request("req_a"), request("req_b"))
+    batch.run_requests(tmp_path, reqs, tmp_path / "out")
+    assert [r["request_id"] for r in read_timings(tmp_path / "out")] == [
+        "req_a",
+        "req_b",
+    ]
+
+
+def test_run_stats_fields(tmp_path: Path) -> None:
+    reqs = write_requests(tmp_path / "r.jsonl", request("req_a"), request("req_b"))
+    batch.run_requests(tmp_path, reqs, tmp_path / "out")
+    stats = json.loads((tmp_path / "out" / batch.STATS_FILE).read_text())
+    assert set(stats) == {
+        "requests",
+        "total_seconds",
+        "peak_rss_kib",
+        "python_version",
+        "runner",
+    }
+    assert stats["requests"] == 2
+    assert isinstance(stats["total_seconds"], float) and stats["total_seconds"] >= 0
+    assert isinstance(stats["peak_rss_kib"], int) and stats["peak_rss_kib"] > 0
+    assert stats["python_version"] == platform.python_version()
+    assert stats["runner"] == batch.RUNNER
+    row_total = sum(r["seconds"] for r in read_timings(tmp_path / "out"))  # type: ignore[misc]
+    assert stats["total_seconds"] >= row_total

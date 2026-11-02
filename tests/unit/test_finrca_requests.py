@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import re
 import shutil
 import sqlite3
 from datetime import date
@@ -180,7 +181,9 @@ def test_request_id_is_not_in_case_order(env: dict[str, Path]) -> None:
     assert in_request_order != case_ids[::-1]
     ids = [link["request_id"] for link in links]
     assert ids == sorted(ids)
-    assert not any(cid[-4:] in rid for cid, rid in zip(case_ids, ids, strict=False))
+    # Opaque keyed tokens only. (A check that no 4-digit case suffix occurs in
+    # a 32-hex id fails by chance in about 1.3% of runs.)
+    assert all(re.fullmatch(r"req_[0-9a-f]{32}", rid) for rid in ids)
     assert len(set(ids)) == 30
 
 
