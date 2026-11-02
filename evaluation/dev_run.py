@@ -717,6 +717,116 @@ def delta_ok(v: View, pay: dict, debit: dict | None, shortfall: bool) -> bool:
     return result > q if shortfall else result.copy_abs() <= q
 
 
+def journal_amounts(s: Snap, source: str, kind: str) -> dict[tuple[str, str], Decimal]:
+    """Journal id -> total debit of the journal's lines of type `kind` sourced to
+    `source`: the figure a calculation compares (a journal can also carry lines
+    sourced elsewhere)."""
+    out: dict[tuple[str, str], Decimal] = {}
+    for j in s.balanced_journals(source, kind):
+        totals = journal_totals(s.journal_lines(j), source, kind)
+        if totals:
+            out[("gl_entries", j)] = totals[1]
+    return out
+
+
+def difference_within(
+    v: View,
+    calc_id: str,
+    head: list[tuple[tuple[str, str], str, Decimal]],
+    rest: dict[tuple[str, str], Decimal],
+    rest_field: str,
+    q: Decimal,
+) -> bool:
+    """`calc_id` is a `difference` whose operands are exactly `head` in order
+    (record, field, snapshot amount) followed by the `rest` records (any order,
+    field `rest_field`, snapshot amounts), whose result is recomputed as the
+    first operand minus the others, with tolerance one quantum, and that lies
+    within one quantum of zero."""
+    got = v.calculation(calc_id, "difference")
+    if got is None:
+        return False
+    ops, result, tol = got
+    n = len(head)
+    return (
+        len(ops) >= n
+        and ops[:n] == head
+        and operands_match(ops[n:], rest_field, rest)
+        and result == dsub(ops[0][2], dsum(a for _, _, a in ops[1:]))
+        and tol == q
+        and result.copy_abs() <= q
+    )
+
+
+def net_fee_ok(s: Snap, v: View, pay: dict, debit: dict) -> bool:
+    """Net-fee accounting (contract 4.3, 5): `delta` is a shortfall and
+    `unexplained` = payment - debit - the bank_fee journals sourced to the
+    debit, within one quantum."""
+    bid = debit["bank_transaction_id"]
+    head = [
+        (
+            ("payments", pay["payment_id"]),
+            "payment_amount",
+            Decimal(pay["payment_amount"]),
+        ),
+        (("bank_transactions", bid), "amount", Decimal(debit["amount"])),
+    ]
+    return delta_ok(v, pay, debit, shortfall=True) and difference_within(
+        v,
+        "unexplained",
+        head,
+        journal_amounts(s, bid, "bank_fee"),
+        "amount",
+        _quantum(pay),
+    )
+
+
+def accounted_fee_ok(s: Snap, v: View, row: dict) -> bool:
+    """Accounted bank fee (contract 5): `fee_row_minus_journals` = fee row amount
+    minus the bank_fee journals sourced to the fee row, within one quantum."""
+    bid = row["bank_transaction_id"]
+    head = [(("bank_transactions", bid), "amount", Decimal(row["amount"]))]
+    return difference_within(
+        v,
+        "fee_row_minus_journals",
+        head,
+        journal_amounts(s, bid, "bank_fee"),
+        "amount",
+        quantum(row["currency"]).amount,
+    )
+
+
+def reversal_ok(s: Snap, v: View, pay: dict, debit: dict, credit: dict) -> bool:
+    """Payment reversal (contract 5): debit = credit = the reversal journal
+    amount = the payment amount, each as a difference of exactly those two
+    records, within one quantum. The caller supplies the one posted debit and
+    the one posted reversal credit."""
+    pid = pay["payment_id"]
+    journals = journal_amounts(s, pid, "payment_reversal")
+    # ISO dates: the order is checked here, not left to the investigator
+    if len(journals) != 1 or credit["posted_date"] < debit["posted_date"]:
+        return False
+    ((jkey, jamt),) = journals.items()
+    d = (
+        ("bank_transactions", debit["bank_transaction_id"]),
+        "amount",
+        Decimal(debit["amount"]),
+    )
+    c = (
+        ("bank_transactions", credit["bank_transaction_id"]),
+        "amount",
+        Decimal(credit["amount"]),
+    )
+    j = (jkey, "amount", jamt)
+    p = (("payments", pid), "payment_amount", Decimal(pay["payment_amount"]))
+    q = _quantum(pay)
+    steps = [
+        ("debit_minus_credit", [d, c]),
+        ("credit_minus_journal", [c, j]),
+        ("journal_minus_payment", [j, p]),
+    ]
+    return all(difference_within(v, cid, h, {}, "amount", q) for cid, h in steps)
+
+
 def day_count_ok(
     v: View,
     pay: dict,
@@ -778,6 +888,7 @@ def _category_requirements(
             len(pays) == 1 and v.cites("payments", [pays[0]["payment_id"]]),
         )
         add("fee_journal", v.cites("gl_entries", s.balanced_journals(rid, "bank_fee")))
+        add("fee_calculation", row is not None and accounted_fee_ok(s, v, row))
         fee_allocs = (
             s.allocs_of_payment(pays[0]["payment_id"]) if len(pays) == 1 else []
         )
@@ -909,6 +1020,11 @@ def _category_requirements(
             if r["direction"] == "credit" and r["status"] == "posted"
         ]
         add("posted_credit", v.cites("bank_transactions", bank_ids(credits)))
+        rev = [r for r in credits if r["transaction_type"] == "payment reversal"]
+        add(
+            "reversal_calculations",
+            one_debit and len(rev) == 1 and reversal_ok(s, v, pay, debits[0], rev[0]),
+        )
         add(
             "reversal_journal",
             v.cites("gl_entries", s.balanced_journals(rid, "payment_reversal")),
@@ -926,6 +1042,10 @@ def _category_requirements(
             else []
         )
         add("fee_journals", v.cites("gl_entries", fee))
+        add(
+            "unexplained_calculation",
+            one_debit and net_fee_ok(s, v, pay, debits[0]),
+        )
         add(
             "allocations",
             bool(allocs) and v.cites("payment_allocations", alloc_ids(allocs)),
@@ -1067,16 +1187,8 @@ def allocation_amounts(s: Snap, allocs: list[dict]) -> dict[tuple[str, str], Dec
 
 
 def attributable_journal_amounts(s: Snap, p: dict) -> dict[tuple[str, str], Decimal]:
-    """Journal id -> total debit of the journal's lines of type payment sourced to
-    the payment: the figure to compare with the payment (a journal can also carry
-    lines sourced elsewhere)."""
-    pid = p["payment_id"]
-    out: dict[tuple[str, str], Decimal] = {}
-    for j in s.balanced_journals(pid, "payment"):
-        totals = journal_totals(s.journal_lines(j), pid, "payment")
-        if totals:
-            out[("gl_entries", j)] = totals[1]
-    return out
+    """The payment journals' amounts: the figure to compare with the payment."""
+    return journal_amounts(s, p["payment_id"], "payment")
 
 
 def journal_attribution_ok(v: View, p: dict) -> bool:
