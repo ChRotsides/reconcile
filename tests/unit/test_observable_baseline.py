@@ -129,3 +129,22 @@ def test_featurize_order_and_groups_do_not_depend_on_tokens(
     assert a[0] == cases
     assert a[1] == [{"x": 1.0}, {"x": 2.0}, {"x": 3.0}, {"x": 4.0}]
     assert a[2] == ["A1", "A2", "A1", "A4"]
+
+
+def test_build_rows_carry_split_and_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
+    """compare.py needs `split` and the evaluator-side `group_vendor_id`."""
+    run = _load("run")
+    monkeypatch.setattr(run.evidence, "retrieve", lambda snap, cat, table, rid: [])
+    labels = {
+        "A1": {
+            "failure_type": "NO_FAILURE",
+            "scenario_variant": "v",
+            "group_vendor_id": "vend-1",
+        }
+    }
+    conflicts = run.C.Conflicts(verified={}, candidates={}, review={})
+    [row] = run.build_rows(
+        ["A1"], [("payments", "p1")], ["NO_FAILURE"], [0.9], None, labels, conflicts
+    )
+    assert row["split"] == "validation"
+    assert row["group_vendor_id"] == "vend-1"

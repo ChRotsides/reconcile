@@ -9,9 +9,10 @@ investigator's `dev_run.py evaluate`, the classifier baseline) and feeds
 
 - primary: success = correct with complete evidence, over every case of the
   view. Abstentions, out-of-scope and failures are not successes.
-- false alarm: `kind == "false_alarm"` over the legitimate cases of the view
-  (label NO_FAILURE; the view's own groups, so FX and out-of-scope legitimate
-  variants are outside the denominator unless the view contains them).
+- false alarm: `kind == "false_alarm"` over ALL legitimate cases of the split
+  (label NO_FAILURE, any group: cohort, label_conflict, fx, oos_legit, ...),
+  as PLAN.md section 7 defines it, whatever the view. The two runs must
+  agree on that set and on every compared case's cluster.
 
 Row shapes: the investigator writes `outcome` ("correct" is a success);
 the baseline writes `correct` (it always answers). Both write `complete`.
@@ -54,13 +55,9 @@ def is_success(row: Row) -> bool:
     raise ValueError(f"{row['case_id']}: row has neither 'outcome' nor 'correct'")
 
 
-def outcomes(
-    rows: dict[str, Row], view_groups: tuple[str, ...]
-) -> dict[str, dict[str, Any]]:
+def outcomes(rows: dict[str, Row]) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for case_id, r in rows.items():
-        if r["group"] not in view_groups:
-            continue
         if r.get(CLUSTER_FIELD) is None:
             raise ValueError(f"{case_id}: missing {CLUSTER_FIELD}")
         legit = r["failure_type"] == "NO_FAILURE"
@@ -117,21 +114,26 @@ def compare(
     min_clusters: int,
 ) -> dict[str, Any]:
     groups = C.COHORT_VIEWS[view]
-    a = outcomes(_in_split(a_rows, split, "A"), groups)
-    b = outcomes(_in_split(b_rows, split, "B"), groups)
-    if a.keys() != b.keys():
+    a = outcomes(_in_split(a_rows, split, "A"))
+    b = outcomes(_in_split(b_rows, split, "B"))
+    ids = sorted(k for k in a if a[k]["group"] in groups)
+    b_ids = sorted(k for k in b if b[k]["group"] in groups)
+    if ids != b_ids:
         raise ValueError(
-            f"case sets differ in split {split!r}, view {view!r}: A has {len(a)},"
-            f" B has {len(b)}, common {len(a.keys() & b.keys())}"
+            f"case sets differ in split {split!r}, view {view!r}: A has {len(ids)},"
+            f" B has {len(b_ids)}, common {len(set(ids) & set(b_ids))}"
         )
-    for k in a:
+    legit = sorted(k for k in a if a[k]["legitimate"])
+    b_legit = sorted(k for k in b if b[k]["legitimate"])
+    if legit != b_legit:
+        raise ValueError(
+            f"legitimate case sets differ in split {split!r}: A has {len(legit)},"
+            f" B has {len(b_legit)}, common {len(set(legit) & set(b_legit))}"
+        )
+    for k in sorted(set(ids) | set(legit)):
         for f in ("group", "cluster"):
             if a[k][f] != b[k][f]:
                 raise ValueError(f"{k}: {f} differs: {a[k][f]!r} vs {b[k][f]!r}")
-        if a[k]["legitimate"] != b[k]["legitimate"]:
-            raise ValueError(f"{k}: legitimate flag differs between the runs")
-    ids = sorted(a)
-    legit = [k for k in ids if a[k]["legitimate"]]
     args = (seed, reps, alpha, min_clusters)
     return {
         "split": split,
@@ -139,7 +141,7 @@ def compare(
         "groups": list(groups),
         "n_cases": len(ids),
         "n_clusters": len({a[k]["cluster"] for k in ids}),
-        "n_legitimate_cases": len(legit),
+        "n_legitimate_cases": len(legit),  # all of the split, not only the view
         "method": paired.METHOD,
         "seed": seed,
         "reps": reps,
@@ -197,7 +199,7 @@ def main() -> None:
         f" ({result['method']}, seed {ns.seed}, reps {ns.reps}, alpha {ns.alpha})"
     )
     print("primary (correct with complete evidence):", _fmt(result["primary_success"]))
-    print("false alarms (legitimate cases):        ", _fmt(result["false_alarm"]))
+    print("false alarms (all legitimate cases):    ", _fmt(result["false_alarm"]))
 
 
 if __name__ == "__main__":

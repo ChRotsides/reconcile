@@ -76,10 +76,21 @@ def test_success_and_false_alarm_both_shapes() -> None:
             inv("c6", "v2", "correct", True, group="oos_failure"),  # outside view
         ]
     )
-    o = compare.outcomes(a, ("cohort",))
-    assert set(o) == {"c1", "c2", "c3", "c4", "c5"}
-    assert [o[k]["success"] for k in sorted(o)] == [True, False, False, False, False]
-    assert [o[k]["false_alarm"] for k in sorted(o)] == [False] * 3 + [True, False]
+    o = compare.outcomes(a)
+    assert set(o) == {"c1", "c2", "c3", "c4", "c5", "c6"}
+    assert [o[k]["success"] for k in sorted(o)] == [
+        True,
+        False,
+        False,
+        False,
+        False,
+        True,
+    ]
+    assert [o[k]["false_alarm"] for k in sorted(o)] == [False] * 3 + [
+        True,
+        False,
+        False,
+    ]
     b = by_id(
         [
             base("c1", "v1", True, True),
@@ -89,19 +100,18 @@ def test_success_and_false_alarm_both_shapes() -> None:
             base("c5", "v2", True, True, legit=True),
         ]
     )
-    o = compare.outcomes(b, ("cohort",))
+    o = compare.outcomes(b)
     assert [o[k]["success"] for k in sorted(o)] == [True, False, False, False, True]
     assert [o[k]["false_alarm"] for k in sorted(o)] == [False] * 3 + [True, False]
     # a false_alarm kind on a failure-labelled case is not a false alarm
     odd = by_id([base("x", "v", False, False, kind="false_alarm")])
-    assert not compare.outcomes(odd, ("cohort",))["x"]["false_alarm"]
+    assert not compare.outcomes(odd)["x"]["false_alarm"]
 
 
 def test_missing_cluster_refused() -> None:
     with pytest.raises(ValueError, match="c2: missing group_vendor_id"):
         compare.outcomes(
-            by_id([inv("c1", "v", "correct", True), inv("c2", None, "correct", True)]),
-            ("cohort",),
+            by_id([inv("c1", "v", "correct", True), inv("c2", None, "correct", True)])
         )
 
 
@@ -213,3 +223,44 @@ def test_load_round_trip_and_duplicates(tmp_path: Path) -> None:
     p.write_text(json.dumps(toy()[0][0]) + "\n" + json.dumps(toy()[0][0]) + "\n")
     with pytest.raises(ValueError, match="duplicate"):
         compare.load(p)
+
+
+def test_false_alarm_is_over_all_legitimate_cases_of_the_split() -> None:
+    a, b = toy()
+    # legitimate cases outside the view: an FX one (A false alarm, B right) and
+    # an out-of-scope legitimate one (B false alarm, A right); a train one is ignored
+    a.append(inv("f1", "v3", "wrong", True, legit=True, kind="false_alarm", group="fx"))
+    b.append(base("f1", "v3", True, True, legit=True, group="fx"))
+    a.append(inv("o1", "v4", "correct", True, legit=True, group="oos_legit"))
+    b.append(
+        base(
+            "o1", "v4", False, False, legit=True, kind="false_alarm", group="oos_legit"
+        )
+    )
+    extra = inv("t1", "v9", "wrong", True, legit=True, kind="false_alarm")
+    extra["split"] = "train"
+    a.append(extra)
+    r = run(a, b)
+    assert r["n_cases"] == 6  # primary stays over the view
+    assert r["primary_success"]["a"]["denominator"] == 6
+    assert r["n_legitimate_cases"] == 5
+    f = r["false_alarm"]
+    # A: c5, f1 = 2/5; B: c4 c5 o1 = 3/5; only_a f1, only_b c4 o1.
+    assert f["a"] == {"numerator": 2, "denominator": 5}
+    assert f["b"] == {"numerator": 3, "denominator": 5}
+    assert (f["paired_counts"]["only_a"], f["paired_counts"]["only_b"]) == (1, 2)
+    # the sensitivity view changes the primary cases, not the false-alarm set
+    s = run(a, b, view="sensitivity_without_verified_conflicts")
+    assert s["false_alarm"]["a"]["denominator"] == 5
+
+
+def test_legitimate_sets_or_outside_view_clusters_must_agree() -> None:
+    a, b = toy()
+    a.append(inv("f1", "v3", "correct", True, legit=True, group="fx"))
+    with pytest.raises(ValueError, match="legitimate case sets differ"):
+        run(a, b)
+    b.append(base("f1", "v3", True, True, legit=True, group="fx"))
+    run(a, b)
+    b[-1]["group_vendor_id"] = "other"
+    with pytest.raises(ValueError, match="f1: cluster differs"):
+        run(a, b)

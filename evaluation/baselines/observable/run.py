@@ -229,10 +229,12 @@ def build_rows(
         cat = category_of(p)
         reqs = evidence.retrieve(snap, cat, table, rid)
         row = {
+            "split": "validation",
             "case_id": case_id,
             "failure_type": lab["failure_type"],
             "variant": lab["scenario_variant"],
             "difficulty": lab.get("difficulty"),
+            "group_vendor_id": lab.get("group_vendor_id"),
             "group": group,
             "entity_table": table,
             "predicted": p,
