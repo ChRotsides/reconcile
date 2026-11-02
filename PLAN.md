@@ -400,7 +400,7 @@ Map required evidence to the audited evaluator. For legitimate cases lacking a n
 | Coverage and abstention | Answered and abstained fractions of all attempted cases |
 | Root-cause accuracy | Exact supported category, broken down by family/difficulty |
 | Evidence recall and citation resolution | Recall: evidence-contract requirement items met / required items. Citation resolution: cited records that exist in the snapshot with the recorded values / cited records. Declare empty-set conventions. (Changed on 2026-11-02 from record-set precision, "correct required citations / cited records": the contract states requirements as items, and it allows context citations that this formula would count as errors.) |
-| Claim support | Unsupported or ungradable factual claims / emitted claims; citation presence alone is insufficient |
+| Claim support | Unsupported or ungradable factual claims / emitted claims; citation presence alone is insufficient. (M3 measures only reference and calculation integrity: findings whose citations resolve and whose calculations recompute. Checking that each finding's assertion is true is carried to M4, before any model-written claim is scored.) |
 | False-alarm rate | Legitimate cases diagnosed as failures / all legitimate cases |
 | Monetary correctness | Exact validated calculations / reported calculations, alongside calculation coverage |
 | Scope handling | Unsupported classes deferred versus incorrectly called legitimate or in scope |
