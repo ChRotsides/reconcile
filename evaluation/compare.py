@@ -39,37 +39,41 @@ CLUSTER_FIELD = "group_vendor_id"
 Row = dict[str, Any]
 
 
-def load(path: str | Path) -> dict[str, Row]:
+def load(data: bytes, name: str) -> dict[str, Row]:
+    """Parse cases.jsonl rows from bytes already read (and verified) by the caller."""
     rows: dict[str, Row] = {}
-    with Path(path).open(encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            if row["case_id"] in rows:
-                raise ValueError(f"{path}: duplicate case_id {row['case_id']}")
-            rows[row["case_id"]] = row
+    for line in data.decode("utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row["case_id"] in rows:
+            raise ValueError(f"{name}: duplicate case_id {row['case_id']}")
+        rows[row["case_id"]] = row
     return rows
 
 
-def sha256_file(path: str | Path) -> str:
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 def check_inputs(
-    a_cases: str | Path,
-    b_cases: str | Path,
-    a_metrics: dict[str, Any],
-    manifest: dict[str, Any],
+    a_cases: bytes,
+    b_cases: bytes,
+    b_name: str,
+    metrics_bytes: bytes,
+    manifest_bytes: bytes,
     configuration: str,
 ) -> dict[str, Any]:
     """Refuse unless the two cases files are the ones the investigator's
     metrics.json and the baseline's run-manifest.json recorded; return the
-    provenance to carry into the comparison."""
+    provenance to carry into the comparison. Every input is read once by the
+    caller; the digests are of the same bytes the rows are parsed from."""
+    a_metrics = json.loads(metrics_bytes)
+    manifest = json.loads(manifest_bytes)
     prov = a_metrics.get("provenance")
     if not prov or not prov.get("cases_sha256"):
         raise ValueError("investigator metrics have no provenance.cases_sha256")
-    a_sha, b_sha = sha256_file(a_cases), sha256_file(b_cases)
+    a_sha, b_sha = sha256_bytes(a_cases), sha256_bytes(b_cases)
     if a_sha != prov["cases_sha256"]:
         raise ValueError(
             "investigator cases file does not match metrics provenance.cases_sha256"
@@ -77,9 +81,9 @@ def check_inputs(
     entry = manifest.get("configurations", {}).get(configuration)
     if entry is None:
         raise ValueError(f"baseline manifest has no configuration {configuration!r}")
-    if Path(b_cases).name != entry["cases_file"]:
+    if b_name != entry["cases_file"]:
         raise ValueError(
-            f"baseline file is {Path(b_cases).name!r}, manifest says"
+            f"baseline file is {b_name!r}, manifest says"
             f" {entry['cases_file']!r} for {configuration!r}"
         )
     if b_sha != entry["cases_sha256"]:
@@ -91,6 +95,8 @@ def check_inputs(
         "configuration": configuration,
         "a_sha256": a_sha,
         "b_sha256": b_sha,
+        "investigator_metrics_sha256": sha256_bytes(metrics_bytes),
+        "baseline_manifest_sha256": sha256_bytes(manifest_bytes),
         "investigator_provenance": prov,
         "investigator_hard_gates": a_metrics.get("hard_gates"),
         "baseline_system": manifest.get("system"),
@@ -238,16 +244,19 @@ def main() -> None:
     p.add_argument("--out", required=True)
     ns = p.parse_args()
     try:
+        a_bytes = Path(ns.a_cases).read_bytes()
+        b_bytes = Path(ns.b_cases).read_bytes()
         carried = check_inputs(
-            ns.a_cases,
-            ns.b_cases,
-            json.loads(Path(ns.investigator_metrics).read_text(encoding="utf-8")),
-            json.loads(Path(ns.baseline_manifest).read_text(encoding="utf-8")),
+            a_bytes,
+            b_bytes,
+            Path(ns.b_cases).name,
+            Path(ns.investigator_metrics).read_bytes(),
+            Path(ns.baseline_manifest).read_bytes(),
             ns.configuration,
         )
         result = compare(
-            load(ns.a_cases),
-            load(ns.b_cases),
+            load(a_bytes, ns.a_cases),
+            load(b_bytes, ns.b_cases),
             ns.split,
             ns.view,
             ns.seed,

@@ -220,12 +220,11 @@ def test_missing_split_refused() -> None:
 
 
 def test_load_round_trip_and_duplicates(tmp_path: Path) -> None:
-    p = tmp_path / "cases.jsonl"
-    p.write_text("\n".join(json.dumps(r) for r in toy()[0]) + "\n\n")
-    assert sorted(compare.load(p)) == ["c1", "c2", "c3", "c4", "c5", "c6"]
-    p.write_text(json.dumps(toy()[0][0]) + "\n" + json.dumps(toy()[0][0]) + "\n")
+    data = ("\n".join(json.dumps(r) for r in toy()[0]) + "\n\n").encode()
+    assert sorted(compare.load(data, "x")) == ["c1", "c2", "c3", "c4", "c5", "c6"]
+    dup = (json.dumps(toy()[0][0]) + "\n" + json.dumps(toy()[0][0]) + "\n").encode()
     with pytest.raises(ValueError, match="duplicate"):
-        compare.load(p)
+        compare.load(dup, "x")
 
 
 def test_false_alarm_is_over_all_legitimate_cases_of_the_split() -> None:
@@ -330,7 +329,19 @@ def test_false_alarm_is_group_independent() -> None:
 
 def _write(path: Path, text: str) -> str:
     path.write_text(text)
-    return str(compare.sha256_file(path))
+    return str(compare.sha256_bytes(path.read_bytes()))
+
+
+def _check(a: Path, b: Path, metrics: Any, manifest: Any, cfg: str) -> Any:
+    """check_inputs as main() calls it: bytes of each input."""
+    return compare.check_inputs(
+        a.read_bytes(),
+        b.read_bytes(),
+        b.name,
+        json.dumps(metrics).encode(),
+        json.dumps(manifest).encode(),
+        cfg,
+    )
 
 
 def test_check_inputs_binds_files_to_recorded_digests(tmp_path: Path) -> None:
@@ -351,11 +362,15 @@ def test_check_inputs_binds_files_to_recorded_digests(tmp_path: Path) -> None:
             }
         },
     }
-    got = compare.check_inputs(a, b, metrics, manifest, "threshold_0.85")
+    got = _check(a, b, metrics, manifest, "threshold_0.85")
     assert got == {
         "configuration": "threshold_0.85",
         "a_sha256": a_sha,
         "b_sha256": b_sha,
+        "investigator_metrics_sha256": compare.sha256_bytes(
+            json.dumps(metrics).encode()
+        ),
+        "baseline_manifest_sha256": compare.sha256_bytes(json.dumps(manifest).encode()),
         "investigator_provenance": prov,
         "investigator_hard_gates": gates,
         "baseline_system": "sys",
@@ -363,7 +378,7 @@ def test_check_inputs_binds_files_to_recorded_digests(tmp_path: Path) -> None:
         "abstention_threshold": 0.85,
     }
     with pytest.raises(ValueError, match="investigator cases file"):
-        compare.check_inputs(
+        _check(
             a,
             b,
             {"provenance": prov | {"cases_sha256": "x"}},
@@ -371,22 +386,95 @@ def test_check_inputs_binds_files_to_recorded_digests(tmp_path: Path) -> None:
             "threshold_0.85",
         )
     with pytest.raises(ValueError, match="no provenance"):
-        compare.check_inputs(a, b, {}, manifest, "threshold_0.85")
+        _check(a, b, {}, manifest, "threshold_0.85")
     bad = json.loads(json.dumps(manifest))
     bad["configurations"]["threshold_0.85"]["cases_sha256"] = "x"
     with pytest.raises(ValueError, match="baseline cases file"):
-        compare.check_inputs(a, b, metrics, bad, "threshold_0.85")
+        _check(a, b, metrics, bad, "threshold_0.85")
     bad = json.loads(json.dumps(manifest))
     bad["configurations"]["threshold_0.85"]["cases_file"] = "cases.jsonl"
     with pytest.raises(ValueError, match="manifest says"):
-        compare.check_inputs(a, b, metrics, bad, "threshold_0.85")
+        _check(a, b, metrics, bad, "threshold_0.85")
     with pytest.raises(ValueError, match="no configuration"):
-        compare.check_inputs(a, b, metrics, manifest, "answer_all")
+        _check(a, b, metrics, manifest, "answer_all")
 
 
-def test_sha256_file(tmp_path: Path) -> None:
-    p = tmp_path / "x"
-    p.write_bytes(b"abc")
-    assert compare.sha256_file(p) == (
+def _to_bytes(rows: list[Row]) -> bytes:
+    return ("\n".join(json.dumps(r) for r in rows) + "\n").encode()
+
+
+def test_main_scores_the_verified_bytes_and_reads_each_input_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    good_a, good_b = toy()
+    a_bytes, b_bytes = _to_bytes(good_a), _to_bytes(good_b)
+    a, b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    a.write_bytes(a_bytes)
+    b.write_bytes(b_bytes)
+    metrics = tmp_path / "metrics.json"
+    manifest = tmp_path / "run-manifest.json"
+    metrics.write_text(
+        json.dumps({"provenance": {"cases_sha256": compare.sha256_bytes(a_bytes)}})
+    )
+    manifest.write_text(
+        json.dumps(
+            {
+                "configurations": {
+                    "c": {
+                        "cases_file": "b.jsonl",
+                        "cases_sha256": compare.sha256_bytes(b_bytes),
+                    }
+                }
+            }
+        )
+    )
+    reads: list[str] = []
+    real = Path.read_bytes
+
+    def read_once_then_swap(self: Path) -> bytes:
+        reads.append(self.name)
+        data = real(self)
+        if self.suffix == ".jsonl":  # a concurrent writer replaces the file
+            self.write_bytes(_to_bytes(good_a[:1]))
+        return data
+
+    monkeypatch.setattr(Path, "read_bytes", read_once_then_swap)
+    out = tmp_path / "out.json"
+    argv = [
+        "compare",
+        str(a),
+        str(b),
+        "--split=validation",
+        "--configuration=c",
+        f"--investigator-metrics={metrics}",
+        f"--baseline-manifest={manifest}",
+        "--view=all_cases",
+        "--seed=1",
+        "--reps=10",
+        "--alpha=0.05",
+        "--min-clusters=2",
+        f"--out={out}",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    compare.main()
+    assert sorted(reads) == sorted(
+        ["a.jsonl", "b.jsonl", "metrics.json", "run-manifest.json"]
+    )
+    res = json.loads(out.read_text())
+    assert res["n_cases"] == len(good_a)  # the verified rows, not the replacement
+    assert res["investigator_metrics_sha256"] == compare.sha256_bytes(
+        metrics.read_bytes()
+    )
+    assert res["baseline_manifest_sha256"] == compare.sha256_bytes(
+        manifest.read_bytes()
+    )
+    # Digest mismatch on the (now replaced) file still refuses.
+    monkeypatch.setattr(Path, "read_bytes", real)
+    with pytest.raises(SystemExit, match="does not match"):
+        compare.main()
+
+
+def test_sha256_bytes() -> None:
+    assert compare.sha256_bytes(b"abc") == (
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     )
