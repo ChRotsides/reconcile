@@ -122,13 +122,14 @@ Reported, not part of the decision rule: baseline `threshold_0.85` against `answ
 
 ## 12. Integrity and sealed-run order
 
-The run records: code commit, protocol SHA-256, image id, snapshot content SHA-256, requests SHA-256, packets SHA-256, timings SHA-256 and run-stats SHA-256. Order:
+The investigator run manifest records the code commit, image id, absence-check result, and the SHA-256 of the snapshot file, each split's requests, links, packets, timings and run stats, and the same-image rerun result. The scorer's `metrics.json` records the protocol SHA-256, label and conflict-file digests, the `cases.jsonl` digest and the hard gates. The baseline's `run-manifest.json` records its model, each configuration's cases file and digest, and the digest of its predictions file, written before that split's links and labels are read. `evaluation/dev_run.py run` already follows this order for development splits:
 
 1. Tag and digest the protocol.
-2. Prepare the sealed inputs (a new key; no labels).
-3. Run inference once; record the packet, timing and stats digests.
-4. Rerun inference on the run's own image (`require_same_image_id`) and require identical packet digests (`require_deterministic_rerun`). A rerun on a different image is a failure, not a note: the M3 development rerun `m3-dev-1/rerun-1.json` ran on a rebuilt shared tag and is therefore not a valid integrity check.
-5. Only then open the sealed labels and score.
+2. Prepare the inputs (a new key; no labels) and run the in-container absence check.
+3. Run inference once; record every input and output digest.
+4. Verify the recorded bytes, rerun inference on the run's own image (`require_same_image_id`) and require identical packet digests (`require_deterministic_rerun`). A rerun on a different image is a failure, not a note.
+5. Only then open the labels and score, from a private copy of the verified snapshot; `evaluate` refuses a manifest without a passing same-image rerun.
+6. Compare each baseline configuration with `compare.py` (bound to the scorer's `cases.jsonl` digest and the baseline manifest) and apply `decide.py`, which fails a release verdict if any hard gate fails.
 
 **What M7 still has to implement.** The tooling does not do this today and refuses the sealed split on purpose: `src/reconcile/adapters/finrca_requests.py` refuses `challenge_test` before touching any file, and `evaluation/dev_run.py` lists only `train` and `validation` and never opens the other directories. M7 must add an explicit unlock bound to the tagged protocol (for example, a check that the protocol SHA-256 and the packet digests are recorded before the label files are readable). That unlock does not exist yet and must be built, reviewed and tested before the sealed run.
 
