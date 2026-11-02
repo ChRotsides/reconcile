@@ -438,7 +438,7 @@ def test_a_search_with_an_extra_restriction_is_not_the_required_search(
         p = copy.deepcopy(packet)
         p["evidence"][i]["search"]["predicate"] += " AND 1=0"
         result = check(p, snap)
-        assert result["searches_mismatch"] == []  # it reproduces
+        assert result["searches_mismatch"] == [f"{e['evidence_id']}:unrecognised"]
         assert not result["complete"], e["evidence_id"]
 
 
@@ -467,7 +467,7 @@ def test_a_malformed_search_is_invalid_evidence_not_a_crash(
     packet, snap = packets["f12_payment_missing_from_bank"]
     p = copy.deepcopy(packet)
     p["evidence"].append(search_item(table, predicate, 0))
-    assert D.searches_reproduce(p, snap) == ["search_extra:malformed"]
+    assert D.searches_reproduce(p, snap) == ["search_extra:unrecognised"]
     result = check(p, snap)
     assert not result["complete"] and "searches_reproduce" in result["missing"]
     assert snap.q("SELECT COUNT(*) AS n FROM payments")[0]["n"] > 0
