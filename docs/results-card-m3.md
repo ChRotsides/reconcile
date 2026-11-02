@@ -2,13 +2,19 @@
 
 **Development data only (FinRCA `validation` split, synthetic benchmark). The sealed comparison has not been run.** Nothing here is evidence for the claim in `docs/evaluation-protocol.md`: the investigator's rules and evidence contract were partly tuned on these labels, and the baseline was selected among 15 candidates on this split. The numbers exercise the pipeline and the decision rule. Benchmark results, practitioner estimates and our own measurements are different kinds of evidence; only benchmark-style development figures appear here.
 
-Sources (untracked artifacts): investigator `artifacts/dev-runs/m3-dev-1/` (`metrics.json`, `report.txt`, `cases.jsonl`, `rerun-1.json`); baseline `artifacts/baselines/obs-m3-2/` (`metrics.json`, `cases.jsonl`, `cases_threshold_0.85.jsonl`); comparisons `artifacts/compare/m3-val-protocol-answer_all.json`, `m3-val-protocol-threshold_0.85.json`; decision `artifacts/compare/m3-val-decision.json`. Per-family and per-difficulty rows for the baseline's `threshold_0.85` configuration, and the sensitivity figures of the two baseline configurations, were counted from the `cases` files with the same success definition as `evaluation/compare.py` (they are not stored in `metrics.json`).
+Sources (untracked artifacts): investigator `artifacts/dev-runs/m3-dev-5/` (`metrics.json`, `report.txt`, `cases.jsonl`, `rerun-1.json`, `run-manifest.json`); baseline `artifacts/baselines/obs-m3-3/` (`metrics.json`, `cases.jsonl`, `cases_threshold_0.85.jsonl`); comparisons and decision `artifacts/rehearsal-final/` (`cmp_answer_all.json`, `cmp_threshold_0.85.json`, `decision.json`). The comparison files record their input digests, and `sha256sum` of the three case files matches them: `m3-dev-5/cases.jsonl` 7f118ae2..., `obs-m3-3/cases.jsonl` 22837545..., `obs-m3-3/cases_threshold_0.85.jsonl` df688ca4.... Per-family and per-difficulty rows for the baseline's `threshold_0.85` configuration, and the sensitivity figures of the two baseline configurations, were counted from the `cases` files with the same success definition as `evaluation/compare.py` (they are not stored in `metrics.json`).
 
 ## 1. Cases
 
-Validation: 416 requests. Headline view `all_cases` (cohort plus 1 label conflict): 123 cases in 55 vendor clusters. Sensitivity view (without the 1 hand-verified label conflict, RCA_002212): 122 cases. Legitimate cases of the split (false-alarm denominator): 139 in 59 clusters. FX slice: 9. Out-of-scope failures: 225. Investigator run: tag `m3-dev-1`, policy `evidence-contract-0.5`, cutoff 2026-06-30, source revision `76c93ec`, snapshot content `2a751d28...c8d9`. Baseline: tag `obs-m3-2`, selected `hgb lr=0.05 depth=3 l2=1.0`, seed 20261101, 77 features, threshold 0.85 chosen by the declared train cross-validation rule.
+Validation: 416 requests. Headline view `all_cases` (cohort plus 1 label conflict): 123 cases in 55 vendor clusters. Sensitivity view (without the 1 hand-verified label conflict, RCA_002212): 122 cases. Legitimate cases of the split (false-alarm denominator): 139 in 59 clusters. FX slice: 9. Out-of-scope failures: 225.
+
+Investigator run (from `run-manifest.json`): tag `m3-dev-5`, policy `evidence-contract-0.5`, cutoff 2026-06-30, source revision `76c93ec`, code commit `3adaa58` (branch `m3-protocol`), snapshot content `87af113c...e5ac`.
+
+Baseline: tag `obs-m3-3`, selected `hgb lr=0.05 depth=3 l2=1.0`, seed 20261101, 77 features, threshold 0.85 chosen by the declared train cross-validation rule. `obs-m3-3` predicts from operational inputs only (commit `6b274a5`). Its `cases.jsonl` and `cases_threshold_0.85.jsonl` are byte-identical to `obs-m3-2`'s (`cmp`), and its `metrics.json` differs from `obs-m3-2`'s only in `command`, `efficiency`, `investigator_validation`, `seconds` and `tag`.
 
 ## 2. Quality on validation (counts are numerator/denominator)
+
+"Evidence-complete" for the investigator requires the packet audit and the semantic calculation checks to pass (section 8).
 
 | Measure | Investigator | Baseline `answer_all` | Baseline `threshold_0.85` |
 |---|---:|---:|---:|
@@ -23,6 +29,8 @@ Validation: 416 requests. Headline view `all_cases` (cohort plus 1 label conflic
 | Out-of-scope all-clears | 0/225 | 6/225 = 0.027 | 0/225 |
 | Abstained / out-of-scope / failed (headline) | 1 / 0 / 0 | 0 / 0 / 0 | 26 / 0 / 0 |
 | FX slice | 9/9 correct abstentions | 0/9 abstained (all 9 answered `legitimate_fx_settlement`) | same as `answer_all` |
+
+The investigator's 0/139 is an observed count, not a guarantee about rates.
 
 Baseline evidence completeness is a relaxed record-availability upper bound, not a packet check, so the baseline's "complete" column favours it. The baseline's `answer_all` also has 111/123 answered cases evidence-complete in the sense of `evidence_complete_among_answered` (which includes wrong answers); the figures above use correct-and-complete.
 
@@ -43,36 +51,38 @@ Baseline evidence completeness is a relaxed record-availability upper bound, not
 | medium | 70 / 70 / 67 | 70 / 70 / 67 | 70 / 64 / 64 |
 | hard | 25 / 25 / 25 | 25 / 25 / 25 | 25 / 25 / 25 |
 
-The investigator's 4 misses are the abstention on RCA_002212 (the verified label conflict) and 3 legitimate cases it answered with the wrong legitimate variant (`wrong_legit_variant` 3; of which `legitimate_weekend_clearing` 3 of 9 are not correct). The baseline's `answer_all` misses (14) are 8 false alarms, 1 wrong failure class and 5 wrong legitimate variants; 7 of its 8 cohort false alarms are legitimate batch payments called an F08 approval failure (`docs/baseline-observable.md` section 3).
+The investigator's 4 misses are the abstention on RCA_002212 (the verified label conflict, reason `payment_journal_amount_differs`) and 3 legitimate cases it answered with the wrong legitimate variant (`wrong_legit_variant` 3): all three are `legitimate_weekend_clearing` answered `legitimate_batch_payment`, so 6 of 9 weekend-clearing cases are correct. The baseline's `answer_all` misses (14) are 8 false alarms, 1 wrong failure class and 5 wrong legitimate variants. All 8 of its cohort false alarms are called `F08_APPROVAL_WORKFLOW_FAILURE`: 7 on `legitimate_batch_payment` and 1 on `legitimate_weekend_clearing` (counted from `obs-m3-3/cases.jsonl`; see `docs/baseline-observable.md` section 3).
 
 ## 3. Investigator supporting metrics (validation, answered cohort cases)
 
 | Metric | Value |
 |---|---:|
-| Evidence recall (requirement items met) | 1361/1361 = 1.000 |
+| Evidence recall (requirement items met) | 1385/1385 = 1.000 |
 | Citation resolution | 805/805 = 1.000 |
-| Claim support: unsupported / emitted | 0/485 = 0.000 |
+| Reference integrity: valid references / emitted findings | 485/485 = 1.000 (invalid 0/485) |
 | Monetary correctness: exact / reported calculations | 491/491 = 1.000 |
 | Calculation coverage (answered cases with a calculation) | 106/122 = 0.869 |
 | Execution reliability (all 416 attempted): failed / time-limit abstentions / row-limit abstentions | 0/416, 0/416, 0/416 |
+
+**Reference integrity** (called claim support before the M3 review) checks that a finding's evidence ids are in the packet and resolve, and that its calculations and day counts exist and validate. It does not check whether the finding's assertion is true. Predicate-level claim checking is not implemented and is carried to M4 (`docs/evaluation-protocol.md`).
 
 A rate of 1.000 on a development set the rules were written against is not a measure of real-world reliability. Zero observed errors does not establish zero risk.
 
 ## 4. Efficiency
 
-| | Investigator (validation, 416 cases) | Baseline (`obs-m3-2`) |
+| | Investigator (validation, 416 cases) | Baseline (`obs-m3-3`) |
 |---|---:|---:|
-| Latency p50 (nearest rank) | 0.00113 s | 0.0729 s |
-| Latency p95 (nearest rank) | 0.00730 s | 0.0745 s |
-| Throughput | 409.2 cases/s | 15.3 cases/s |
-| Peak RSS | 28680 KiB (process; all splits 44452 KiB) | 330112 KiB (whole script process, including the grid search) |
+| Latency p50 (nearest rank) | 0.00107 s | 0.0529 s |
+| Latency p95 (nearest rank) | 0.00670 s | 0.0739 s |
+| Throughput | 449.6 cases/s | 18.1 cases/s |
+| Peak RSS | 28668 KiB (process; all splits 42940 KiB) | 330448 KiB (whole script process, including the grid search) |
 | Cost | 0 USD (no paid calls) | 0 USD |
 
-**These latencies are not comparable one-to-one.** The investigator figure is end-to-end per case inside the network-less container: retrieval and packet construction over the snapshot. The baseline figure is one single-row `predict_proba` call on the fitted model with the features already extracted, so it excludes feature extraction and training; its training fit took 2.404 s for the selected model and the whole script took 239.2 s including the 15-candidate grid. Peak RSS is process-wide and not a per-case figure; the two processes also do different work.
+**These latencies are not comparable one-to-one.** The investigator figure is end-to-end per case inside the network-less container: retrieval and packet construction over the snapshot. The baseline figure is one single-row `predict_proba` call on the fitted model with the features already extracted, so it excludes feature extraction and training; its training fit took 2.283 s for the selected model and the whole script took 210.0 s including the 15-candidate grid. Peak RSS is process-wide and not a per-case figure; the two processes also do different work. Timings vary between runs: `obs-m3-2`, with identical quality figures, recorded a baseline p50 of 0.0729 s.
 
 ## 5. Paired comparisons (investigator minus baseline, headline view, validation)
 
-Method `cluster_percentile_bootstrap`, seed 20261102, 10000 replicates, alpha 0.02 (nominal 98% interval), vendor clusters.
+Protocol statistics (`evaluation/protocol.toml`): method `cluster_percentile_bootstrap`, seed 20261102, 10000 replicates, alpha 0.02 (nominal 98% interval), vendor clusters, minimum 30 clusters (`too_few_clusters: false` in both files; 55 and 59 clusters).
 
 | Comparison | Counts | Difference | 98% interval |
 |---|---|---:|---|
@@ -81,15 +91,29 @@ Method `cluster_percentile_bootstrap`, seed 20261102, 10000 replicates, alpha 0.
 | False alarms vs `answer_all` | 139 legitimate cases, 59 clusters; only investigator 0, only baseline 25 | -0.1799 (-25/139) | [-0.2500, -0.0957] |
 | False alarms vs `threshold_0.85` | 139 legitimate cases, 59 clusters; only investigator 0, only baseline 3 | -0.0216 (-3/139) | [-0.0526, 0.0000] |
 
+The false-alarm criterion is "no observed increase": an observed-sample engineering rule, not a statistical non-inferiority claim, and its interval is descriptive.
+
 ## 6. Dress-rehearsal verdict
 
-`evaluation/decide.py` on these four comparisons (`artifacts/compare/m3-val-decision.json`): all four checks `pass`, verdict `holds`. Two facts matter for reading it:
+`evaluation/decide.py` on these four comparisons (`artifacts/rehearsal-final/decision.json`, `mode: rehearsal`, protocol version 1): all four checks `pass`, verdict `holds`. The false-alarm checks are labelled "no observed increase (descriptive interval)". Two facts matter for reading it:
 
-- The false-alarm upper bound against `threshold_0.85` is exactly 0.0000, which the rule accepts (`> 0` fails). Three baseline false alarms in total is thin; one different vendor cluster in the bootstrap could move the bound.
-- **This is a rehearsal of the pipeline, not a result.** Validation is development data: the investigator's rules were partly tuned on it, and the baseline was selected on it. The verdict on the sealed split could differ in either direction, and with few clusters it may be `not_established`. The sealed cohort size and cluster count are unknown.
+- The false-alarm upper bound against `threshold_0.85` is exactly 0.0000, which the rule accepts (a bound above 0 fails). Three baseline false alarms in total is thin; one different vendor cluster in the bootstrap could move the bound.
+- **This is a rehearsal of the pipeline, not a result.** Validation is development data: the investigator's rules were partly tuned on it, and the baseline was selected on it. The verdict on the sealed split could differ in either direction, and with fewer than 30 clusters a check would be `not_established` (`docs/evaluation-protocol.md`). The sealed cohort size and cluster count are unknown.
 
 ## 7. Reproducibility
 
-- **Investigator rerun.** `artifacts/dev-runs/m3-dev-1/rerun-1.json`: `identical: true`; train packets digest `1739e5a4...89af2d4` and validation packets digest `9ee11726...467b62` both equal the manifest's digests. The same file reports `image_id_matches_manifest: false`: the rerun image id is `sha256:b31d75e3...2cdb79` and the manifest's is `sha256:dcbef6ec...dfc`. The mismatch is attributed to a concurrent rebuild of the shared image tag `reconcile-inference:dev` between the run and the rerun; that attribution is unverified. The packet digests were identical despite it, but the rerun did not run on the same image as the original run.
-- **Baseline key-invariance.** Before the fix in `docs/baseline-observable.md` section 7, a key change moved the model grid, the cross-validation table and the importances. After the fix, two runs with fresh keys (`obs-k1`, `obs-k2`) give `metrics.json` files identical except `tag`, `command`, `seconds` and `efficiency` (checked again for this card). `obs-m3-2` differs from `obs-k1` only in those keys and in `investigator_validation`, which compares against `m3-dev-1` instead of `m2-dev-7-wp1`.
-- The baseline in this card is the `obs-m3-2` run; its seed 20261101 is for the model and does not affect the bootstrap seed 20261102.
+- **Investigator rerun.** `artifacts/dev-runs/m3-dev-5/rerun-1.json`: `ok: true`, `identical: true`, `image_id_matches_manifest: true`. The rerun image id `sha256:622eaef8...670103` equals the manifest's, and the train packets digest `9ae1bf41...36e0e5b` and validation packets digest `d5d42e2c...88f3eb` equal the manifest's. This replaces the earlier `m3-dev-1` rerun, which ran on a rebuilt shared image tag and is not valid evidence.
+- **Baseline key-invariance.** Before the fix in `docs/baseline-observable.md` section 7, a key change moved the model grid, the cross-validation table and the importances. After the fix, two runs with fresh keys (`obs-k1`, `obs-k2`) gave `metrics.json` files identical except `tag`, `command`, `seconds` and `efficiency` (a previous check, not repeated for this card).
+- The `investigator_validation` block inside `obs-m3-3/metrics.json` still names run `m3-dev-2`, not `m3-dev-5`. The investigator figures in this card are read from `m3-dev-5`; the two runs agree on every disposition, category, outcome and completeness (section 8).
+- The baseline's seed 20261101 is for the model and does not affect the bootstrap seed 20261102.
+
+## 8. Evaluator checks tightened after the independent review
+
+From the messages of commits `93ec9f3` and `be6179e`:
+
+- A correct answer counts as evidence-complete only if the packet audit passes (citations resolve in the run's snapshot; calculations and day counts recompute exactly) and each required calculation has the right operation, operands and conclusion.
+- Searches must match the evaluator's exact predicate; journals must balance in full; evaluator arithmetic uses an exact Decimal context; scoring inputs are digest-bound, read once and reconciled with the label roster.
+- Net-fee `unexplained`, accounted-fee `fee_row_minus_journals` and the three reversal equalities must be differences of exactly the contract's records, recomputed exactly within one quantum; the reversal credit must not predate the debit. An arithmetically correct but irrelevant calculation no longer counts.
+- Claim support was renamed reference integrity (section 3).
+
+**No development case changed outcome.** How this was checked: `artifacts/dev-runs/m3-dev-2/cases.jsonl` and `artifacts/dev-runs/m3-dev-5/cases.jsonl` have the same 1608 case ids (train and validation); `disposition`, `category`, `outcome` and `complete` are identical for all of them (0 differences). The evidence-complete totals in `metrics.json` are also identical for train, validation and all splits (validation: 122/122 among answered, 119/119 among correct, 119/123 correct and complete). What differs between the two runs is evidence-detail fields in the case rows, the metric rename, and the validation evidence-recall denominator, which rose from 1361 (`m3-dev-2`) to 1385 (`m3-dev-5`) as more requirement items are checked, all met. Only `m3-dev-2` against `m3-dev-5` was compared here; the commit messages state "no case changes" for `m3-dev-3` and `m3-dev-5`, which was not re-verified for `m3-dev-3`.
