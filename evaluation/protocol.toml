@@ -62,8 +62,14 @@ list_every_false_alarm = true
 method = "cluster_percentile_bootstrap"  # evaluation/paired.py
 seed = 20261102
 reps = 10000
-alpha = 0.05
-min_clusters = 0  # TO BE SET from evaluation/bootstrap_coverage.py before the freeze
+# Nominal 98% interval: the percentile cluster bootstrap undercovers, and with
+# the real validation and train cluster sizes a nominal 95% interval measured
+# about 0.91-0.95 coverage, a nominal 98% one 0.954-0.978 at 20+ clusters
+# (evaluation/bootstrap_coverage.py; docs/evaluation-protocol.md). Below 20
+# clusters coverage falls (about 0.92 at 15, 0.80 at 10): no interval is
+# reported and the claim is "not established".
+alpha = 0.02
+min_clusters = 20
 
 [budgets.deterministic]
 max_rows_per_query = 200

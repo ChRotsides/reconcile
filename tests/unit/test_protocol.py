@@ -8,8 +8,6 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from reconcile.diagnosis.pipeline import DEFAULT_LIMITS
 from reconcile.diagnosis.policy import POLICY_VERSION
 from reconcile.retrieval.snapshot import HOPS
@@ -77,12 +75,6 @@ def test_statistics_well_formed() -> None:
     assert 0 < s["alpha"] < 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "min_clusters pending coverage measurement; parent sets it before the freeze"
-    ),
-)
 def test_min_clusters_set() -> None:
     mc = P["statistics"]["min_clusters"]
     assert isinstance(mc, int)
