@@ -327,3 +327,17 @@ def test_selected_model_must_be_the_protocols_frozen_baseline() -> None:
     ):
         with pytest.raises(SystemExit, match="frozen baseline"):
             run.check_model(other, proto)
+
+
+def test_baseline_manifest_records_the_same_code_identity() -> None:
+    """The manifest's code entry comes from dev_run.code_commit, so a baseline
+    and a dev run of the same tree carry identical digests."""
+    src = (DIR / "run.py").read_text()
+    assert '"code": dev_run.code_commit()' in src
+    sys.path.insert(0, str(DIR.parents[1]))
+    try:
+        dev_run = importlib.import_module("dev_run")
+    finally:
+        sys.path.remove(str(DIR.parents[1]))
+    code = dev_run.code_commit()
+    assert {"commit", "src_sha256", "evaluation_sha256", "deploy_sha256"} <= set(code)

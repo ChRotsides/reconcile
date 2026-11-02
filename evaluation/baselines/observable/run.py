@@ -47,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import cohort as C  # noqa: E402  (shared with evaluation/dev_run.py)
+import dev_run  # noqa: E402  (code identity, same digests as dev runs)
 import evidence  # noqa: E402
 import features as F  # noqa: E402
 import metrics as M  # noqa: E402  (shared metric definitions, PLAN.md section 7)
@@ -888,6 +889,7 @@ def main() -> None:
                 f.write(json.dumps(r, sort_keys=True) + "\n")
     # written last: compare.py reads the case files through these hashes
     manifest = {
+        "code": dev_run.code_commit(),
         "system": "observable_baseline",
         "model": best_name,
         "configurations": {

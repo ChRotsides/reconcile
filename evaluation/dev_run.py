@@ -115,11 +115,20 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def code_commit() -> dict[str, str]:
-    """HEAD of this worktree read from the .git files (no git command)."""
+def tree_sha256(repo: Path, files: Iterable[Path]) -> str:
+    h = hashlib.sha256()
+    for p in sorted(files):
+        h.update(str(p.relative_to(repo)).encode() + b"\0" + p.read_bytes())
+    return h.hexdigest()
+
+
+def code_commit(repo: Path = REPO) -> dict[str, str]:
+    """HEAD of this worktree read from the .git files (no git command), plus
+    digests of the code that defines the system, the scorer and the container,
+    so a run made with uncommitted changes is still identified."""
     info: dict[str, str] = {}
     try:
-        gitdir = Path((REPO / ".git").read_text().split("gitdir:")[1].strip())
+        gitdir = Path((repo / ".git").read_text().split("gitdir:")[1].strip())
         head = (gitdir / "HEAD").read_text().strip()
         if head.startswith("ref:"):
             ref = head.split()[1]
@@ -131,10 +140,20 @@ def code_commit() -> dict[str, str]:
             info["commit"] = head
     except (OSError, IndexError) as e:
         info["commit"] = f"unknown ({type(e).__name__})"
-    h = hashlib.sha256()
-    for p in sorted((REPO / "src/reconcile").rglob("*.py")):
-        h.update(str(p.relative_to(REPO)).encode() + b"\0" + p.read_bytes())
-    info["src_sha256"] = h.hexdigest()
+    ev = repo / "evaluation"
+    info["src_sha256"] = tree_sha256(repo, (repo / "src/reconcile").rglob("*.py"))
+    info["evaluation_sha256"] = tree_sha256(
+        repo,
+        [
+            *ev.rglob("*.py"),
+            ev / "protocol.toml",
+            ev / "verified_label_conflicts.json",
+        ],
+    )
+    deploy = repo / "deploy/inference"
+    info["deploy_sha256"] = tree_sha256(
+        repo, (p for p in deploy.rglob("*") if p.is_file())
+    )
     return info
 
 
