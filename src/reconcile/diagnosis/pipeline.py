@@ -54,9 +54,13 @@ class _Failure(Exception):
         self.reason = reason
 
 
-def _check_snapshot(path: Path, request: InvestigationRequest) -> tuple[str, ...]:
+def _check_snapshot(
+    path: Path, request: InvestigationRequest
+) -> tuple[tuple[str, ...], bool]:
     """Bind the file to the request through the manifest written beside it and
-    return the data-coverage limitations the manifest declares (none for FinRCA).
+    return the data-coverage limitations the manifest declares (none for FinRCA)
+    and whether fee journals are recognisable in this data (true unless the
+    manifest says `fee_journals_recognised: false`; FinRCA has no such key).
 
     Trusts the manifest; the content digest is not recomputed (assumption).
     """
@@ -81,7 +85,23 @@ def _check_snapshot(path: Path, request: InvestigationRequest) -> tuple[str, ...
             f"Bank data was declared complete through {through} by whoever "
             "prepared the data."
         )
-    return tuple(notes)
+    return tuple(notes), manifest.get("fee_journals_recognised") is not False
+
+
+def _fee_not_ruled_out(packet: EvidencePacket) -> EvidencePacket:
+    """F14 means "no fee journal exists". Where no journal can be recognised as
+    a fee (a Xero export types none as `bank_fee`), that absence proves nothing,
+    so the shortfall is neither explained nor unexplained. Evidence, calculations
+    and limitations stay; the finding and recommendations are not established."""
+    diagnosis = Diagnosis(
+        Disposition.ABSTAINED,
+        None,
+        reason="fee_journals_not_recognised",
+        missing_information=(
+            "journals recognisable as bank fees, so a fee can be ruled out",
+        ),
+    )
+    return replace(packet, diagnosis=diagnosis, recommendations=())
 
 
 def investigate(
@@ -98,8 +118,10 @@ def investigate(
         *declared(),
     )
     try:
-        notes = _check_snapshot(snapshot_path, request)
+        notes, fees_recognised = _check_snapshot(snapshot_path, request)
         packet = _investigate(snapshot_path, request, limits, prov)
+        if not fees_recognised and packet.diagnosis.category == "F14":
+            packet = _fee_not_ruled_out(packet)
         return replace(packet, limitations=(*packet.limitations, *notes))
     except _Failure as e:
         return _failed(request, prov, e.reason, str(e))

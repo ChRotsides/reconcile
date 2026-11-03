@@ -52,17 +52,22 @@ def test_xero_spec_examples_are_read_but_hold_no_payables() -> None:
 
 
 @needs_xero
-def test_the_xero_examples_use_a_currency_the_money_type_does_not_list() -> None:
+def test_the_xero_examples_prepare_with_nzd_but_hold_no_payables(
+    tmp_path: Path,
+) -> None:
     data = read_xero({k: [XERO / f"{k}.json"] for k in KINDS}, base_currency="NZD")
-    with pytest.raises(ValueError, match="NZD"):
-        prepare_operational_snapshot(
-            {**data.tables, "bank_transactions": []},
-            SAMPLES / "never-written",
-            cutoff=date(2019, 1, 1),
-            bank_data_through=date(2019, 1, 1),
-            source_format="sample",
-            source_files={},
-        )
+    manifest = prepare_operational_snapshot(
+        {**data.tables, "bank_transactions": []},
+        tmp_path / "snap",
+        cutoff=date(2019, 1, 1),
+        bank_data_through=date(2019, 1, 1),
+        source_format="sample",
+        source_files={},
+    )
+    assert manifest["money"]["currencies"] == ["NZD"]
+    assert manifest["money"]["amounts_validated"] == 12
+    assert manifest["tables"]["gl_entries"]["rows_after"] == 6  # 3 after the cutoff
+    assert manifest["tables"]["payments"]["rows_after"] == 0
 
 
 @needs_ing

@@ -46,8 +46,14 @@ AS_PREPARED: dict[str, Outcome] = {
     "CHK": ("payments", "pay-chk", "abstained", None, "invoice_approval_not_completed"),
     "BATCH": ("payments", "bat-1", "abstained", None, "invoice_approval_not_completed"),
     "FX": ("payments", "pay-fx", "abstained", None, "unsupported_fx"),
-    "F14": ("payments", "pay-f14", "answered", "F14", None),
-    "NETFEE": ("payments", "pay-net", "answered", "F14", None),
+    "F14": ("payments", "pay-f14", "abstained", None, "fee_journals_not_recognised"),
+    "NETFEE": (
+        "payments",
+        "pay-net",
+        "abstained",
+        None,
+        "fee_journals_not_recognised",
+    ),
     "FEEROW": (
         "bank_transactions",
         "SVC-FEE-2",
@@ -115,6 +121,24 @@ def test_outcome_as_prepared(name: str, prepared: tuple[Path, dict[str, Any]]) -
     digest = manifest["snapshot"]["content_sha256"]
     outcome = AS_PREPARED[name]
     assert run(snapshot, digest, outcome) == outcome[2:]
+
+
+@pytest.mark.parametrize("name", ["F14", "NETFEE"])
+def test_the_shortfall_is_kept_as_evidence_when_fees_cannot_be_ruled_out(
+    name: str, prepared: tuple[Path, dict[str, Any]]
+) -> None:
+    snapshot, manifest = prepared
+    digest = manifest["snapshot"]["content_sha256"]
+    _, record = AS_PREPARED[name][:2]
+    request = InvestigationRequest(
+        "req_test", digest, RecordRef(digest, "payments", record), "check", CUTOFF, "p"
+    )
+    packet = investigate(snapshot, request)
+    assert [c.calculation_id for c in packet.calculations] == ["delta"]
+    assert packet.diagnosis.findings == () and packet.recommendations == ()
+    assert packet.diagnosis.missing_information == (
+        "journals recognisable as bank fees, so a fee can be ruled out",
+    )
 
 
 def build_with_approvals(
@@ -214,6 +238,7 @@ def test_manifest_states_what_was_read_and_what_is_missing(
     assert m["bank_data_through"] == "2026-07-31"
     assert "approval_events" in m["tables_not_supplied"]
     assert m["tables"]["bank_transactions"]["dropped_by_cutoff"] == 1
+    assert m["fee_journals_recognised"] is False  # no Xero journal is typed bank_fee
     assert m["tables"]["payments"]["rows_after"] == 18  # 17 single payments + 1 batch
     assert m["extras"]["xero"]["invoices_other_types_skipped"] == {"ACCREC": 1}
     assert m["extras"]["xero"]["invoices_with_nonzero_AmountCredited"] == 1

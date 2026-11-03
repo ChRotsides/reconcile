@@ -379,6 +379,9 @@ def _prepare(
             "original_text_kept": False,
         },
         "tables_not_supplied": not_supplied,
+        # F14 rests on "no bank_fee journal"; where none exists in the data, a
+        # fee journal may simply not be recognisable (a Xero export has no type).
+        "fee_journals_recognised": _has_fee_journal(snapshot_tables["gl_entries"]),
         "tables": report,
         "vocabulary": {k: dict(sorted(v.items())) for k, v in vocabulary.items()},
         "unrecognised_payment_methods": {
@@ -450,6 +453,12 @@ def _transform(
         else:
             out.append(v)  # keep, remap, date, timestamp, poly_remap: as cleaned
     return tuple(out)
+
+
+def _has_fee_journal(gl: tuple[list[str], list[Row]]) -> bool:
+    names, rows = gl
+    kind = names.index("transaction_type")
+    return any(r[kind] == "bank_fee" for r in rows)
 
 
 def _reference_quality(

@@ -85,12 +85,81 @@ def primary(name: str) -> tuple[str, str]:
     return e["table"], e["id"]
 
 
+def add_unrelated_fee_journal(rows: Rows) -> None:
+    """A balanced bank_fee journal for some other bank row: proof that this data
+    types fee journals, without touching the record under test."""
+    currency = rows["payments"][0]["payment_currency"]
+    for n, (account, debit, credit) in enumerate(
+        (("650000", "5.00", "0.00"), ("100000", "0.00", "5.00")), start=1
+    ):
+        rows["gl_entries"].append(
+            {
+                "journal_id": "J_OTHER_FEE",
+                "journal_line_id": f"J_OTHER_FEE_L{n}",
+                "source_transaction_id": "BT_OTHER",
+                "transaction_type": "bank_fee",
+                "posting_date": "2026-06-03",
+                "accounting_period": "2026-06",
+                "gl_account": account,
+                "debit": debit,
+                "credit": credit,
+                "currency": currency,
+            }
+        )
+
+
 @pytest.mark.parametrize("name", sorted(EXPECTED))
 def test_every_fixture_gives_the_expected_outcome_with_raw_ids(
     name: str, tmp_path: Path
 ) -> None:
-    manifest = prepare(load(name), tmp_path)
+    rows = load(name)
+    if name == "f14_amount_shortfall":  # this fixture has no fee journal at all
+        add_unrelated_fee_journal(rows)
+    manifest = prepare(rows, tmp_path)
     assert outcome(run(manifest, tmp_path, *primary(name))) == expected(name)
+
+
+def test_f14_needs_proof_that_fee_journals_are_recognised(tmp_path: Path) -> None:
+    rows = load("f14_amount_shortfall")
+    manifest = prepare(rows, tmp_path / "none")
+    assert manifest["fee_journals_recognised"] is False
+    packet = run(manifest, tmp_path / "none", *primary("f14_amount_shortfall"))
+    assert outcome(packet) == ("abstained", None, "fee_journals_not_recognised")
+    assert packet.diagnosis.findings == () and packet.recommendations == ()
+    assert [c.calculation_id for c in packet.calculations] == ["delta"]
+    assert packet.evidence  # kept
+    add_unrelated_fee_journal(rows)
+    manifest = prepare(rows, tmp_path / "some")
+    assert manifest["fee_journals_recognised"] is True
+    packet = run(manifest, tmp_path / "some", *primary("f14_amount_shortfall"))
+    assert outcome(packet) == ("answered", "F14", None)
+
+
+def test_the_net_fee_all_clear_is_unaffected_by_the_fee_journal_flag(
+    tmp_path: Path,
+) -> None:
+    manifest = prepare(load("net_fee_accounting"), tmp_path)
+    assert manifest["fee_journals_recognised"] is True
+    assert outcome(run(manifest, tmp_path, *primary("net_fee_accounting"))) == (
+        "answered",
+        "legitimate_net_fee_accounting",
+        None,
+    )
+
+
+def test_a_manifest_without_the_key_still_answers_f14(tmp_path: Path) -> None:
+    rows = load("f14_amount_shortfall")
+    manifest = prepare(rows, tmp_path)
+    path = tmp_path / "snap" / "manifest.json"
+    bare = json.loads(path.read_text())
+    del bare["fee_journals_recognised"]
+    path.chmod(0o644)
+    path.write_text(json.dumps(bare))
+    assert outcome(run(manifest, tmp_path, *primary("f14_amount_shortfall"))) == (
+        "answered",
+        "F14",
+        None,
+    )
 
 
 def test_source_ids_are_stored_unchanged(tmp_path: Path) -> None:

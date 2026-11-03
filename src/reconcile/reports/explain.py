@@ -214,6 +214,11 @@ REASONS: dict[str, str] = {
         "No bank fee journal was found for the bank fee row, so the fee could "
         "not be shown to be booked."
     ),
+    "fee_journals_not_recognised": (
+        "The bank debit is smaller than the payment, but this data has no "
+        "journals recognised as bank fees, so a fee could explain the "
+        "difference. No conclusion was drawn about the shortfall."
+    ),
     "fee_journal_invalid": (
         "A bank fee journal exists but is not balanced or mixes currencies, "
         "so it was not used."
