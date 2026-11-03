@@ -362,7 +362,7 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 - [ ] Add a generic CSV-bundle mapping example through the same contract, without a live ERP integration, including explicit handling of mixed date formats (moved from M1 by user decision on 2026-11-01).
 - [ ] Ship working mappings for the shortlisted accounting export and bank statement format, tested on public sample files or permitted anonymised data.
 - [ ] Hold walkthrough sessions where practitioners use the HTML report on realistic cases; record where they hesitate, distrust a conclusion or need information not shown, and fix the report before release.
-- [ ] Provide a small offline demo and explicit optional live-model mode.
+- [ ] Provide a small offline demo. (No live-model mode: model drafting was removed at the M4 gate.)
 - [ ] Make reports self-contained, escaped and free of runtime network assets.
 - [ ] Verify a clean virtual-environment install and container execution.
 - [ ] Render a plain-language explanation of each packet from templates, with no generated prose (carried from the M4 gate).
