@@ -30,7 +30,15 @@ from reconcile.domain.contracts import (
     RecordRef,
 )
 from reconcile.reports.explain import title
-from reconcile.reports.html import CSP, CSS, el, render_index, render_packet
+from reconcile.reports.html import (
+    CSP,
+    CSS,
+    OUTCOME_COUNT_LABELS,
+    el,
+    outcome_kind,
+    render_index,
+    render_packet,
+)
 from reconcile.retrieval.snapshot import Limits
 from reconcile.runs import batch
 
@@ -136,7 +144,7 @@ class Page(HTMLParser):
 ALLOWED_TAGS = {
     "html", "head", "meta", "title", "style", "body", "h1", "h2", "h3", "h4",
     "p", "nav", "ul", "li", "section", "div", "span", "a", "code", "table",
-    "thead", "tbody", "tr", "th", "td", "dl", "dt", "dd",
+    "thead", "tbody", "tr", "th", "td", "dl", "dt", "dd", "small",
 }  # fmt: skip
 
 
@@ -453,24 +461,10 @@ def test_index_counts_links_and_makes_failures_visible(
     page = Page(html)
     assert not [a for a in page.attrs if a[1].startswith("on")]
     assert not re.search(r"https?://|\bsrc\s*=|url\(", html)
-    for kind in Disposition:
-        assert any(p.diagnosis.disposition is kind for p in listed)
-    expected = {
-        "Answered": sum(
-            p.diagnosis.disposition is Disposition.ANSWERED for p in listed
-        ),
-        "No conclusion (abstained)": sum(
-            p.diagnosis.disposition is Disposition.ABSTAINED for p in listed
-        ),
-        "Not assessed (out of scope)": sum(
-            p.diagnosis.disposition is Disposition.OUT_OF_SCOPE for p in listed
-        ),
-        "Failed: the investigation did not complete": sum(
-            p.diagnosis.disposition is Disposition.FAILED for p in listed
-        ),
-    }
-    for label, n in expected.items():
-        assert f"{label}: {n}" in page.text, label
+    kinds = [outcome_kind(p) for p in listed]
+    assert set(kinds) == set(OUTCOME_COUNT_LABELS)
+    for kind, label in OUTCOME_COUNT_LABELS.items():
+        assert f"{label}: {kinds.count(kind)}" in page.text, label
     assert f"{len(listed)} cases." in page.text
     assert "req_test.html" in page.hrefs
     rows = html.count("<tr class=")
@@ -478,8 +472,98 @@ def test_index_counts_links_and_makes_failures_visible(
     for p in listed:
         diag = p.diagnosis
         assert (diag.category or diag.reason or "") in page.text
-    for cls in ("answered", "abstained", "out_of_scope", "failed"):
-        assert f'<tr class="{cls}">' in html
+    for kind in OUTCOME_COUNT_LABELS:
+        assert f'<tr class="{kind}">' in html
+
+
+def _counts(html: str) -> dict[str, int]:
+    text = Page(html).text
+    out = {}
+    for label in OUTCOME_COUNT_LABELS.values():
+        m = re.search(rf"^{re.escape(label)}: (\d+)$", text, re.M)
+        assert m, label
+        out[label] = int(m.group(1))
+    return out
+
+
+def test_counts_sum_to_cases_including_zero_values(
+    packets: dict[str, EvidencePacket],
+) -> None:
+    for subset in (
+        [],
+        [packets["failed"]],
+        [packets["f06_double_payment"]],
+        [packets["split_payment"], packets["f06_double_payment"]],
+        list(packets.values()),
+    ):
+        counts = _counts(render_index(subset, {}))
+        assert sum(counts.values()) == len(subset)
+        assert set(counts) == set(OUTCOME_COUNT_LABELS.values())
+    empty = _counts(render_index([], {}))
+    assert set(empty.values()) == {0}
+
+
+def test_columns_put_the_record_first_and_request_id_last(
+    packets: dict[str, EvidencePacket],
+) -> None:
+    html = render_index([packets["failed"]], {"req_test": "x.html"})
+    heads = re.findall(r'<th scope="col">([^<]*)</th>', html)
+    assert heads == ["Primary record", "Outcome", "Code", "Request id"]
+    first_cell = re.search(r"<tr class=[^>]*><td>(.*?)</td>", html)
+    assert first_cell and first_cell.group(1).startswith('<a href="x.html">')
+    assert html.count("<small>") == 1
+
+
+def test_row_marker_is_only_the_first_cell_edge() -> None:
+    for kind in OUTCOME_COUNT_LABELS:
+        assert f"tr.{kind} td:first-child{{border-left:6px" in CSS
+        # no bare class rule that would also outline the tr
+        assert not re.search(rf"(^|\n)\.{kind}\{{", CSS)
+
+
+def test_exception_and_all_clear_never_share_a_class(
+    packets: dict[str, EvidencePacket],
+) -> None:
+    seen = set()
+    for name, p in packets.items():
+        kind = outcome_kind(p)
+        seen.add(kind)
+        d = p.diagnosis
+        if d.disposition is Disposition.ANSWERED:
+            clear = (d.category or "").startswith("legitimate_") or (
+                d.category == "no_exception"
+            )
+            assert kind == ("allclear" if clear else "exception"), name
+        page = render_packet(p)
+        badge = re.search(r'<span class="badge (\w+)"', page)
+        assert badge and badge.group(1) == kind, name
+        other = {"exception": "allclear", "allclear": "exception"}.get(kind)
+        if other:
+            assert f"badge {other}" not in page, name
+        row = render_index([p], {})
+        if other:
+            assert f'<tr class="{other}">' not in row, name
+            # the counts always list every class, but the other one reads 0
+            assert _counts(row)[OUTCOME_COUNT_LABELS[other]] == 0, name
+    assert {"exception", "allclear"} <= seen
+
+
+def test_unknown_category_is_a_possible_exception_not_an_all_clear() -> None:
+    d = Diagnosis(
+        Disposition.ANSWERED,
+        "brand_new_category",
+        (Finding("c", FindingState.SUPPORTED, ("e1",)),),
+    )
+    ev = EvidenceItem(
+        "e1", None, AbsenceSearch(DIGEST, "payments", "x = 1", CUTOFF, 0), "a1"
+    )
+    req = InvestigationRequest(
+        "req_u", DIGEST, RecordRef(DIGEST, "payments", "t"), "s", CUTOFF, "policy_test"
+    )
+    packet = EvidencePacket(req, d, (ev,))
+    assert outcome_kind(packet) == "exception"
+    assert _counts(render_index([packet], {}))["Possible exceptions"] == 1
+    assert 'class="badge exception"' in render_packet(packet)
 
 
 def test_index_without_a_link_shows_the_id_as_text(

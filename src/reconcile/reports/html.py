@@ -127,15 +127,17 @@ dl{display:grid;grid-template-columns:minmax(7rem,12rem) 1fr;gap:.25rem .75rem;m
 dt{font-weight:600;color:var(--muted)}
 dd{margin:0}
 .badge{display:inline-block;padding:.2rem .6rem;border:3px solid var(--fg);font-weight:700}
-.answered{border-style:solid;border-color:var(--ok)}
-.abstained{border-style:dashed;border-color:var(--warn)}
-.out_of_scope{border-style:dotted;border-color:var(--warn)}
-.failed{border-style:double;border-color:var(--stop)}
 .conclusion,.record,.calc,.rec{border:1px solid var(--line);background:var(--panel);padding:.5rem .75rem;margin:.75rem 0;break-inside:avoid}
 .note{border-left:4px solid var(--muted);padding:.25rem .75rem;margin:.75rem 0}
 .counts{display:flex;flex-wrap:wrap;gap:.5rem;margin:.75rem 0}
 .counts span{padding:.2rem .6rem;border:3px solid var(--line);font-weight:600}
-tr.answered td:first-child{border-left:6px solid var(--ok)}
+span.exception{border-style:solid;border-color:var(--stop)}
+span.allclear{border-style:solid;border-color:var(--ok)}
+span.abstained{border-style:dashed;border-color:var(--warn)}
+span.out_of_scope{border-style:dotted;border-color:var(--warn)}
+span.failed{border-style:double;border-color:var(--stop)}
+tr.exception td:first-child{border-left:6px solid var(--stop)}
+tr.allclear td:first-child{border-left:6px solid var(--ok)}
 tr.abstained td:first-child{border-left:6px dashed var(--warn)}
 tr.out_of_scope td:first-child{border-left:6px dotted var(--warn)}
 tr.failed td:first-child{border-left:6px double var(--stop)}
@@ -143,12 +145,27 @@ tr.failed td:first-child{border-left:6px double var(--stop)}
 @media print{body{max-width:none;padding:0;font-size:10pt}a{color:inherit}nav{display:none}h2{break-after:avoid}tr{break-inside:avoid}}
 """  # noqa: E501
 
-OUTCOME_WORDS = {
-    Disposition.ANSWERED: "Answered",
-    Disposition.ABSTAINED: "No conclusion (abstained)",
-    Disposition.OUT_OF_SCOPE: "Not assessed (out of scope)",
-    Disposition.FAILED: "Failed: the investigation did not complete",
+# What an outcome means to an analyst. An answered category that is not an
+# all-clear, including an unknown one, is a possible exception.
+OUTCOME_COUNT_LABELS = {
+    "exception": "Possible exceptions",
+    "allclear": "Consistent with the checks",
+    "abstained": "No conclusion",
+    "out_of_scope": "Not assessed",
+    "failed": "Failed",
 }
+
+
+def outcome_kind(packet: EvidencePacket) -> str:
+    d = packet.diagnosis
+    if d.disposition is not Disposition.ANSWERED:
+        return d.disposition.value
+    category = d.category or ""
+    if category.startswith("legitimate_") or category == "no_exception":
+        return "allclear"
+    return "exception"
+
+
 CSP = "default-src 'none'; style-src 'unsafe-inline'"
 
 
@@ -184,7 +201,7 @@ def _conclusion(packet: EvidencePacket) -> Element:
             "Outcome",
             el(
                 "span",
-                {"class": f"badge {d.disposition.value}"},
+                {"class": f"badge {outcome_kind(packet)}"},
                 title(packet),
             ),
         ),
@@ -529,29 +546,27 @@ def _href(value: str) -> str:
 
 
 def render_index(packets: list[EvidencePacket], links: dict[str, str]) -> str:
-    counts = {d: 0 for d in Disposition}
+    counts = dict.fromkeys(OUTCOME_COUNT_LABELS, 0)
     rows: list[Element] = []
     for p in packets:
         d = p.diagnosis
-        counts[d.disposition] += 1
+        kind = outcome_kind(p)
+        counts[kind] += 1
         rid = p.request.request_id
         href = links.get(rid)
-        id_cell: str | Element = (
-            _code(rid) if href is None else el("a", {"href": _href(href)}, rid)
+        record = _record_name(p)
+        record_cell: str | Element = (
+            record if href is None else el("a", {"href": _href(href)}, record)
         )
         what = d.category if d.category is not None else d.reason
         rows.append(
             el(
                 "tr",
-                {"class": d.disposition.value},
-                el("td", None, id_cell),
-                el(
-                    "td",
-                    None,
-                    _record_name(p),
-                ),
+                {"class": kind},
+                el("td", None, record_cell),
                 el("td", None, title(p)),
                 el("td", None, _code(what or "")),
+                el("td", None, el("small", None, _code(rid))),
             )
         )
     head = el(
@@ -559,7 +574,7 @@ def render_index(packets: list[EvidencePacket], links: dict[str, str]) -> str:
         None,
         *[
             el("th", {"scope": "col"}, h)
-            for h in ("Request", "Primary record", "Outcome", "Code")
+            for h in ("Primary record", "Outcome", "Code", "Request id")
         ],
     )
     body = (
@@ -569,8 +584,8 @@ def render_index(packets: list[EvidencePacket], links: dict[str, str]) -> str:
             "div",
             {"class": "counts"},
             *[
-                el("span", {"class": d.value}, f"{OUTCOME_WORDS[d]}: {n}")
-                for d, n in counts.items()
+                el("span", {"class": kind}, f"{OUTCOME_COUNT_LABELS[kind]}: {n}")
+                for kind, n in counts.items()
             ],
         ),
         el("table", None, el("thead", None, head), el("tbody", None, *rows)),
