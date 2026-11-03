@@ -23,7 +23,7 @@ FinRCA-Bench is the only dataset retrieved. Its `LICENSE` is MIT and names "soft
 
 ## Consequences and limits
 - Whether MIT covers the generated data is unverified (A011). Internal evaluation is treated as permitted; publishing copied rows would need the author's confirmation.
-- The repository has no project `LICENSE` file yet; choosing the code licence and checking output redistribution terms is an M7 task.
+- The project code licence was chosen on 2026-11-03, ahead of M7: PolyForm Noncommercial 1.0.0 (`LICENSE`, D156). Commercial use needs a separate licence from the author. Checking output redistribution terms is still an M7 task.
 - RecBench, FinBalance and BenchRec have not been retrieved; their rights are unconfirmed.
 - The test split was read during reproduction and cannot be described as unseen.
 - Practitioner-data handling rules exist (`docs/practitioner-findings.md`), but no practitioner data has been received.

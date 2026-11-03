@@ -2,6 +2,8 @@
 name = "reconcile"
 version = "0.1.0"
 description = "Read-only investigator for AP-to-bank payment exceptions"
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = []
 
