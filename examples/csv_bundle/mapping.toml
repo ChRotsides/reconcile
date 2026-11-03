@@ -1,0 +1,63 @@
+# Invented example. Every source column name below is deliberately unlike the
+# contract's, and the files mix date formats and number styles.
+version = 1
+bank_data_through = "2026-07-31"   # the bank export runs to here
+
+[tables.invoices]
+file = "inv_export.csv"
+[tables.invoices.columns]
+invoice_id = "Invoice No"
+vendor_id = "Supplier"
+currency = "Ccy"
+invoice_total = { column = "Gross", thousands_separator = "," }
+due_date = { column = "Due", date_formats = ["%d/%m/%Y", "%Y-%m-%d"] }  # mixed
+status = { column = "Doc Status", values = { "Paid in full" = "paid", "Open" = "received" } }
+
+[tables.payments]
+file = "pay_export.csv"
+delimiter = ";"
+[tables.payments.columns]
+payment_id = "Payment No"
+vendor_id = "Supplier"
+bank_account_id = "Supplier IBAN"       # spaces and case are normalised
+reference_number = "Remittance"
+payment_date = { column = "Pay Date", date_formats = ["%d/%m/%Y"] }
+payment_method = { value = "ACH" }      # a constant for the whole file
+payment_currency = "Cur"
+payment_amount = { column = "Amt", decimal_separator = ",", thousands_separator = "." }
+payment_status = { column = "State", values = { Paid = "completed", Void = "reversed" } }
+settlement_status = { column = "Settled", values = { Y = "settled", N = "pending" } }
+
+[tables.payment_allocations]
+file = "alloc_export.csv"
+[tables.payment_allocations.columns]
+payment_id = "Pay No"
+invoice_id = "Inv No"
+allocated_amount = { column = "Applied", thousands_separator = "," }
+allocation_date = { column = "Applied On", date_formats = ["%Y-%m-%d"] }
+
+[tables.bank_transactions]
+file = "bank_export.csv"
+delimiter = ";"
+[tables.bank_transactions.columns]
+bank_transaction_id = "Ref"
+counterparty_token = "Counterparty IBAN"
+payment_reference = "Text"
+posted_date = { column = "Booking", date_formats = ["%d.%m.%Y"] }
+transaction_type = { value = "ACH debit" }
+status = { value = "posted" }
+currency = "Currency"
+# One signed column: a negative amount is a debit (stated, not assumed).
+amount = { column = "Amount", direction_from_sign = true, debit_sign = "negative", decimal_separator = ",", thousands_separator = "." }
+
+[tables.gl_entries]
+file = "gl_export.csv"
+[tables.gl_entries.columns]
+journal_id = "JE No"
+journal_line_id = "JE Line"
+source_transaction_id = "Source Doc"
+transaction_type = { column = "Kind", values = { Payment = "payment" } }
+posting_date = { column = "Posted", date_formats = ["%Y-%m-%d"] }
+currency = "Cur"
+debit = { column = "Dr", blank_as = "0.00" }    # blank cell means zero here
+credit = { column = "Cr", blank_as = "0.00" }
