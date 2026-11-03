@@ -394,7 +394,7 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 - [ ] If generation is reproducible, run a fresh-seed synthetic stress set; describe it as same-generator testing, not production validation.
 - [ ] Prepare results card, reproduction bundle, error analysis and concise walkthrough.
 - [ ] Add a separate usefulness section to the results card: practitioner findings, supported export formats and realistic-shape results, each with its limits.
-- [ ] Choose the project code licence, preserve dataset attribution and verify output redistribution terms.
+- [ ] Preserve dataset attribution and verify output redistribution terms. (The code licence was chosen ahead of M7 on 2026-11-03: PolyForm Noncommercial 1.0.0, see `LICENSE`.)
 - [ ] Prepare packaging, release notes and contribution examples for review.
 - [ ] Record independent reproductions and integrations only when they actually occur.
 

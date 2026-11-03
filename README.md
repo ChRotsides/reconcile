@@ -1,6 +1,6 @@
 # Reconcile
 
-An open-source, evidence-backed investigator for payment reconciliation exceptions.
+A source-available, evidence-backed investigator for payment reconciliation exceptions. Free for research and other noncommercial use; commercial use needs a separate license ([License](#license)).
 
 **Status:** Planning only. No application, benchmark results, customer savings, or external adoption have been achieved.
 
@@ -24,3 +24,7 @@ Evaluation belongs in the project from the beginning. Public synthetic results c
 - [Scope](SCOPE.md): first-release boundaries and acceptance criteria.
 
 This plan replaces the earlier PDF-matching and approval application. Begin with the dataset and baseline viability milestone; expand only after useful value is demonstrated.
+
+## License
+
+Reconcile is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE), which permits research and other noncommercial use. It is not an OSI-approved open-source license. For commercial use, contact Charalambos Rotsides at lhampis@gmail.com.
