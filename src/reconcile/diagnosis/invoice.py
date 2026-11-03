@@ -13,7 +13,12 @@ from datetime import date
 from reconcile.diagnosis.guard import guarded
 from reconcile.diagnosis.ledger import Ledger, is_effective, req, val
 from reconcile.diagnosis.policy import quantum
-from reconcile.diagnosis.settled import alloc_evs_of
+from reconcile.diagnosis.settled import (
+    CONTRADICTED,
+    CONTRADICTED_MISSING,
+    alloc_evs_of,
+    contradicts_settlement,
+)
 from reconcile.domain.contracts import (
     Calculation,
     Diagnosis,
@@ -42,6 +47,7 @@ class _Leg:
     debit_ev: str | None = None
     evidence: list[str] = field(default_factory=list)  # bank rows or search
     done: bool = False  # bank side fully examined
+    contradicted: bool = False  # a bank reversal, credit or return matches it
 
 
 def _missing_debit_finding(legs: list[_Leg]) -> Finding | None:
@@ -145,6 +151,8 @@ def diagnose_invoice(
             bcur = req(r, "currency")
             b_ev = led.bank_row(r, "payment_reference")
             leg.evidence.append(b_ev)
+            if contradicts_settlement(r):
+                leg.contradicted = True
             if bcur != cur:
                 return _abstain(
                     led,
@@ -200,6 +208,8 @@ def diagnose_invoice(
         # payment would otherwise count the whole allocation as paid out.
         for leg in committed_legs:
             assert leg.debit_ev is not None
+            if leg.contradicted:
+                return _abstain(led, legs, CONTRADICTED, CONTRADICTED_MISSING)
             if _over_allocated(led, reader, leg, request.cutoff, cur, q):
                 return _abstain(
                     led,
@@ -259,6 +269,8 @@ def diagnose_invoice(
     if not is_split and not on_due:
         return _out_of_scope(led, "no in-scope invoice pattern applies")
 
+    if any(leg.contradicted for leg in live):
+        return _abstain(led, legs, CONTRADICTED, CONTRADICTED_MISSING)
     if any(leg.debit_ev is None for leg in live):
         return _abstain(
             led,

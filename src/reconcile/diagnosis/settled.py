@@ -36,6 +36,21 @@ NO_EXCEPTION = "no_exception"
 NO_ALLOCATION = "payment_without_invoice_allocation"
 
 
+CONTRADICTED = "settlement_contradicted_by_bank"
+CONTRADICTED_MISSING = "whether this payment's bank debit was reversed or returned"
+
+
+def contradicts_settlement(row: Row) -> bool:
+    """A reference-matched bank row that undoes or denies a debit: a payment
+    reversal, any credit, or a returned row. A payment that the ERP calls settled
+    but whose bank rows say this is contradictory, not settled."""
+    return (
+        row["transaction_type"] == "payment reversal"
+        or row["direction"] == "credit"
+        or row["status"] == "returned"
+    )
+
+
 def _supported(
     check: str, evidence: tuple[str, ...], calcs: tuple[str, ...] = ()
 ) -> Finding:
@@ -88,8 +103,13 @@ def diagnose_settled(
             "bank_amount_above_payment",
             "an explanation of a bank amount above the payment",
         )
+    contradicted = any(contradicts_settlement(r) for r in rows)
     if delta.result.amount > q.amount:
-        return _shortfall(request, reader, led, pay, pay_ev, d_ev, d_id, cur)
+        return _shortfall(
+            request, reader, led, pay, pay_ev, d_ev, d_id, cur, contradicted
+        )
+    if contradicted:
+        return led.abstain(CONTRADICTED, CONTRADICTED_MISSING)
     return _matched(request, reader, led, pay, pay_ev, d, d_ev)
 
 
@@ -102,6 +122,7 @@ def _shortfall(
     d_ev: str,
     d_id: str,
     cur: str,
+    contradicted: bool,
 ) -> EvidencePacket:
     cutoff = request.cutoff
     lines = rt.journals(reader, d_id, "bank_fee", cutoff)
@@ -152,6 +173,8 @@ def _shortfall(
             "fee_journal_does_not_match_difference",
             "an explanation of the part of the shortfall the fee journal leaves",
         )
+    if contradicted:  # the net-fee all-clear rests on the payment being settled
+        return led.abstain(CONTRADICTED, CONTRADICTED_MISSING)
     allocs = require_allocation(led, reader, pay, cutoff)
     if isinstance(allocs, EvidencePacket):
         return allocs

@@ -1001,3 +1001,142 @@ def test_every_packet_the_pipeline_post_processes_survives_a_json_round_trip(
     for reason, packet in made.items():
         assert packet.diagnosis.reason == reason, reason
         assert EvidencePacket.from_json(packet.to_json()) == packet, reason
+
+
+# --- a bank reversal, credit or return contradicts settlement (review 3) ---------
+
+CONTRADICTIONS = {
+    "reversal_credit": {"transaction_type": "payment reversal", "direction": "credit"},
+    "plain_credit": {"transaction_type": "ACH credit", "direction": "credit"},
+    "returned_debit": {"transaction_type": "ACH debit", "status": "returned"},
+}
+
+
+def with_contradiction(rows: Rows, ref: str, kind: str, amount: str) -> None:
+    row: dict[str, str | None] = {
+        **rows["bank_transactions"][0],
+        "bank_transaction_id": "BT_X",
+        "payment_reference": ref,
+        "posted_date": "2026-06-20",
+        "transaction_date": "2026-06-20",
+        "amount": amount,
+        **CONTRADICTIONS[kind],
+    }
+    rows["bank_transactions"].append(row)
+
+
+# scenario, table, record, reference of the payment to contradict, amount
+PATHS = [
+    ("f06_double_payment", "invoices", "INV_1", "REF_2", "1000.00"),
+    ("split_payment", "invoices", "INV_1", "REF_2", "800.00"),
+    ("due_date_payment", "invoices", "INV_1", "REF_1", "1500.00"),
+    ("weekend_clearing", "payments", "PAY_1", "REF_1", "800.00"),
+    ("check_clearing", "payments", "PAY_1", "REF_1", "1200.00"),
+    ("net_fee_accounting", "payments", "PAY_1", "REF_1", "980.00"),
+    ("accounted_bank_fee", "payments", "PAY_1", "REF_1", "1000.00"),
+]
+
+
+@pytest.mark.parametrize("kind", sorted(CONTRADICTIONS))
+@pytest.mark.parametrize(("scenario", "table", "record", "ref", "amount"), PATHS)
+def test_a_reversed_or_returned_payment_is_never_counted_as_settled(
+    scenario: str,
+    table: str,
+    record: str,
+    ref: str,
+    amount: str,
+    kind: str,
+    tmp_path: Path,
+) -> None:
+    rows = load(scenario)
+    with_contradiction(rows, ref, kind, amount)
+    manifest = prepare(rows, tmp_path)
+    packet = run(manifest, tmp_path, table, record)
+    assert outcome(packet) == ("abstained", None, "settlement_contradicted_by_bank")
+    assert packet.diagnosis.missing_information == (
+        "whether this payment's bank debit was reversed or returned",
+    )
+    assert any(e.evidence_id == "bank:BT_X" for e in packet.evidence)
+    assert packet.diagnosis.findings == () or all(
+        f.check_id != "committed_overpayment" for f in packet.diagnosis.findings
+    )
+
+
+def test_early_and_failure_exits_survive_a_json_round_trip(tmp_path: Path) -> None:
+    from reconcile.retrieval.snapshot import Limits
+
+    manifest = prepare(load("f06_double_payment"), tmp_path)
+    snap = tmp_path / "snap" / "snapshot.sqlite"
+    digest = manifest["snapshot"]["content_sha256"]
+
+    def ask(record: str, snapshot: str = digest, limits: Limits | None = None) -> Any:
+        request = InvestigationRequest(
+            "r", snapshot, RecordRef(snapshot, "payments", record), "q", CUTOFF, "p"
+        )
+        return (
+            investigate(snap, request, limits) if limits else investigate(snap, request)
+        )
+
+    made = {
+        "primary_entity_not_in_snapshot": ask("NOPE"),
+        "snapshot_mismatch": ask("PAY_1", snapshot="0" * 64),
+    }
+    made["retrieval limit"] = ask("PAY_1", limits=Limits(max_rows=1))
+    snap.chmod(0o644)
+    con = sqlite3.connect(snap)
+    con.execute("INSERT INTO payments SELECT * FROM payments WHERE payment_id='PAY_1'")
+    con.commit()
+    con.close()
+    made["malformed_record"] = ask("PAY_1")
+    snap.write_bytes(b"not a database")
+    made["snapshot_unreadable"] = ask("PAY_1")
+    manifest_file = tmp_path / "snap" / "manifest.json"
+    manifest_file.chmod(0o644)
+    manifest_file.unlink()
+    made["snapshot_manifest_unreadable"] = ask("PAY_1")
+    for name, packet in made.items():
+        assert EvidencePacket.from_json(packet.to_json()) == packet, name
+    assert {p.diagnosis.reason for p in made.values()} >= {
+        "primary_entity_not_in_snapshot",
+        "snapshot_mismatch",
+        "malformed_record",
+        "snapshot_unreadable",
+        "snapshot_manifest_unreadable",
+    }
+    assert made["retrieval limit"].diagnosis.disposition.value == "abstained"
+
+
+@pytest.mark.parametrize(
+    ("scenario", "total", "off_by_one_cent", "off_by_two_cents", "category"),
+    [
+        ("split_payment", "2000.00", "2000.01", "2000.02", "legitimate_split_payment"),
+        (
+            "due_date_payment",
+            "1500.00",
+            "1500.01",
+            "1500.02",
+            "legitimate_due_date_payment",
+        ),
+    ],
+)
+def test_the_tolerance_is_one_minor_unit_for_split_and_due_date(
+    scenario: str,
+    total: str,
+    off_by_one_cent: str,
+    off_by_two_cents: str,
+    category: str,
+    tmp_path: Path,
+) -> None:
+    # "Equal within the stated tolerance": allocations of 99.99 against an invoice
+    # of 100.00 pass, two cents out do not.
+    def answer(invoice_total: str, name: str) -> Any:
+        rows = load(scenario)
+        rows["invoices"][0]["invoice_total"] = invoice_total
+        manifest = prepare(rows, tmp_path / name)
+        return run(manifest, tmp_path / name, "invoices", "INV_1")
+
+    assert outcome(answer(total, "a")) == ("answered", category, None)
+    packet = answer(off_by_one_cent, "b")
+    assert outcome(packet) == ("answered", category, None)
+    assert "within the stated tolerance" in " ".join(explain(packet))
+    assert outcome(answer(off_by_two_cents, "c"))[1] != category

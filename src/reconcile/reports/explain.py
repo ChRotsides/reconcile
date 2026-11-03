@@ -284,6 +284,11 @@ REASONS: dict[str, str] = {
     "payment_before_approval": (
         "The final approval of an invoice is recorded after the payment date."
     ),
+    "settlement_contradicted_by_bank": (
+        "A payment counted toward this invoice also has a bank reversal, credit "
+        "or return, so whether it was finally paid is contradictory. No "
+        "conclusion was drawn."
+    ),
     "payment_over_allocated": (
         "The allocations of the payment exceed the payment amount. " + _NOT_EXPLAINED
     ),

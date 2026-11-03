@@ -530,3 +530,19 @@ def test_statements_that_start_after_a_payment_stop_it_being_called_missing(
             "abstained",
             "payment_before_bank_coverage",
         )
+
+
+def test_an_omitted_half_second_cannot_make_a_settled_payment_look_missing(
+    tmp_path: Path,
+) -> None:
+    # Two statements leave 11:59:59.250-11:59:59.750 on June 15 uncovered. A payment
+    # that settled then must not be answered F12: the data is refused instead.
+    from test_camt053_adapter import june_15_pair
+
+    folder = copy_fixture(tmp_path)
+    one, two = june_15_pair()
+    (folder / "bank" / "2026-06.xml").write_text(one)
+    (folder / "bank" / "2026-07.xml").write_text(two)
+    with pytest.raises(ValueError, match="fractional"):
+        prepare(folder, tmp_path)
+    assert not (tmp_path / "snap").exists()

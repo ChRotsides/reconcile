@@ -842,3 +842,70 @@ def test_each_currency_is_validated_on_its_own(tmp_path: Path) -> None:
     eur = entry("100.00", "DBIT", svc="E")
     usd = entry("90.00", "DBIT", svc="U", ccy="USD")
     refused(tmp_path, two_currency_statement(eur, usd), match=r"\(USD\)")
+
+
+# --- fractional seconds (review 3)
+
+
+def june_15_pair() -> tuple[str, str]:
+    """S1 ends 11:59:59.250 and S2 starts 11:59:59.750 on June 15: half a second
+    that neither statement covers, in which a payment may have settled."""
+    one = document(
+        statement(
+            entry(svc="A", book="2026-06-10"),
+            "S1",
+            "2026-06-01",
+            "2026-06-15",
+            last_time="11:59:59.250",
+        )
+    )
+    two = document(
+        statement(
+            entry(svc="B", book="2026-06-20"),
+            "S2",
+            "2026-06-15",
+            "2026-06-30",
+            first_time="11:59:59.750",
+        )
+    )
+    return one, two
+
+
+def test_fractional_seconds_cannot_bridge_an_uncovered_interval(tmp_path: Path) -> None:
+    one, two = june_15_pair()
+    message = refused(tmp_path, one, two, match="fractional")
+    assert "'S1'" in message and "'S2'" in message
+
+
+@pytest.mark.parametrize("last_time", ["23:59:59.000", "23:59:59.999"])
+def test_a_last_second_with_a_fraction_counts_as_that_second(
+    last_time: str, tmp_path: Path
+) -> None:
+    xml = document(statement(entry(), last_time=last_time))
+    assert read_camt053([write(tmp_path, "a.xml", xml)]).bank_data_through == date(
+        2026, 6, 30
+    )
+
+
+def test_a_midnight_start_with_zero_fraction_counts_as_midnight(
+    tmp_path: Path,
+) -> None:
+    xml = document(statement(entry(), first_time="00:00:00.000"))
+    assert read_camt053([write(tmp_path, "a.xml", xml)]).bank_data_from == date(
+        2026, 6, 1
+    )
+
+
+@pytest.mark.parametrize(
+    ("first_time", "last_time"),
+    [
+        ("00:00:00.500", "23:59:59"),
+        ("00:00:00", "23:59:58.500"),
+        ("00:00:00", "12:00:00.1"),
+    ],
+)
+def test_any_other_fraction_is_refused(
+    first_time: str, last_time: str, tmp_path: Path
+) -> None:
+    xml = document(statement(entry(), first_time=first_time, last_time=last_time))
+    refused(tmp_path, xml, match="'S1'.*fractional")

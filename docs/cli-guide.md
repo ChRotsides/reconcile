@@ -32,7 +32,7 @@ It prepares an invented company's CSV files (shipped inside the package), invest
 - `xero-camt`: `PATH` is a small TOML config naming saved Xero JSON files and CAMT.053 XML files. See `fixtures/xero_camt/config.toml` and `docs/input-mapping.md`.
 - `finrca`: for the public benchmark only; it needs `--key-file` and `--source-revision`.
 
-The cutoff is the last day of data you trust. Rows after it are dropped. The command prints row counts, `bank_data_from`, `bank_data_through`, `tables_not_supplied`, `all_paying_accounts_covered`, `fee_journals_recognised` (your `fee_journals_typed` declaration), `reference_matching` and `reference_quality`. Read them: they decide what the tool can say. A missing table means that table cannot support a conclusion; fee journals not declared as typed means fee questions abstain.
+The cutoff is the last day of data you trust. Rows after it are dropped. The command prints row counts, `bank_data_from`, `bank_data_through`, `tables_not_supplied`, `all_paying_accounts_covered`, `fee_journals_recognised` (your `fee_journals_typed` declaration), `reference_matching` and `reference_quality`. Read them: they decide what the tool can say. A missing table means that table cannot support a conclusion; fee journals not declared as typed stops only the absence-based F14 answer (the tool cannot rule out an unrecorded fee), not every fee-related conclusion.
 
 ### What you must declare
 

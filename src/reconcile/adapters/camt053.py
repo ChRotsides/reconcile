@@ -211,9 +211,21 @@ def _stamp(text: str, what: str, *, ends: bool) -> datetime:
             return datetime.combine(
                 date.fromisoformat(text), _END_OF_DAY if ends else time(0)
             )
-        return datetime.fromisoformat(text).replace(tzinfo=None)
+        stamp = datetime.fromisoformat(text).replace(tzinfo=None)
     except ValueError:
         raise _Bad(f"{what} {text!r} is not an ISO date") from None
+    if stamp.microsecond:
+        # A fraction would let two statements leave a sub-second hole that the
+        # one-second adjacency rule cannot see. Only the two ways banks write a
+        # whole-second boundary are read as such: ...59.fff ending a period.
+        if ends and stamp.time().replace(microsecond=0) == _END_OF_DAY:
+            return stamp.replace(microsecond=0)
+        raise _Bad(
+            f"{what} {text!r} has fractional seconds; only a 23:59:59.fff end is "
+            "read (as 23:59:59), because other fractions could hide an uncovered "
+            "interval between statements"
+        )
+    return stamp
 
 
 def _period(stmt: _El) -> Period | None:

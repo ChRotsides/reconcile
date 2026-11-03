@@ -669,3 +669,22 @@ def test_index_outcome_column_uses_the_title(
 ) -> None:
     page = Page(render_index([packets["f12_payment_missing_from_bank"]], {}))
     assert "Payment possibly missing from the bank" in page.text
+
+
+def test_a_real_batch_that_is_also_check_clearing_renders_both_patterns(
+    tmp_path: Path,
+) -> None:
+    # Not an injected packet: the investigator itself finds the batch pattern and
+    # the check-clearing pattern both holding on one real payment.
+    from test_operational_adapter import load, prepare, run
+
+    rows = load("batch_payment")
+    rows["payments"][0]["payment_method"] = "check"
+    manifest = prepare(rows, tmp_path)
+    packet = run(manifest, tmp_path, "payments", "PAY_1")
+    assert packet.diagnosis.category == "legitimate_batch_payment"
+    assert packet.diagnosis.alternatives == ("legitimate_check_clearing",)
+    page = check_safe(render_packet(packet))
+    assert "ruled out" not in page.text.lower()
+    assert "Other patterns the records also support" in page.text
+    assert "legitimate_check_clearing" in page.text
