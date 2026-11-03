@@ -10,7 +10,7 @@ It covers three kinds of exception (a possible duplicate payment, a payment miss
 
 ## Status today
 
-- Milestones M0 to M4 are finished. M5 (a usable command line tool and HTML reports) is in progress.
+- Milestones M0 to M4 have passed their gates, some conditionally: the practitioner reviews they asked for have not happened. M5 (a usable command line tool and HTML reports) is in progress.
 - No practitioner has used it. No walkthrough session has been held ([kit](docs/practitioner-walkthrough.md)).
 - The only results are development results on a synthetic public benchmark (FinRCA). The sealed comparison has not been run, and no real accounting or bank export has been read.
 
