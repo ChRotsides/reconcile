@@ -99,7 +99,6 @@ flowchart TD
     D --> E[Exact calculations and checks]
     E --> F[Rules or ML diagnosis]
     F --> G[Evidence packet]
-    G --> H[Optional model assistance]
     H --> I[Claim and citation validation]
     G --> I
     I --> J[JSON and HTML reports]
@@ -119,7 +118,7 @@ These are proposed choices, not installed dependencies. Pin exact versions after
 | Checks/features | SQL and typed Python | Explainable financial checks |
 | Classical ML | Reproduce upstream first; compatible scikit-learn tooling where applicable | Preserve faithful comparison |
 | CLI/reporting | Typer, Jinja2 with escaping | Local usability and standalone HTML |
-| Model access | One provider behind a small interface | Keep domain logic independent of provider SDKs |
+| Model access | None. A provider interface was built and tested in M4, then removed at the M4 gate (tag `m4-drafting-experiment`) | The product makes no model calls |
 | Quality | pytest, targeted property tests, Ruff, type checking | Verify meaningful financial and evaluation invariants |
 | Packaging | Wheel and reproducible container | Library reuse and isolated execution |
 
@@ -133,7 +132,6 @@ Do not add a vector database initially. Follow observable financial relationship
 | `retrieval/` | Linked/candidate records | Explicit hop, row and time budgets |
 | `checks/` | Arithmetic, chronology, settlement/allocation checks | No generated financial calculations |
 | `diagnosis/` | Rules/ML predictions, evidence, abstention | No operational writes |
-| `models/` | Structured optional model calls | No arbitrary SQL, shell or payment tools |
 | `reports/` | JSON/HTML rendering | Escaped text; no runtime network assets |
 | `runs/` | Manifests, durable results, retries, costs | Atomic artifact finalization |
 | `evaluation/` | Score persisted predictions | Never imported by investigator code |
@@ -191,7 +189,6 @@ reconcile/
     retrieval/      # relationships, candidates, budgets
     checks/         # duplicate, settlement, amount checks
     diagnosis/      # rules, classical ML, abstention, pipeline
-    models/         # base interface, fixture, provider, validation
     reports/        # JSON and HTML
     runs/           # manifests, runner, cache
     cli.py
@@ -350,6 +347,14 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 
 **Gate:** Keep AI diagnosis/retrieval only if it passes declared quality/cost criteria. Retain drafting only with an honestly measured benefit; attractive prose alone does not establish operational value. Remove unnecessary model work.
 
+**Gate outcome (2026-11-03): model drafting removed, approved by the user.** Evidence: `docs/m4-trial-plan.md` (declared before any paid call), `docs/m4-results.md`, one Codex review round. The product makes no model calls. The code is preserved at the git tag `m4-drafting-experiment`.
+- **Tested:** Claude Haiku 5.5 and Sonnet 5.5 drafting analyst explanations from finished packets, on validation only, with no way to change a diagnosis. Haiku was chosen by the declared rule. 179 of 215 drafts passed the structural checks, at $0.56 total spend of the $25 cap.
+- **Why removed:** the frozen protocol keeps a drafting-only path only with a recorded practitioner benefit, and none exists. It also requires zero unsupported claims; an audit by two independent AI reviewers, settled against the packets, confirmed a problem in 8 of 30 accepted drafts (95% interval 12% to 46%), including one reversed meaning. The checks could not see meaning, and they also rejected drafts consistent with their packets.
+- **Not attempted:** model adjudication or retrieval, because the investigator's remaining errors are label-ambiguous swaps with no operational consequence. The oracle-evidence diagnostic does not apply, since no model diagnoses or retrieves.
+- **Consequences:** the sealed comparison has one system under the headline rule and no model arm. The protocol stays frozen; its model budget goes unused. Review findings 3 to 8, 10 and 12 were not fixed and are listed in `docs/m4-results.md` for any future design.
+- **Carried to M5:** a plain-language explanation built from templates over the packet, with no generated prose.
+- **Open:** a practitioner review could reopen the question with a new design, in which factual text is rendered from checked statements.
+
 ### M5 — Usable library, CLI and evidence reports
 
 - [ ] Implement section 9's proposed CLI contract.
@@ -357,9 +362,10 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 - [ ] Add a generic CSV-bundle mapping example through the same contract, without a live ERP integration, including explicit handling of mixed date formats (moved from M1 by user decision on 2026-11-01).
 - [ ] Ship working mappings for the shortlisted accounting export and bank statement format, tested on public sample files or permitted anonymised data.
 - [ ] Hold walkthrough sessions where practitioners use the HTML report on realistic cases; record where they hesitate, distrust a conclusion or need information not shown, and fix the report before release.
-- [ ] Provide a small offline demo and explicit optional live-model mode.
+- [ ] Provide a small offline demo. (No live-model mode: model drafting was removed at the M4 gate.)
 - [ ] Make reports self-contained, escaped and free of runtime network assets.
 - [ ] Verify a clean virtual-environment install and container execution.
+- [ ] Render a plain-language explanation of each packet from templates, with no generated prose (carried from the M4 gate).
 
 **Deliverables:** Runnable demo, library example, CLI guide, JSON/HTML reports and our own measured clean-install experience.
 
@@ -476,7 +482,7 @@ Prioritize tests that detect financial errors, invalid evidence or invalid evalu
 | Adapter | Schema drift, identity conflicts, preserved anomalies, no label access |
 | Retrieval | Missing edges, ambiguous candidates, bounded expansion, cross-snapshot references |
 | Investigator | Correct diagnosis, clean-case non-alarm, insufficient evidence, unsupported scope |
-| Model boundary | Malformed output, invented IDs, arithmetic contradictions, prompt injection, budget failure |
+| Model boundary | Not applicable since the M4 gate: the product has no model. A reintroduced model must cover malformed output, invented IDs, arithmetic contradictions, prompt injection and budget failure |
 | Evaluator | Hand-calculated examples, empty denominators, case grouping, failed-case accounting |
 | Artifacts | Atomic writes, restart/resume, incompatible cache keys, HTML escaping |
 
