@@ -277,3 +277,114 @@ Also: A009 (fees in CAMT.053) has partial support: the Westpac code table lists 
 - Whether any practitioner uses these formats. The pending practitioner input can change the shortlist and the verdicts.
 - Anything for QuickBooks Online, NetSuite, Sage, SAP, MT940 or BAI2; they were compared in `docs/export-formats.md` only.
 - Any run of the adapter or the checks against Xero or CAMT data. No such file was loaded; no fixture was built.
+
+## 10. Measured behaviour (M5)
+
+**Evidence status: synthetic fixtures and two public samples. No real export was read and no practitioner has confirmed any mapping.** The fixtures in `fixtures/xero_camt/` are invented by this project in the published shapes. Where a fixture "works", that shows the mapping code and the investigator handle that shape, not that a real Xero organisation or bank produces it. Sections 1 to 9 are unchanged; this section reports what the code of M5 does, so a prediction in section 5 can be compared with a measurement.
+
+### 10.1 What exists
+
+| Piece | Path |
+|---|---|
+| Xero reader (saved `Invoices`, `Payments`, `BatchPayments`, `Journals` JSON) | `src/reconcile/adapters/xero.py` |
+| CAMT.053 reader (XML) | `src/reconcile/adapters/camt053.py` |
+| Config, and the call into `prepare_operational_snapshot` | `src/reconcile/adapters/xero_camt.py`, `prepare_xero_camt(config_path, out_dir, *, cutoff)` |
+| Invented organisation, 18 invoices, 21 payment objects, 2 statements | `fixtures/xero_camt/` (with `config.toml`) |
+| Tests | `tests/unit/test_xero_adapter.py`, `test_camt053_adapter.py`, `test_xero_camt_end_to_end.py`; `tests/integration/test_public_format_samples.py` (skips without the downloaded samples) |
+
+There is no live API call: the input is files the user saved. The fixture folder sits beside, not inside, `fixtures/public/`, because `tests/unit/test_fixtures.py` treats every folder in `fixtures/public/` as a FinRCA scenario with a row in `expected.json`.
+
+### 10.2 Interpretations the code makes
+
+Each is a choice, not a fact from a specification, unless a citation says otherwise. "Unverified" means no cited source states it.
+
+Xero:
+
+1. **Status.** `AUTHORISED` gives `payment_status` `completed` and `settlement_status` `settled`, meaning only "the ledger records this payment as made". `DELETED` gives `reversed`/`reversed`. Xero has no pending value (X:23973), so a pending all-clear can never come from the status; `legitimate_pending_settlement` can still be reached by window arithmetic (10.3). `IsReconciled` is never read for settlement (D036); a test sets it both ways and expects no change. Unverified: that `AUTHORISED` is a good stand-in for "made".
+2. **A030 applied.** A `PAYBATCH` `BatchPayment` is one contract payment (`payment_id` = `BatchPaymentID`, amount = `TotalAmount`, which must equal the sum of its members, else refused). Its member payments become allocations (two members for one invoice are summed). A `Payment` carrying `BatchPaymentID` is not also a payments row; it must be listed by the batch and have the batch's status, else refused. The member `PaymentID`s are kept in the manifest extras only. Still unverified (A030): that a batch is a "payment" in the contract's sense.
+3. **Currency (A031).** Payment currency is the invoice's; a batch whose invoices have several currencies is refused. Journal currency is the config `base_currency`. Unverified. Bank-account currency is not available on a `Payment`, so an invoice in a foreign currency yields a currency mismatch against the bank debit, which the investigator abstains on as FX.
+4. **Dates.** `/Date(ms+0000)/` at UTC midnight and `YYYY-MM-DD` are accepted. Any other offset, a time of day, or any other text is refused: the spec does not say what an offset means. `allocation_date` is the payment's date. `JournalDate` is the posting date (A034 unverified).
+5. **Which invoices and payments.** Only `Type` `ACCPAY` invoices, `PaymentType` `ACCPAYPAYMENT` payments and `PAYBATCH` batches are used. The rest are counted in the manifest (`extras.xero`). Invoices of other statuses are kept with the Xero status in lower case (`paid` only for `PAID`). A payment for an invoice that is not an `ACCPAY` invoice in the files is refused.
+6. **Method (G3).** Not in Xero. Config `payment_method_by_account` maps a Xero account code (`Payment.Account.Code`) to `ACH`, `wire`, `check` or `virtual_card`; `default_payment_method` covers the rest; otherwise the method is empty and the investigator abstains (`required_field_missing`). The CAMT `BkTxCd` is not used to infer a method (A035 stays unverified).
+7. **Reference.** Config `payment_reference_field` is `Reference` (default) or `Details`, for payments and batches alike. No fallback between them. An empty value is NULL.
+8. **Payee account.** `payments.bank_account_id` is `Payment.BankAccountNumber`; it is NULL for a batch (members may pay different suppliers). Its format (IBAN or national) is not stated (3.2), so it only matches a CAMT counterparty if both are IBANs.
+9. **Journals.** `SourceID` is stored unchanged; `SourceType` `ACCPAYPAYMENT` gives `payment`, assuming `SourceID` is the `PaymentID` (A027/A036 unverified). Every other `SourceType` becomes `xero_<type in lower case>` so it can never match `payment`. `NetAmount` is split by sign into `debit` and `credit`; a journal whose lines do not sum to zero, or that has no lines, is counted in the manifest, not refused. Fee and reversal journals are not representable (G4, G5).
+10. **No approvals.** The Xero spec has no approval history, so `approval_events` is not supplied and every all-clear abstains. This is the correct behaviour for these inputs.
+11. **Credit notes and overpayments** (`AmountCredited`) are invisible to the contract. Invoices with a non-zero value are counted in `extras.xero`.
+12. **Pagination.** `Invoices*.json`, `Payments*.json` and so on in `xero_dir` are all read; an exact repeat across files is dropped and counted, a different object with the same ID is refused. All four kinds must have at least one file (an empty `[]` response is fine), so a missing export is not read as no records.
+
+CAMT.053:
+
+13. **XML safety.** A `DOCTYPE` or entity declaration is refused by an expat handler, with tests for a billion-laughs file and an external entity. Only namespaces `urn:iso:std:iso:20022:tech:xsd:camt.053.001.*` and a root `Document` are accepted; elements are matched by local name.
+14. **Rows.** One row per booked `Ntry` (`Sts` `BOOK`, also nested `Sts/Cd`); other entries are counted and excluded. An entry is never split into its `TxDtls`. `Amt` must be a plain non-negative decimal, `@Ccy` must equal `Stmt/Acct/Ccy` when that is stated, `CdtDbtInd` gives the direction. `BookgDt` is `posted_date`, `ValDt` is `transaction_date`. A booking date outside its statement's stated period is refused.
+15. **Row ID.** `AcctSvcrRef`, else `NtryRef`, else `<Stmt/Id>:<position>`; the manifest counts which was used. Two entries with the same ID are refused naming both (a repeated `NtryRef` across statements would otherwise merge two real debits). Unverified (G9): that `AcctSvcrRef` is unique.
+16. **Reference.** Config `bank_reference_fields` (default `["EndToEndId"]`; choices `EndToEndId`, `InstrId`, `TxId`, `PmtInfId`, `Ustrd`, `CdtrRefInf`), first non-empty wins; repeated `Ustrd` or `CdtrRefInf` are joined by a space. `NOTPROVIDED` counts as absent. **Assumption, not confirmed in a source I read:** the ING sample PDF does not contain the word; I rely on remembered SEPA practice for it. With no `TxDtls`, or several, the row's reference is `Btch/PmtInfId` when there is one, else NULL, so the investigator's batch guard applies.
+17. **Counterparty.** For a debit, the creditor account IBAN; for a credit, the debtor account IBAN; NULL when absent or when several `TxDtls` name different accounts. Never a name.
+18. **Type.** `bank fee` when `BkTxCd` domain/family/sub-family matches config `fee_codes` (default `CAMT/ACCB/CHRG`, from the Westpac table in section 1: one bank's code list); `payment reversal` when `RvslInd` is `true`, `1` or `yes`; otherwise `bank debit` or `bank credit`. An entry that is both a fee and a reversal is refused. A032 stays unverified: the direction of a reversal entry is taken as written.
+19. **Coverage (D160).** Each statement's period is `Stmt/FrToDt` (dates of `FrDtTm` and `ToDtTm` as written, no zone conversion), else the date of the `CLBD` balance as a one-day period. Per account and currency the periods must follow without a gap and without overlap. An exact repeat of a statement already read (same `Stmt/Id`, same content) is dropped and counted; the same `Stmt/Id` with different content is refused. Gap and overlap errors name both statements. `bank_data_through` is the earliest last day across accounts. A statement with neither period nor balance date is refused unless the config states `bank_data_through`; a config date later than the statements show is refused. Consequence: a multi-day statement that states only a closing balance date is read as one day and may be refused as a gap.
+20. **Not checked:** a payment's own bank account (Xero `Account`) against the statement IBAN, so a statement of the wrong account would not be noticed.
+
+### 10.3 Measured behaviour per check
+
+Method: `prepare_xero_camt` on the fixtures, cutoff 2026-06-30, then `investigate` on one record per check. "As prepared" is exactly what the Xero and CAMT files give. "Approvals added" is the same rows plus one hand-written `approved` event per invoice, prepared directly (`tests/unit/test_xero_camt_end_to_end.py`, `WITH_APPROVALS`); it shows what the mapped rows allow once an approval source exists, and is not something these formats supply. The payment reference is equal on both sides by construction in the fixtures, so gap G1 is not tested by them.
+
+| Check | Section 5 prediction | Fixture record | As prepared | Approvals added | Against the prediction |
+|---|---|---|---|---|---|
+| F06 | Gradable (conditional on G1) | invoice `inv-f06` | answered `F06` | answered `F06` | As predicted, given equal references. On the payment, `pay-f06-1`, it abstains `invoice_over_allocated`. |
+| SPLIT | Gradable (conditional) | invoice `inv-spl` | abstained `invoice_approval_not_completed` | answered `legitimate_split_payment` | Rows suffice; the all-clear needs approvals the formats do not carry. |
+| DUE | Gradable (conditional) | invoice `inv-due` | abstained `invoice_approval_not_completed` | answered `legitimate_due_date_payment` | Same. |
+| F12 | Partial | payment `pay-f12` | abstained `counterparty_unavailable` | abstained `counterparty_unavailable` | Answered `F12` when the one unreferenced debit with no counterparty (`pay-unm`'s) is removed (tested). Without counterparty data on every in-window debit, F12 abstains. |
+| PEND | Partial | payment `pay-pend` | abstained `counterparty_unavailable` | abstained `counterparty_unavailable` | Same cause; without that debit, answered `legitimate_pending_settlement` although Xero has no pending status (tested). |
+| WKND | Partial (method missing) | payment `pay-wknd` | abstained `invoice_approval_not_completed` | answered `legitimate_weekend_clearing` | The method came from the config account mapping, not from `BkTxCd`. |
+| CHK | Partial | payment `pay-chk` | abstained `invoice_approval_not_completed` | answered `legitimate_check_clearing` | Same; the account code `091` was mapped to `check` by the config. |
+| BATCH | Partial (link needs an unverified field match) | payment `bat-1` | abstained `invoice_approval_not_completed` | abstained `payment_journal_missing` | The reference link worked through `Btch/PmtInfId`. It stops at the journal: Xero journals are sourced to the member `PaymentID`s, not to the `BatchPaymentID`, so the batch has no payment journal. Not in the section 5 prediction. |
+| FX | Partial | payment `pay-fx` | abstained `unsupported_fx` | abstained `unsupported_fx` | As predicted (abstention only). |
+| F14 | Not gradable as written | payment `pay-f14` | answered `F14` | answered `F14` | **Differs.** The code answers, because "no balanced `bank_fee` journal" is always true when no Xero journal can be typed as a fee. The answer means "shortfall with no fee journal the tool can recognise", which the analyst must read that way. |
+| NETFEE | Not gradable as written | payment `pay-net` | answered `F14` | answered `F14` | **Differs, and misleading.** The fixture has a spend-money journal for the 20.00 fee (`CASHPAID`, typed `xero_cashpaid`); the tool still says an unexplained shortfall. As predicted, the fee journal is not representable; the prediction did not say the output would be a confident F14. |
+| FEEROW | Not gradable as written | bank row `SVC-FEE-2` | abstained `accounted_fee_journal_missing` | abstained `accounted_fee_journal_missing` | As predicted. |
+| REV | Not gradable as written | payment `pay-rev` | abstained `required_records_missing` | abstained `required_records_missing` | As predicted; never answered, in either mode (tested, A032). |
+
+Shapes outside the 13:
+
+| Shape | Record | Result |
+|---|---|---|
+| Reference not matched, no counterparty data on either side | `pay-unm` | abstained `counterparty_unavailable`, both modes |
+| Payment with no method (Xero account code not in the config) | `pay-nom` | abstained `required_field_missing`, both modes |
+| Credit note applied to an invoice (`AmountCredited` 100.00, paid 300.00 of 400.00) | `pay-crd` | as prepared: abstained on approvals; approvals added: answered `no_exception`, with the 100.00 credit invisible to the contract |
+| Statement 2 entry dated after the cutoff | bank row `SVC-JUL-1` | dropped by the cutoff (1 row), counted in the manifest; `bank_data_through` is 2026-07-31 |
+
+What this shows and does not show:
+
+- The checks that ended in an answer used references that match by construction. Whether real Xero references equal real CAMT references (G1, A029) was not tested.
+- Every legitimate all-clear (`legitimate_*`) is unreachable from these two formats alone, because they carry no approval history. A real user needs a third source for approvals, or the tool gives no all-clear. This is the largest gap the measurement found.
+- Two answers (`F14` on the F14 and NETFEE shapes) rest on the absence of something Xero cannot hold. They are the places where a user could be misled; a decision on whether to abstain for this source is open (not taken here).
+- The batch case is blocked only by the journal link, not by the reference link.
+
+### 10.4 Public samples run
+
+Downloaded into `data/public-samples/` (ignored by git; never committed). Raw files:
+
+| File | Source | sha256 |
+|---|---|---|
+| `xero_accounting.yaml` | Xero-OpenAPI at `df43c6dd06c0eccffdf09297dcae3b0dbcf3a498` (MIT) | `1afca0717bb0d323210c0f88f3802684c068059f6e5161ee24ddde7ee6294a64` |
+| `ing-sample-camt.pdf` | https://assets.ing.com/m/19ba05999348c5c7/original/Sample-Files-CAMT.pdf (licence not stated: kept local) | `23ef81661e51ef4cc6a23d25e2e80a5353a4b068e8ae8366c5020dc9adf7d052` |
+
+Derived local files (two throwaway scripts outside the repository, not part of the product): the `GET` 200 response example of `/Invoices`, `/Payments`, `/BatchPayments`, `/Journals` read with PyYAML with its timestamp resolver switched off (so dates stay text) and written as JSON into `xero_examples/`; the PDF turned to text with `pdftotext -layout` (poppler 24.02), the one complete `<Document>` copied to `ing_camt053_sample.xml`, and the seven separate `<Ntry>` examples wrapped in a minimal statement as `ing_ntry_snippets.xml`. The PDF text shows those seven examples with all element names in lower case (`<ntry>`, `ccy=`); I restored the usual camel case from a name list written from the first sample, so that file is a reconstruction, not the bank's file. Page-break form feeds were removed.
+
+Results (`tests/integration/test_public_format_samples.py`, structural facts only):
+
+- **Xero spec examples.** All four files read without error: 3 invoices, 2 payments, 1 batch, 4 journals. They hold **no payable** object (all invoices are `ACCREC`, the payments are `ACCRECPAYMENT` and `ARCREDITPAYMENT`, the batch is `RECBATCH`), so the payables path of the reader was **not exercised** by public data. 9 journal lines were mapped, none typed `payment`, every journal sums to zero in `NetAmount`. The spec's own currency is `NZD`, which `Money` does not list, so preparing the examples is refused naming `NZD`. The `ACCRECPAYMENT` journal's `SourceID` equals the `PaymentID` in the payments example (the two examples are consistent with each other). This is weak support for A036, for a receivable payment in documentation examples, not for payables.
+- **ING full sample** (one batch credit entry, `NL08INGB0000001234`): 1 row. `AcctSvcrRef` is the ID, `Btch/PmtInfId` the reference (no `TxDtls`), the amount 270.00 EUR credit, `bank_data_through` 2014-01-03 from `FrToDt`. The statement also holds `PRCD`, `OPBD`, `CLBD`, `CLAV` balances and `TxsSummry` (9 entries); the reader does not check the one entry present against `NbOfNtries` 9 or the balances. That sample is an excerpt, so such a check would refuse it; whether to add it is open.
+- **ING entry examples** (7 entries): 7 rows, 4 credits and 3 debits, all with `AcctSvcrRef`; references from `EndToEndId` (4), `Ustrd` (2) and none (1). One entry (20534.21 CHF) disagrees with an EUR account when the wrapper states `Ccy` EUR; it is refused as designed. The wrapper used for the run states no account currency, because the example set mixes currencies, which no single account statement does. The `Ustrd` of one entry has a line break, which the operational step normalises.
+- **No sample failed a parser for a reason that was the parser's fault.** The two failures met on the way were mine: form feeds copied from the PDF (removed), and a currency conflict I had introduced in the wrapper (removed, then tested separately as above).
+
+### 10.5 Not tested
+
+- Any real Xero or CAMT.053 export, and whether practitioners use these formats at all (section 9 still applies).
+- G1: that a Xero reference equals a CAMT reference. The fixtures set them equal.
+- Paginated or very large Xero files, credit-note payments, multi-currency organisations with `BankAmount` different from `Amount` (the manifest does not even count them), batches in a foreign currency.
+- CAMT versions other than `.02` in a real file (`.08` is only accepted in a unit test), `Chrgs`, `AmtDtls`, `RtrInf`, multi-account files.
+- A fee or reversal journal posted from the CAMT row (impossible in the pair, G4 and G5).
+- Whether `AUTHORISED` is a good stand-in for "the payment was made" (interpretation 1), and whether `JournalDate` or `CreatedDateUTC` is the availability date (A034).
+- The `NOTPROVIDED` rule against a primary source (interpretation 16).
+- Approvals: no source is supplied, so no `legitimate_*` conclusion was reached without a hand-written approval table.

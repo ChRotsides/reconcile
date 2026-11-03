@@ -1,0 +1,13 @@
+# Invented configuration for the invented organisation in this folder.
+version = 1
+xero_dir = "xero"
+camt_files = ["bank/2026-06.xml", "bank/2026-07.xml"]
+base_currency = "EUR"
+payment_reference_field = "Reference"
+bank_reference_fields = ["EndToEndId"]
+
+# Xero has no payment method: say it per Xero account code. Code 999 is left
+# out on purpose, so payments from it have no method.
+[payment_method_by_account]
+"090" = "ACH"
+"091" = "check"

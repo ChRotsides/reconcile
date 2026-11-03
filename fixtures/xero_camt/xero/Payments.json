@@ -1,0 +1,588 @@
+{
+ "Id": "00000000-0000-0000-0000-000000000000",
+ "Status": "OK",
+ "ProviderName": "Invented fixture",
+ "DateTimeUTC": "/Date(1782777600000)/",
+ "Payments": [
+  {
+   "PaymentID": "pay-f06-1",
+   "Date": "/Date(1780272000000+0000)/",
+   "BankAmount": 1000.0,
+   "Amount": 1000.0,
+   "Reference": "F06-RUN-1",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1780272000000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-f06",
+    "InvoiceNumber": "BILL-INV-F06",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000"
+  },
+  {
+   "PaymentID": "pay-f06-2",
+   "Date": "/Date(1780876800000+0000)/",
+   "BankAmount": 1000.0,
+   "Amount": 1000.0,
+   "Reference": "F06-RUN-2",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1780876800000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-f06",
+    "InvoiceNumber": "BILL-INV-F06",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000"
+  },
+  {
+   "PaymentID": "pay-spl-1",
+   "Date": "/Date(1780272000000+0000)/",
+   "BankAmount": 600.0,
+   "Amount": 600.0,
+   "Reference": "SPL-1",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1780272000000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-spl",
+    "InvoiceNumber": "BILL-INV-SPL",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000"
+  },
+  {
+   "PaymentID": "pay-spl-2",
+   "Date": "/Date(1780358400000+0000)/",
+   "BankAmount": 400.0,
+   "Amount": 400.0,
+   "Reference": "SPL-2",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1780358400000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-spl",
+    "InvoiceNumber": "BILL-INV-SPL",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000"
+  },
+  {
+   "PaymentID": "pay-due",
+   "Date": "/Date(1781481600000+0000)/",
+   "BankAmount": 750.0,
+   "Amount": 750.0,
+   "Reference": "DUE-1",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1781481600000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-due",
+    "InvoiceNumber": "BILL-INV-DUE",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000"
+  },
+  {
+   "PaymentID": "pay-f12",
+   "Date": "/Date(1780272000000+0000)/",
+   "BankAmount": 900.0,
+   "Amount": 900.0,
+   "Reference": "F12-1",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1780272000000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-f12",
+    "InvoiceNumber": "BILL-INV-F12",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000"
+  },
+  {
+   "PaymentID": "pay-pend",
+   "Date": "/Date(1782691200000+0000)/",
+   "BankAmount": 300.0,
+   "Amount": 300.0,
+   "Reference": "PEND-1",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1782691200000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-pend",
+    "InvoiceNumber": "BILL-INV-PEND",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000"
+  },
+  {
+   "PaymentID": "pay-wknd",
+   "Date": "/Date(1780617600000+0000)/",
+   "BankAmount": 800.0,
+   "Amount": 800.0,
+   "Reference": "WKND-1",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1780617600000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-wknd",
+    "InvoiceNumber": "BILL-INV-WKND",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000"
+  },
+  {
+   "PaymentID": "pay-chk",
+   "Date": "/Date(1780272000000+0000)/",
+   "BankAmount": 1200.0,
+   "Amount": 1200.0,
+   "Reference": "CHK-1",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1780272000000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-091",
+    "Code": "091"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-chk",
+    "InvoiceNumber": "BILL-INV-CHK",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000"
+  },
+  {
+   "PaymentID": "pay-b1",
+   "Date": "/Date(1780617600000+0000)/",
+   "BankAmount": 400.0,
+   "Amount": 400.0,
+   "Reference": "BATCH-0605",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1780617600000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-b1",
+    "InvoiceNumber": "BILL-INV-B1",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000",
+   "BatchPaymentID": "bat-1"
+  },
+  {
+   "PaymentID": "pay-b2",
+   "Date": "/Date(1780617600000+0000)/",
+   "BankAmount": 600.0,
+   "Amount": 600.0,
+   "Reference": "BATCH-0605",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1780617600000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-b2",
+    "InvoiceNumber": "BILL-INV-B2",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000",
+   "BatchPaymentID": "bat-1"
+  },
+  {
+   "PaymentID": "pay-fx",
+   "Date": "/Date(1780272000000+0000)/",
+   "BankAmount": 1000.0,
+   "Amount": 1000.0,
+   "Reference": "FX-1",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1780272000000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-fx",
+    "InvoiceNumber": "BILL-INV-FX",
+    "CurrencyCode": "USD",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000"
+  },
+  {
+   "PaymentID": "pay-f14",
+   "Date": "/Date(1780272000000+0000)/",
+   "BankAmount": 800.0,
+   "Amount": 800.0,
+   "Reference": "F14-1",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1780272000000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-f14",
+    "InvoiceNumber": "BILL-INV-F14",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000"
+  },
+  {
+   "PaymentID": "pay-net",
+   "Date": "/Date(1780272000000+0000)/",
+   "BankAmount": 800.0,
+   "Amount": 800.0,
+   "Reference": "NET-1",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1780272000000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-net",
+    "InvoiceNumber": "BILL-INV-NET",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000"
+  },
+  {
+   "PaymentID": "pay-fee",
+   "Date": "/Date(1780272000000+0000)/",
+   "BankAmount": 500.0,
+   "Amount": 500.0,
+   "Reference": "FEE-1",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1780272000000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-fee",
+    "InvoiceNumber": "BILL-INV-FEE",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000"
+  },
+  {
+   "PaymentID": "pay-rev",
+   "Date": "/Date(1780272000000+0000)/",
+   "BankAmount": 700.0,
+   "Amount": 700.0,
+   "Reference": "REV-1",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "DELETED",
+   "UpdatedDateUTC": "/Date(1780272000000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-rev",
+    "InvoiceNumber": "BILL-INV-REV",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000"
+  },
+  {
+   "PaymentID": "pay-unm",
+   "Date": "/Date(1780272000000+0000)/",
+   "BankAmount": 500.0,
+   "Amount": 500.0,
+   "Reference": "UNM-1",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1780272000000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-unm",
+    "InvoiceNumber": "BILL-INV-UNM",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false
+  },
+  {
+   "PaymentID": "pay-nom",
+   "Date": "/Date(1780272000000+0000)/",
+   "BankAmount": 650.0,
+   "Amount": 650.0,
+   "Reference": "NOM-1",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1780272000000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-999",
+    "Code": "999"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-nom",
+    "InvoiceNumber": "BILL-INV-NOM",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000"
+  },
+  {
+   "PaymentID": "pay-crd",
+   "Date": "/Date(1780272000000+0000)/",
+   "BankAmount": 300.0,
+   "Amount": 300.0,
+   "Reference": "CRD-1",
+   "CurrencyRate": 1.0,
+   "PaymentType": "ACCPAYPAYMENT",
+   "Status": "AUTHORISED",
+   "UpdatedDateUTC": "/Date(1780272000000+0000)/",
+   "HasAccount": true,
+   "IsReconciled": false,
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Invoice": {
+    "Type": "ACCPAY",
+    "InvoiceID": "inv-crd",
+    "InvoiceNumber": "BILL-INV-CRD",
+    "CurrencyCode": "EUR",
+    "Contact": {
+     "ContactID": "contact-a",
+     "Name": "Invented Supplier A GmbH"
+    }
+   },
+   "HasValidationErrors": false,
+   "BankAccountNumber": "DE89370400440532013000"
+  },
+  {
+   "PaymentID": "pay-ar-1",
+   "Date": "/Date(1780358400000+0000)/",
+   "Amount": 99.0,
+   "PaymentType": "ACCRECPAYMENT",
+   "Status": "AUTHORISED",
+   "Account": {
+    "Code": "090"
+   },
+   "Invoice": {
+    "InvoiceID": "inv-ar-1",
+    "Type": "ACCREC"
+   }
+  },
+  {
+   "PaymentID": "pay-cn-1",
+   "Date": "/Date(1780358400000+0000)/",
+   "Amount": 40.0,
+   "PaymentType": "APCREDITPAYMENT",
+   "Status": "AUTHORISED",
+   "Account": {
+    "Code": "090"
+   },
+   "Invoice": {
+    "InvoiceID": "cn-1",
+    "Type": "ACCPAYCREDIT"
+   }
+  }
+ ]
+}

@@ -1,0 +1,568 @@
+{
+ "Id": "00000000-0000-0000-0000-000000000000",
+ "Status": "OK",
+ "ProviderName": "Invented fixture",
+ "DateTimeUTC": "/Date(1782777600000)/",
+ "Journals": [
+  {
+   "JournalID": "jrn-1",
+   "JournalDate": "/Date(1780272000000+0000)/",
+   "JournalNumber": 1,
+   "CreatedDateUTC": "/Date(1780272000000+0000)/",
+   "SourceID": "pay-f06-1",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-1-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 1000.0,
+     "GrossAmount": 1000.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-1-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -1000.0,
+     "GrossAmount": -1000.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-2",
+   "JournalDate": "/Date(1780876800000+0000)/",
+   "JournalNumber": 2,
+   "CreatedDateUTC": "/Date(1780876800000+0000)/",
+   "SourceID": "pay-f06-2",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-2-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 1000.0,
+     "GrossAmount": 1000.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-2-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -1000.0,
+     "GrossAmount": -1000.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-3",
+   "JournalDate": "/Date(1780272000000+0000)/",
+   "JournalNumber": 3,
+   "CreatedDateUTC": "/Date(1780272000000+0000)/",
+   "SourceID": "pay-spl-1",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-3-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 600.0,
+     "GrossAmount": 600.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-3-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -600.0,
+     "GrossAmount": -600.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-4",
+   "JournalDate": "/Date(1780358400000+0000)/",
+   "JournalNumber": 4,
+   "CreatedDateUTC": "/Date(1780358400000+0000)/",
+   "SourceID": "pay-spl-2",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-4-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 400.0,
+     "GrossAmount": 400.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-4-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -400.0,
+     "GrossAmount": -400.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-5",
+   "JournalDate": "/Date(1781481600000+0000)/",
+   "JournalNumber": 5,
+   "CreatedDateUTC": "/Date(1781481600000+0000)/",
+   "SourceID": "pay-due",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-5-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 750.0,
+     "GrossAmount": 750.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-5-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -750.0,
+     "GrossAmount": -750.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-6",
+   "JournalDate": "/Date(1780272000000+0000)/",
+   "JournalNumber": 6,
+   "CreatedDateUTC": "/Date(1780272000000+0000)/",
+   "SourceID": "pay-f12",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-6-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 900.0,
+     "GrossAmount": 900.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-6-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -900.0,
+     "GrossAmount": -900.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-7",
+   "JournalDate": "/Date(1782691200000+0000)/",
+   "JournalNumber": 7,
+   "CreatedDateUTC": "/Date(1782691200000+0000)/",
+   "SourceID": "pay-pend",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-7-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 300.0,
+     "GrossAmount": 300.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-7-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -300.0,
+     "GrossAmount": -300.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-8",
+   "JournalDate": "/Date(1780617600000+0000)/",
+   "JournalNumber": 8,
+   "CreatedDateUTC": "/Date(1780617600000+0000)/",
+   "SourceID": "pay-wknd",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-8-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 800.0,
+     "GrossAmount": 800.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-8-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -800.0,
+     "GrossAmount": -800.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-9",
+   "JournalDate": "/Date(1780272000000+0000)/",
+   "JournalNumber": 9,
+   "CreatedDateUTC": "/Date(1780272000000+0000)/",
+   "SourceID": "pay-chk",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-9-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 1200.0,
+     "GrossAmount": 1200.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-9-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -1200.0,
+     "GrossAmount": -1200.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-10",
+   "JournalDate": "/Date(1780617600000+0000)/",
+   "JournalNumber": 10,
+   "CreatedDateUTC": "/Date(1780617600000+0000)/",
+   "SourceID": "pay-b1",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-10-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 400.0,
+     "GrossAmount": 400.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-10-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -400.0,
+     "GrossAmount": -400.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-11",
+   "JournalDate": "/Date(1780617600000+0000)/",
+   "JournalNumber": 11,
+   "CreatedDateUTC": "/Date(1780617600000+0000)/",
+   "SourceID": "pay-b2",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-11-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 600.0,
+     "GrossAmount": 600.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-11-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -600.0,
+     "GrossAmount": -600.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-12",
+   "JournalDate": "/Date(1780272000000+0000)/",
+   "JournalNumber": 12,
+   "CreatedDateUTC": "/Date(1780272000000+0000)/",
+   "SourceID": "pay-f14",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-12-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 800.0,
+     "GrossAmount": 800.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-12-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -800.0,
+     "GrossAmount": -800.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-13",
+   "JournalDate": "/Date(1780272000000+0000)/",
+   "JournalNumber": 13,
+   "CreatedDateUTC": "/Date(1780272000000+0000)/",
+   "SourceID": "pay-net",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-13-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 800.0,
+     "GrossAmount": 800.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-13-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -800.0,
+     "GrossAmount": -800.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-14",
+   "JournalDate": "/Date(1780444800000+0000)/",
+   "JournalNumber": 14,
+   "CreatedDateUTC": "/Date(1780444800000+0000)/",
+   "SourceID": "SVC-NET-1",
+   "SourceType": "CASHPAID",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-14-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 20.0,
+     "GrossAmount": 20.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-14-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -20.0,
+     "GrossAmount": -20.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-15",
+   "JournalDate": "/Date(1780272000000+0000)/",
+   "JournalNumber": 15,
+   "CreatedDateUTC": "/Date(1780272000000+0000)/",
+   "SourceID": "pay-fee",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-15-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 500.0,
+     "GrossAmount": 500.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-15-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -500.0,
+     "GrossAmount": -500.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-16",
+   "JournalDate": "/Date(1780272000000+0000)/",
+   "JournalNumber": 16,
+   "CreatedDateUTC": "/Date(1780272000000+0000)/",
+   "SourceID": "pay-rev",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-16-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 700.0,
+     "GrossAmount": 700.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-16-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -700.0,
+     "GrossAmount": -700.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-17",
+   "JournalDate": "/Date(1780272000000+0000)/",
+   "JournalNumber": 17,
+   "CreatedDateUTC": "/Date(1780272000000+0000)/",
+   "SourceID": "pay-unm",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-17-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 500.0,
+     "GrossAmount": 500.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-17-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -500.0,
+     "GrossAmount": -500.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-18",
+   "JournalDate": "/Date(1780272000000+0000)/",
+   "JournalNumber": 18,
+   "CreatedDateUTC": "/Date(1780272000000+0000)/",
+   "SourceID": "pay-nom",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-18-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 650.0,
+     "GrossAmount": 650.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-18-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -650.0,
+     "GrossAmount": -650.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-19",
+   "JournalDate": "/Date(1780272000000+0000)/",
+   "JournalNumber": 19,
+   "CreatedDateUTC": "/Date(1780272000000+0000)/",
+   "SourceID": "pay-crd",
+   "SourceType": "ACCPAYPAYMENT",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-19-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 300.0,
+     "GrossAmount": 300.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-19-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -300.0,
+     "GrossAmount": -300.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  },
+  {
+   "JournalID": "jrn-20",
+   "JournalDate": "/Date(1780358400000+0000)/",
+   "JournalNumber": 20,
+   "CreatedDateUTC": "/Date(1780358400000+0000)/",
+   "SourceID": "inv-ar-1",
+   "SourceType": "ACCREC",
+   "JournalLines": [
+    {
+     "JournalLineID": "jrn-20-1",
+     "AccountCode": "210",
+     "AccountType": "CURRENTLIABILITY",
+     "AccountName": "Accounts Payable",
+     "NetAmount": 99.0,
+     "GrossAmount": 99.0,
+     "TaxAmount": 0.0
+    },
+    {
+     "JournalLineID": "jrn-20-2",
+     "AccountCode": "090",
+     "AccountType": "BANK",
+     "AccountName": "Business Bank Account",
+     "NetAmount": -99.0,
+     "GrossAmount": -99.0,
+     "TaxAmount": 0.0
+    }
+   ]
+  }
+ ]
+}
