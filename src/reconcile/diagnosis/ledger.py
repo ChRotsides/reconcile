@@ -22,10 +22,19 @@ from reconcile.domain.money import Money
 from reconcile.retrieval.snapshot import Row
 
 
+class FieldMissing(ValueError):
+    """A required value is absent from the data. Not a malformed record: the
+    export simply does not carry it, so the pipeline abstains."""
+
+    def __init__(self, column: str) -> None:
+        super().__init__(f"{column} is null")
+        self.column = column
+
+
 def req(row: Row, key: str) -> str:
     v = row[key]
     if v is None:
-        raise ValueError(f"{key} is null")
+        raise FieldMissing(key)
     return v
 
 

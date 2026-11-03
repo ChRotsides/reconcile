@@ -392,11 +392,11 @@ def test_an_unmapped_required_column_is_named(tmp_path: Path) -> None:
     lines = [
         line
         for line in mapping.read_text().splitlines()
-        if not line.startswith("counterparty_token")
+        if not line.startswith("direction")
     ]
     mapping.write_text("\n".join(lines) + "\n")
     message = refused(folder, tmp_path, "required contract columns not mapped")
-    assert "counterparty_token" in message and "bank_transactions" in message
+    assert "direction" in message and "bank_transactions" in message
 
 
 def test_an_unmapped_optional_column_is_stored_null(tmp_path: Path) -> None:

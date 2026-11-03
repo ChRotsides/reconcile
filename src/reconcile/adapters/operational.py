@@ -59,16 +59,22 @@ REQUIRED_TABLES = (
 # NULL in a prepared snapshot and re-running every scenario): these either
 # changed no verdict or turned an answer into an explicit abstained, failed or
 # out_of_scope packet. Every other column of a checked table is required,
-# because NULL there silently changed verdicts (for example a NULL
-# counterparty_token turned an abstention into an F12 answer).
+# because NULL there silently changed verdicts. A NULL counterparty_token once
+# turned an abstention into an F12 answer; the A3 search now abstains
+# `counterparty_unavailable` when either side's account is absent, so both
+# account columns are optional (contract note of 2026-11).
 _OPTIONAL = {
     "invoices": (
         "vendor_id po_id invoice_date received_date due_date subtotal tax "
         "shipping payment_terms status"
     ),
-    "payments": "vendor_id created_at payment_method reference_number",
+    "payments": (
+        "vendor_id bank_account_id created_at payment_method reference_number"
+    ),
     "payment_allocations": "",
-    "bank_transactions": "payment_reference bank_account_id transaction_date",
+    "bank_transactions": (
+        "payment_reference counterparty_token bank_account_id transaction_date"
+    ),
     "gl_entries": "accounting_period gl_account",
     "approval_events": "approver_role previous_status",
 }
@@ -211,7 +217,7 @@ def prepare_operational_snapshot(
             dict(extras or {}),
             locate or (lambda _table, n: f"row {n}"),
         )
-        os.chmod(work, 0o755)
+        os.chmod(work, 0o700)  # real data: owner only (D164)
         os.rename(work, out_dir)
     except BaseException:
         shutil.rmtree(work, ignore_errors=True)

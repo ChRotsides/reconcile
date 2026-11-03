@@ -105,6 +105,23 @@ def unreferenced_debits(
     )
 
 
+def debits_without_counterparty(
+    reader: Reader, currency: str, cutoff: date
+) -> list[Row]:
+    """Rows the A3 pool would hold if their counterparty were known: same filters
+    as `unreferenced_debits`, counterparty absent. One is enough to know the A3
+    search cannot be trusted; the Reader's row limit bounds the rest."""
+    return reader.rows(
+        f"SELECT {BANK_COLS} FROM bank_transactions b WHERE direction = 'debit'"
+        " AND transaction_type <> 'bank fee' AND currency = ?"
+        " AND counterparty_token IS NULL AND posted_date <= ?"
+        " AND NOT EXISTS (SELECT 1 FROM payments p"
+        " WHERE p.reference_number = b.payment_reference)"
+        " ORDER BY bank_transaction_id",
+        (currency, cutoff.isoformat()),
+    )
+
+
 def unbanked_payments(
     reader: Reader, counterparty: str, currency: str, cutoff: date
 ) -> list[Row]:

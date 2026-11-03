@@ -125,6 +125,12 @@ REASONS: dict[str, str] = {
         "The record is not in the data as of the cutoff."
     ),
     "required_records_missing": ("A record the check needs is missing from the data."),
+    "required_field_missing": ("A value the check needs is absent from the data."),
+    "counterparty_unavailable": (
+        "The data has no counterparty account for this payment or for a bank "
+        "debit that could settle it, so the search for an unmatched debit could "
+        "not run. No conclusion was drawn about whether the bank row is missing."
+    ),
     "ambiguous_reference": (
         "The reference could not be tied to a single payment or a single bank "
         "debit, so the match is ambiguous."

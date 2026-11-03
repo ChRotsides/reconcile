@@ -221,6 +221,8 @@ def test_collector_finds_known_codes() -> None:
         "payment_without_invoice_allocation",
         "unexpected_exception",
         "snapshot_mismatch",
+        "required_field_missing",
+        "counterparty_unavailable",
     ):
         assert known in reasons, known
     assert len(reasons) >= 40

@@ -6,9 +6,11 @@ in an explicit disposition (PLAN.md section 4).
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 from reconcile.diagnosis.invoice import diagnose_invoice
+from reconcile.diagnosis.ledger import FieldMissing
 from reconcile.diagnosis.payment import diagnose_bank_row, diagnose_payment
 from reconcile.diagnosis.policy import declared
 from reconcile.domain.contracts import (
@@ -52,8 +54,9 @@ class _Failure(Exception):
         self.reason = reason
 
 
-def _check_snapshot(path: Path, request: InvestigationRequest) -> None:
-    """Bind the file to the request through the manifest written beside it.
+def _check_snapshot(path: Path, request: InvestigationRequest) -> tuple[str, ...]:
+    """Bind the file to the request through the manifest written beside it and
+    return the data-coverage limitations the manifest declares (none for FinRCA).
 
     Trusts the manifest; the content digest is not recomputed (assumption).
     """
@@ -64,6 +67,21 @@ def _check_snapshot(path: Path, request: InvestigationRequest) -> None:
         raise _Failure("snapshot_manifest_unreadable", f"{type(e).__name__}") from e
     if digest != request.snapshot:
         raise _Failure("snapshot_mismatch", "request names a different snapshot")
+    notes: list[str] = []
+    missing = manifest.get("tables_not_supplied")
+    if isinstance(missing, list) and missing:
+        notes.append(
+            "These tables were not supplied with this data, so a search of them "
+            "finding nothing says nothing about them: "
+            f"{', '.join(str(t) for t in missing)}."
+        )
+    through = manifest.get("bank_data_through")
+    if through:
+        notes.append(
+            f"Bank data was declared complete through {through} by whoever "
+            "prepared the data."
+        )
+    return tuple(notes)
 
 
 def investigate(
@@ -79,9 +97,22 @@ def investigate(
         ("requested_policy_version", request.policy_version),
         *declared(),
     )
+    try:
+        notes = _check_snapshot(snapshot_path, request)
+        packet = _investigate(snapshot_path, request, limits, prov)
+        return replace(packet, limitations=(*packet.limitations, *notes))
+    except _Failure as e:
+        return _failed(request, prov, e.reason, str(e))
+
+
+def _investigate(
+    snapshot_path: Path,
+    request: InvestigationRequest,
+    limits: Limits,
+    prov: tuple[tuple[str, str], ...],
+) -> EvidencePacket:
     entity = request.primary_entity
     try:
-        _check_snapshot(snapshot_path, request)
         with Reader(snapshot_path, limits) as reader:
             key = KEY_COLUMNS.get(entity.table)
             if key is not None and not reader.exists(
@@ -124,10 +155,17 @@ def investigate(
             ("complete retrieval within the declared limits",),
             ("Retrieval hit a limit; the evidence is incomplete, not absent.",),
         )
-    except _Failure as e:
-        return _failed(request, prov, e.reason, str(e))
     except sqlite3.Error as e:
         return _failed(request, prov, "snapshot_unreadable", type(e).__name__)
+    except FieldMissing as e:
+        return _packet(
+            request,
+            prov,
+            Disposition.ABSTAINED,
+            "required_field_missing",
+            (f"the value of {e.column}, absent from the data",),
+            (f"The data has no value for {e.column}; the check needs it.",),
+        )
     except ValueError as e:  # malformed or non-unique row, inconsistent packet
         return _failed(request, prov, "malformed_record", str(e))
 

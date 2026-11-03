@@ -269,12 +269,10 @@ def test_bad_values_are_refused_naming_table_row_and_column(
 @pytest.mark.parametrize(
     ("table", "column"),
     [
-        ("bank_transactions", "counterparty_token"),
         ("bank_transactions", "direction"),
         ("bank_transactions", "status"),
         ("bank_transactions", "transaction_type"),
         ("bank_transactions", "posted_date"),
-        ("payments", "bank_account_id"),
         ("payments", "payment_status"),
         ("payments", "settlement_status"),
         ("payments", "payment_date"),
@@ -321,7 +319,7 @@ def test_unrecognised_payment_method_is_listed_and_the_investigator_abstains(
             "f12_payment_missing_from_bank",
             "payments",
             "reference_number",
-            ("failed", None, "malformed_record"),
+            ("abstained", None, "required_field_missing"),
         ),
         (
             "f06_double_payment",
