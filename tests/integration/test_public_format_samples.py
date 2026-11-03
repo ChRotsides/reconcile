@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from reconcile.adapters.camt053 import read_camt053
+from reconcile.adapters.camt053 import read_camt053, read_entries
 from reconcile.adapters.operational import prepare_operational_snapshot
 from reconcile.adapters.xero import KINDS, read_xero
 
@@ -60,7 +60,11 @@ def test_the_xero_examples_prepare_with_nzd_but_hold_no_payables(
         {**data.tables, "bank_transactions": []},
         tmp_path / "snap",
         cutoff=date(2019, 1, 1),
+        bank_data_from=date(2019, 1, 1),
         bank_data_through=date(2019, 1, 1),
+        all_paying_accounts_covered=True,
+        reference_matching="exact",
+        fee_journals_typed=False,
         source_format="sample",
         source_files={},
     )
@@ -71,8 +75,24 @@ def test_the_xero_examples_prepare_with_nzd_but_hold_no_payables(
 
 
 @needs_ing
-def test_ing_full_statement_sample_gives_one_batch_row() -> None:
-    result = read_camt053([ING_FULL], reference_fields=["EndToEndId"])
+def test_ing_full_statement_sample_is_refused_as_incomplete() -> None:
+    # The sample is an excerpt: it states 9 entries and holds 1, and its balances
+    # (opening 1000.00, closing 1605.00) do not follow from that one entry. Both
+    # are refused, because a bank row missing from such a statement proves nothing.
+    with pytest.raises(ValueError) as e:
+        read_camt053([ING_FULL], reference_fields=["EndToEndId"])
+    message = str(e.value)
+    assert "2 problem(s)" in message
+    assert "states 9 entries (TxsSummry/TtlNtries/NbOfNtries) but contains 1" in message
+    assert (
+        "opening 1000.00 + booked credits 270.00 - booked debits 0 = 1270.00, "
+        "but the closing balance is 1605.00" in message
+    )
+
+
+@needs_ing
+def test_ing_full_statement_sample_entry_parses_through_the_entry_reader() -> None:
+    result = read_entries([ING_FULL], reference_fields=["EndToEndId"])
     assert len(result.rows) == 1
     row = result.rows[0]
     assert (row["amount"], row["currency"], row["direction"]) == (
@@ -82,7 +102,7 @@ def test_ing_full_statement_sample_gives_one_batch_row() -> None:
     )
     assert row["payment_reference"] == "SCTBtchId20140103A2PSTN"  # Btch/PmtInfId
     assert row["bank_transaction_id"] == "3102766686999"  # AcctSvcrRef
-    assert str(result.bank_data_through) == "2014-01-03"  # FrToDt/ToDtTm
+    assert result.bank_data_through is None  # the entry reader gives no coverage
 
 
 @needs_ing

@@ -42,11 +42,22 @@ def _money_text(v: str) -> str:
     return f"{Decimal(v):,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
 
 
-def write_bundle(name: str, folder: Path, through: str = "2026-07-31") -> None:
+def write_bundle(
+    name: str,
+    folder: Path,
+    through: str = "2026-07-31",
+    start: str = "2026-01-01",
+    matching: str = "normalised",
+) -> None:
     """Rewrite fixture `name` as semicolon-separated exports with a BOM, CRLF
     line ends, a blank trailing line and renamed columns, plus its mapping."""
     folder.mkdir(parents=True, exist_ok=True)
-    toml = [f'version = 1\nbank_data_through = "{through}"\n']
+    toml = [
+        "version = 1\n"
+        f'bank_data_from = "{start}"\nbank_data_through = "{through}"\n'
+        "all_paying_accounts_covered = true\n"
+        f'reference_matching = "{matching}"\nfee_journals_typed = true\n'
+    ]
     for table in TABLES_USED:
         cols = {c.name: c for c in TABLES[table].columns}
         with (FIXTURES / name / f"{table}.csv").open(newline="") as f:
@@ -229,6 +240,74 @@ def test_bank_data_through_is_required(tmp_path: Path) -> None:
     refused(folder, tmp_path, "bank_data_through: is required")
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "bank_data_from",
+        "all_paying_accounts_covered",
+        "reference_matching",
+        "fee_journals_typed",
+    ],
+)
+def test_every_declaration_is_required_and_explained(key: str, tmp_path: Path) -> None:
+    folder = bundle(tmp_path)
+    text = (folder / "mapping.toml").read_text()
+    kept = [line for line in text.splitlines() if not line.startswith(key)]
+    (folder / "mapping.toml").write_text("\n".join(kept) + "\n")
+    refused(folder, tmp_path, f"{key}: is required")
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "match"),
+    [
+        (
+            "all_paying_accounts_covered = true",
+            "all_paying_accounts_covered = false",
+            "statements for every account payments are made from",
+        ),
+        (
+            "all_paying_accounts_covered = true",
+            'all_paying_accounts_covered = "yes"',
+            "all_paying_accounts_covered: must be true",
+        ),
+        (
+            'reference_matching = "normalised"',
+            'reference_matching = "fuzzy"',
+            "reference_matching: must be one of",
+        ),
+        ("fee_journals_typed = true", 'fee_journals_typed = "yes"', "true or false"),
+        (
+            'bank_data_through = "2026-07-31"',
+            "bank_data_through = 2026-07-31T10:00:00",
+            "bank_data_through: must be a date",
+        ),
+        ('bank_data_from = "2026-01-01"', "bank_data_from = 5", "must be a date"),
+        (
+            'bank_data_from = "2026-01-01"',
+            'bank_data_from = "2026-08-01"',
+            "bank_data_from 2026-08-01 is after",
+        ),
+    ],
+)
+def test_declarations_are_checked(
+    old: str, new: str, match: str, tmp_path: Path
+) -> None:
+    folder = bundle(tmp_path)
+    edit(folder / "mapping.toml", old, new)
+    refused(folder, tmp_path, match)
+
+
+def test_the_declarations_reach_the_manifest(tmp_path: Path) -> None:
+    write_bundle("f06_double_payment", tmp_path / "b", matching="exact")
+    manifest = prepare_csv_bundle(
+        tmp_path / "b" / "mapping.toml", tmp_path / "out", cutoff=CUTOFF
+    )
+    assert manifest["bank_data_from"] == "2026-01-01"
+    assert manifest["all_paying_accounts_covered"] is True
+    assert manifest["reference_matching"] == "exact"
+    assert manifest["fee_journals_recognised"] is True
+
+
 def test_ambiguous_and_unmatched_dates_are_all_reported_with_file_line_value(
     tmp_path: Path,
 ) -> None:
@@ -363,6 +442,21 @@ def test_a_mapping_in_a_subfolder_resolves_relative_to_itself(tmp_path: Path) ->
             'decimal_separator = ",", thousands_separator = "." }',
             'decimal_separator = ",", thousands_separator = "," }',
             "single, different characters",
+        ),
+        (
+            'decimal_separator = ",", thousands_separator = "." }',
+            'decimal_separator = 1, thousands_separator = "." }',
+            "'decimal_separator' must be text",
+        ),
+        (
+            'decimal_separator = ",", thousands_separator = "." }',
+            'decimal_separator = ",", thousands_separator = 2 }',
+            "'thousands_separator' must be text",
+        ),
+        (
+            'payment_id = "Src payment_id"',
+            'payment_id = { column = "Src payment_id", direction_from_sign = "yes" }',
+            "'direction_from_sign' must be true or false",
         ),
         (
             'payment_status = { column = "Src payment_status", '

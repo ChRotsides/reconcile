@@ -1,7 +1,12 @@
 # Invented example. Every source column name below is deliberately unlike the
 # contract's, and the files mix date formats and number styles.
 version = 1
-bank_data_through = "2026-07-31"   # the bank export runs to here
+bank_data_from = "2026-06-01"      # the bank export starts here
+bank_data_through = "2026-07-31"   # and runs to here
+all_paying_accounts_covered = true # it holds every account payments are made from
+# The bank text differs from the remittance in case and spacing ("inv-2001  run 7").
+reference_matching = "normalised"
+fee_journals_typed = false         # this example has no fee journals at all
 
 [tables.invoices]
 file = "inv_export.csv"

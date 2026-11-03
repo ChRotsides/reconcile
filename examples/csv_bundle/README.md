@@ -27,4 +27,7 @@ Then investigate invoice `INV-2001` and `INV-2002` against
 
 Preparation stops, naming file, line and value, on a date that matches no
 declared format or matches two with different results, a status not in its
-`values` map, or a bank export that ends before the cutoff.
+`values` map, a bank export that ends before the cutoff, or a mapping that does
+not state what the bank export covers (`bank_data_from`, `bank_data_through`,
+`all_paying_accounts_covered`), how references are matched (`reference_matching`)
+and whether fee journals are typed (`fee_journals_typed`).

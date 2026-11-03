@@ -374,6 +374,10 @@ def diagnose_bank_row(
         return led.abstain(
             "fee_journal_invalid", "balanced single-currency fee journals"
         )
+    if any(dict(led.items[e].values)["currency"] != cur for e in evs):
+        return led.abstain(
+            "unsupported_fx", "a documented conversion path between currencies"
+        )
     q = quantum(cur)
     diff = led.calc(
         "fee_row_minus_journals",

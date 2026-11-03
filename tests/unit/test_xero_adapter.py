@@ -137,6 +137,9 @@ def test_both_xero_date_forms_are_accepted(raw: str, iso: str) -> None:
         "/Date(1780272000000+0100)/",  # an offset: the spec does not give its meaning
         "/Date(1780272000000)/",
         "/Date(1780275600000+0000)/",  # 01:00 UTC, not a date
+        "/Date(99999999999999999999+0000)/",  # beyond any date a year can hold
+        "/Date(-99999999999999999999+0000)/",
+        "/Date(" + "9" * 5000 + "+0000)/",  # more digits than int() will read
         "2026-06-01T00:00:00",
         "01/06/2026",
         "2026-02-30",
@@ -389,6 +392,77 @@ def test_a_member_status_that_differs_from_the_batch_is_refused(tmp_path: Path) 
     inputs = batch_inputs()
     inputs["payments"][0]["Status"] = "DELETED"
     refused(tmp_path, "differs from the batch", **inputs)
+
+
+def test_each_batch_member_is_represented_once(tmp_path: Path) -> None:
+    data = read(tmp_path, **batch_inputs())
+    assert [r["payment_id"] for r in data.tables["payments"]] == ["bat-1"]
+    assert [r["payment_id"] for r in data.tables["payment_allocations"]] == [
+        "bat-1",
+        "bat-1",
+    ]
+
+
+def test_a_member_whose_invoice_differs_between_payments_and_batch_is_refused(
+    tmp_path: Path,
+) -> None:
+    # Payments says m-1 pays inv-1; the batch lists it against inv-2. Taking the
+    # batch's version moves 100.00 to inv-2 and could fake an overpayment there.
+    inputs = batch_inputs()
+    inputs["batches"][0]["Payments"][0]["Invoice"] = {"InvoiceID": "inv-2"}
+    refused(tmp_path, "m-1.*invoice inv-1 differs from invoice inv-2", **inputs)
+
+
+def test_a_member_whose_amount_differs_between_payments_and_batch_is_refused(
+    tmp_path: Path,
+) -> None:
+    inputs = batch_inputs()
+    inputs["payments"][1]["Amount"] = 150.0
+    inputs["batches"][0]["TotalAmount"] = 300.0
+    refused(tmp_path, "m-2.*Amount 150.0 differs from 200.0", **inputs)
+
+
+def test_a_member_listed_by_a_batch_but_lacking_batchpaymentid_is_refused(
+    tmp_path: Path,
+) -> None:
+    # Otherwise it would be read as an ordinary payment and counted twice.
+    inputs = batch_inputs()
+    del inputs["payments"][0]["BatchPaymentID"]
+    refused(
+        tmp_path, "m-1.*is listed by batch bat-1 but has no BatchPaymentID", **inputs
+    )
+
+
+def test_a_member_naming_another_batch_than_the_one_listing_it_is_refused(
+    tmp_path: Path,
+) -> None:
+    inputs = batch_inputs()
+    inputs["payments"][0]["BatchPaymentID"] = "bat-2"
+    inputs["batches"].append(
+        batch(
+            "bat-2",
+            TotalAmount=5.0,
+            Payments=[
+                {"PaymentID": "m-9", "Amount": 5.0, "Invoice": {"InvoiceID": "inv-1"}}
+            ],
+        )
+    )
+    refused(tmp_path, "m-1.*names batch bat-2, but batch bat-1 lists it", **inputs)
+
+
+def test_a_member_listed_by_two_batches_is_refused(tmp_path: Path) -> None:
+    inputs = batch_inputs()
+    inputs["payments"] = []
+    inputs["batches"].append(batch("bat-2"))
+    refused(tmp_path, "member m-1 is listed 2 times, by batches", **inputs)
+
+
+def test_a_member_listed_twice_in_one_batch_is_refused(tmp_path: Path) -> None:
+    inputs = batch_inputs()
+    inputs["payments"] = []
+    member = {"PaymentID": "m-1", "Amount": 100.0, "Invoice": {"InvoiceID": "inv-1"}}
+    inputs["batches"] = [batch(TotalAmount=200.0, Payments=[member, dict(member)])]
+    refused(tmp_path, "member m-1 is listed 2 times", **inputs)
 
 
 def test_receivable_batches_are_counted_not_used(tmp_path: Path) -> None:

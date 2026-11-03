@@ -26,8 +26,10 @@ CATEGORIES: dict[str, str] = {
     ),
     "F12": (
         "This report concludes that this payment may be missing from the bank "
-        "(code F12): no bank row was found for it and it is past its clearing "
-        "limit."
+        "(code F12): the searches shown found no principal (non-fee) bank row "
+        "for it, either by its reference or as an unmatched debit of the same "
+        "amount, currency and counterparty account, and it is past its "
+        "clearing limit."
     ),
     "F14": (
         "This report concludes an unexplained shortfall (code F14): the bank "
@@ -36,15 +38,18 @@ CATEGORIES: dict[str, str] = {
     ),
     "legitimate_split_payment": (
         "The records are consistent with a split payment: several "
-        "payments whose allocations together equal the invoice total."
+        "payments whose allocations together equal the invoice total within "
+        "the stated tolerance."
     ),
     "legitimate_due_date_payment": (
         "The records are consistent with a payment made on the "
-        "invoice due date, with allocations equal to the invoice total."
+        "invoice due date, with allocations equal to the invoice total within "
+        "the stated tolerance."
     ),
     "legitimate_pending_settlement": (
-        "The records are consistent with a payment that has no bank "
-        "row yet but is still within its clearing limit."
+        "The records are consistent with a payment that has no principal "
+        "(non-fee) bank row in the searches shown yet but is still within its "
+        "clearing limit."
     ),
     "legitimate_accounted_bank_fee": (
         "The records are consistent with a bank fee row that is "
@@ -117,6 +122,10 @@ def title(packet: EvidencePacket) -> str:
     return DISPOSITION_TITLES[d.disposition]
 
 
+# No search for an explanation of a difference runs: the check compares and
+# stops, so the wording must not say that one was looked for and not found.
+_NOT_EXPLAINED = "This tool does not establish an explanation for that difference."
+
 # Reason -> why there is no conclusion. Used for abstained, out_of_scope and
 # failed; the disposition decides the lead-in sentence.
 REASONS: dict[str, str] = {
@@ -124,7 +133,11 @@ REASONS: dict[str, str] = {
     "primary_entity_not_in_snapshot": (
         "The record is not in the data as of the cutoff."
     ),
-    "required_records_missing": ("A record the check needs is missing from the data."),
+    "required_records_missing": (
+        "The records or relationships the check needs could not be established "
+        "from the data. A record may be absent, or the records found may not "
+        "form the single, valid set the check requires."
+    ),
     "required_field_missing": ("A value the check needs is absent from the data."),
     "counterparty_unavailable": (
         "The data has no counterparty account for this payment or for a bank "
@@ -142,6 +155,15 @@ REASONS: dict[str, str] = {
         "The records involve more than one currency and this tool has no "
         "documented conversion path."
     ),
+    "cutoff_differs_from_snapshot": (
+        "The request's cutoff differs from the cutoff the data was prepared "
+        "with, so the investigation did not run. Prepare the data again with "
+        "this cutoff."
+    ),
+    "payment_before_bank_coverage": (
+        "The payment is dated before the bank data starts, so a missing bank "
+        "row says nothing. No conclusion was drawn."
+    ),
     "unknown_payment_method": ("The payment method has no declared clearing limit."),
     "retrieval_row_limit": (
         "Record retrieval stopped at its row limit. The evidence is "
@@ -152,45 +174,48 @@ REASONS: dict[str, str] = {
         "incomplete, not absent."
     ),
     "batch_search_limit_exceeded": (
-        "There are too many unmatched payments from the same account to test "
-        "for a batch debit, so that check was not run."
+        "There are too many unbanked payments to the same counterparty account "
+        "to test for a batch debit, so that check was not run."
     ),
     # bank side
     "bank_row_not_a_posted_debit": (
         "The bank rows found for this payment include no posted debit."
     ),
     "bank_amount_above_payment": (
-        "The bank debit is larger than the payment amount, and no explanation "
-        "was found."
+        "The bank debit is larger than the payment amount. " + _NOT_EXPLAINED
     ),
     "bank_row_before_payment": (
-        "A bank debit is dated before the payment date, and no explanation was found."
+        "A bank debit is dated before the payment date. " + _NOT_EXPLAINED
     ),
     "clearing_lag_exceeds_limit": (
         "The bank debit posted later than the clearing limit for this payment "
-        "method, and no explanation was found."
+        "method. " + _NOT_EXPLAINED
     ),
     "pending_payment_beyond_clearing_limit": (
-        "The payment is not yet final and is past its clearing limit. Its "
-        "status could not be determined."
+        "The recorded status of the payment is pending or not final, and it is "
+        "past its clearing limit. Its current status needs confirmation."
     ),
     "reference_unmatched_candidate_bank_row": (
-        "A bank row without a payment reference has the same amount, currency "
-        "and counterparty as the payment. It could not be confirmed as the "
-        "settlement of this payment."
+        "A bank row whose payment reference matches no payment has the same "
+        "amount, currency and counterparty account as the payment. It could not "
+        "be confirmed as the settlement of this payment."
     ),
     "reference_unmatched_nearby_debit": (
-        "A bank debit without a payment reference lies near this payment but "
-        "equals no combination of payments. It was not confirmed as the "
-        "settlement of this payment."
+        "A bank debit whose payment reference matches no payment, from the same "
+        "counterparty account and currency, lies within the clearing window of "
+        "this payment but does not equal its amount. It also equals no total "
+        "of this payment together with some of the other unbanked payments to "
+        "that account, among the combinations this tool tests. It was not "
+        "confirmed as the settlement of this payment."
     ),
     "bank_batch_grouping_unmodelled": (
-        "A bank debit without a payment reference equals the total of this "
-        "payment and other payments. This tool cannot read how the bank "
-        "grouped them, so it did not decide."
+        "A bank debit whose payment reference matches no payment equals the "
+        "total of this payment and some other unbanked payments to the same "
+        "counterparty account. This tool cannot read how the bank grouped them, "
+        "so it did not decide."
     ),
     "debit_differs_from_payment": (
-        "A bank debit differs from the payment amount, and no explanation was found."
+        "A bank debit differs from the payment amount. " + _NOT_EXPLAINED
     ),
     # allocations and invoice
     "payment_without_invoice_allocation": (
@@ -198,11 +223,11 @@ REASONS: dict[str, str] = {
     ),
     "allocations_differ_from_payment": (
         "The invoice allocations of the payment do not add up to the payment "
-        "amount, and no explanation was found."
+        "amount. " + _NOT_EXPLAINED
     ),
     "invoice_over_allocated": (
-        "The allocations to an invoice exceed its total, so its open balance "
-        "could not be assessed."
+        "The calculated open balance of an invoice is negative, because the "
+        "allocations to it exceed its total. The case was not cleared."
     ),
     "commitment_not_proven_at_cutoff": (
         "The allocations to the invoice exceed its total, but a posted bank "
@@ -215,17 +240,18 @@ REASONS: dict[str, str] = {
         "not be shown to be booked."
     ),
     "fee_journals_not_recognised": (
-        "The bank debit is smaller than the payment, but this data has no "
-        "journals recognised as bank fees, so a fee could explain the "
+        "The bank debit is smaller than the payment, but this data was not "
+        "declared to mark bank-fee journals, so a fee could explain the "
         "difference. No conclusion was drawn about the shortfall."
     ),
     "fee_journal_invalid": (
-        "A bank fee journal exists but is not balanced or mixes currencies, "
-        "so it was not used."
+        "A bank fee journal exists, but it could not be established as balanced "
+        "in one currency, with the lines attributed to this bank row also "
+        "balanced and positive, so it was not used."
     ),
     "fee_journal_amount_differs": (
-        "The bank fee journal amount differs from the bank fee row amount, "
-        "and no explanation was found."
+        "The bank fee journal amount differs from the bank fee row amount. "
+        + _NOT_EXPLAINED
     ),
     "fee_journal_does_not_match_difference": (
         "A bank fee journal exists but does not equal the difference between "
@@ -236,7 +262,7 @@ REASONS: dict[str, str] = {
         "each other and the payment."
     ),
     "reversal_credit_before_debit": (
-        "The reversal credit posted before the debit, and no explanation was found."
+        "The reversal credit posted before the debit. " + _NOT_EXPLAINED
     ),
     "reversal_followed_by_repayment": (
         "The payment was reversed, but another payment also pays the invoice. "
@@ -259,21 +285,21 @@ REASONS: dict[str, str] = {
         "The final approval of an invoice is recorded after the payment date."
     ),
     "payment_over_allocated": (
-        "The allocations of the payment exceed the payment amount, and no "
-        "explanation was found."
+        "The allocations of the payment exceed the payment amount. " + _NOT_EXPLAINED
     ),
     "payment_journal_missing": (
         "No balanced payment journal sourced to the payment was found."
     ),
     "payment_journal_unbalanced": (
-        "A payment journal is not balanced or mixes currencies."
+        "A payment journal could not be established as balanced in one "
+        "currency, with the lines attributed to this payment also balanced and "
+        "positive."
     ),
     "payment_journal_currency_differs": (
         "A payment journal is in a different currency than the payment."
     ),
     "payment_journal_amount_differs": (
-        "The payment journal amount differs from the payment amount, and no "
-        "explanation was found."
+        "The payment journal amount differs from the payment amount. " + _NOT_EXPLAINED
     ),
     # out of scope
     "entity_type_not_supported_yet": (

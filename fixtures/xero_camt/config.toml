@@ -5,6 +5,8 @@ camt_files = ["bank/2026-06.xml", "bank/2026-07.xml"]
 base_currency = "EUR"
 payment_reference_field = "Reference"
 bank_reference_fields = ["EndToEndId"]
+statements_cover_all_paying_accounts = true  # both statements are for the one account
+reference_matching = "exact"                 # the fixtures copy references unchanged
 
 # Xero has no payment method: say it per Xero account code. Code 999 is left
 # out on purpose, so payments from it have no method.

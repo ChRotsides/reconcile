@@ -8,22 +8,31 @@ XML is read with expat directly so that a DOCTYPE (and with it every entity
 declaration) is refused: a statement has no reason to carry one, and refusing
 is simpler than limiting entity expansion.
 
-Coverage (the period each statement states) decides `bank_data_through`:
-per account the periods must follow each other without a gap, and overlapping
-statements are refused unless one is an exact repeat of another. Overlap would
-repeat entries; with position-based IDs that fakes a second, identical debit.
+Coverage (the period each statement states) decides `bank_data_from` and
+`bank_data_through`: per account the periods must follow each other without a
+gap, and overlapping statements are refused unless one is an exact repeat of
+another. Overlap would repeat entries; with position-based IDs that fakes a
+second, identical debit. A partly covered first or last day is not counted as
+covered.
+
+A statement that cannot be shown complete is refused, because the investigator
+reads "no bank row" as evidence: every entry needs a recognised status, a stated
+entry count must match the entries present, and opening plus booked credits
+minus booked debits must equal the closing balance when both are stated.
 """
 
 import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from xml.parsers import expat
 
-PROBLEM_CAP = 25
+from reconcile.adapters.inputs import Problems
+
 NAMESPACE_PREFIX = "urn:iso:std:iso:20022:tech:xsd:camt.053.001."
 REFERENCE_KINDS = ("EndToEndId", "InstrId", "TxId", "PmtInfId", "Ustrd", "CdtrRefInf")
 # The Westpac table lists a fee as domain CAMT, family ACCB, sub-family CHRG
@@ -31,6 +40,11 @@ REFERENCE_KINDS = ("EndToEndId", "InstrId", "TxId", "PmtInfId", "Ustrd", "CdtrRe
 DEFAULT_FEE_CODES = (("CAMT", "ACCB", "CHRG"),)
 _AMOUNT = re.compile(r"[0-9]+(\.[0-9]+)?", re.ASCII)
 _NOT_PROVIDED = "NOTPROVIDED"
+ENTRY_STATUSES = ("BOOK", "PDNG", "INFO")
+# A statement period given as date-times covers its first day from here ...
+_DAY_STARTS_BY = time(0, 0, 59)
+# ... and its last day from here, so a day cut off earlier is not fully covered.
+_DAY_ENDS_FROM = time(23, 59)
 _SEP = " "  # namespace separator in expat names: "<uri> <local>"
 
 
@@ -124,9 +138,11 @@ def parse_xml(data: bytes) -> _El:
 
 @dataclass(frozen=True)
 class Period:
-    first: date
+    first: date  # as stated
     last: date
     source: str  # "FrToDt" or "balance date"
+    covered_first: date  # the first and last day the statement covers whole
+    covered_last: date
 
 
 @dataclass
@@ -147,27 +163,9 @@ class Statement:
 class CamtData:
     rows: list[dict[str, str | None]] = field(default_factory=list)
     where: list[str] = field(default_factory=list)
+    bank_data_from: date | None = None
     bank_data_through: date | None = None
     extras: dict[str, Any] = field(default_factory=dict)
-
-
-class _Problems:
-    def __init__(self) -> None:
-        self.items: list[str] = []
-
-    def add(self, where: str, message: str) -> None:
-        self.items.append(f"{where}: {message}")
-
-    def raise_if_any(self) -> None:
-        if not self.items:
-            return
-        shown = "\n  ".join(self.items[:PROBLEM_CAP])
-        more = len(self.items) - PROBLEM_CAP
-        tail = f"\n  ... and {more} more" if more > 0 else ""
-        raise ValueError(
-            f"{len(self.items)} problem(s) in the CAMT.053 files; nothing was "
-            f"prepared (no entry is dropped or guessed):\n  {shown}{tail}"
-        )
 
 
 class _Bad(Exception):
@@ -195,18 +193,41 @@ def _date_of(node: _El | None, what: str) -> date | None:
     return None
 
 
+def _clock(text: str, what: str) -> time | None:
+    """Wall-clock time of a date-time as written (no zone conversion); None for
+    a plain date."""
+    if len(text) == 10:
+        return None
+    try:
+        return datetime.fromisoformat(text).time()
+    except ValueError:
+        raise _Bad(f"{what} {text!r} is not an ISO date") from None
+
+
 def _period(stmt: _El) -> Period | None:
     window = stmt.find("FrToDt")
     if window is not None:
         a, b = window.value("FrDtTm"), window.value("ToDtTm")
         if a and b:
-            return Period(_day(a, "FrDtTm"), _day(b, "ToDtTm"), "FrToDt")
+            first, last = _day(a, "FrDtTm"), _day(b, "ToDtTm")
+            start, end = _clock(a, "FrDtTm"), _clock(b, "ToDtTm")
+            return Period(
+                first,
+                last,
+                "FrToDt",
+                first
+                if start is None or start <= _DAY_STARTS_BY
+                else first + timedelta(days=1),
+                last
+                if end is None or end >= _DAY_ENDS_FROM
+                else last - timedelta(days=1),
+            )
         raise _Bad("FrToDt lacks FrDtTm or ToDtTm")
     for bal in stmt.findall("Bal"):
         if bal.value("Tp", "CdOrPrtry", "Cd") == "CLBD":
             d = _date_of(bal.find("Dt"), "closing balance Dt")
             if d:
-                return Period(d, d, "balance date")
+                return Period(d, d, "balance date", d, d)
     return None
 
 
@@ -279,15 +300,19 @@ def _reference(entry: _El, fields: Sequence[str], used: Counter[str]) -> str | N
 
 def _counterparty(entry: _El, direction: str) -> str | None:
     """The other party's account: the creditor's for a debit, the debtor's for a
-    credit. Never a name. Several TxDtls with different accounts give None."""
+    credit. Never a name. Known only when every TxDtls names an account and they
+    all agree; one without an account, or two accounts, give None, so the
+    investigator treats the counterparty as unknown rather than as the one seen."""
     acct = "CdtrAcct" if direction == "DBIT" else "DbtrAcct"
-    found = {
-        v
+    found = [
+        d.value("RltdPties", acct, "Id", "IBAN")
         for nd in entry.findall("NtryDtls")
         for d in nd.findall("TxDtls")
-        if (v := d.value("RltdPties", acct, "Id", "IBAN"))
-    }
-    return found.pop() if len(found) == 1 else None
+    ]
+    accounts = {re.sub(r"\s+", "", v).upper() if v else None for v in found}
+    if not found or len(accounts) != 1 or None in accounts:
+        return None
+    return accounts.pop()
 
 
 def _entry_row(
@@ -359,22 +384,22 @@ def _entry_row(
     }
 
 
-def _statements(path: Path, problems: _Problems) -> list[Statement]:
+def _statements(path: Path, problems: Problems) -> list[Statement]:
     name = path.name
     try:
         root = parse_xml(path.read_bytes())
     except (OSError, ValueError) as e:
-        problems.add(name, str(e))
+        problems.add(str(e), name)
         return []
     container = root.find("BkToCstmrStmt")
     if container is None:
-        problems.add(name, "no BkToCstmrStmt element (is this a CAMT.053 statement?)")
+        problems.add("no BkToCstmrStmt element (is this a CAMT.053 statement?)", name)
         return []
     out = []
     for stmt in container.findall("Stmt"):
         sid = stmt.value("Id")
         if not sid:
-            problems.add(f"{name} line {stmt.line}", "Stmt has no Id")
+            problems.add("Stmt has no Id", f"{name} line {stmt.line}")
             continue
         where = f"{name} Stmt {sid!r}"
         try:
@@ -389,18 +414,21 @@ def _statements(path: Path, problems: _Problems) -> list[Statement]:
                 )
             )
         except _Bad as e:
-            problems.add(where, str(e))
+            problems.add(str(e), where)
     if not out:
-        problems.add(name, "contains no Stmt")
+        problems.add("contains no Stmt", name)
     return out
 
 
 def _coverage(
     statements: Sequence[Statement],
+    declared_from: date | None,
     declared: date | None,
-    problems: _Problems,
-) -> tuple[date | None, dict[str, Any]]:
-    """`bank_data_through` and a description of the periods used."""
+    problems: Problems,
+) -> tuple[date | None, date | None, dict[str, Any]]:
+    """`bank_data_from`, `bank_data_through` and a description of the periods
+    used. The data is complete only where every account is covered, so the start
+    is the latest first covered day and the end the earliest last covered day."""
     groups: dict[tuple[str, str | None], list[Statement]] = {}
     unstated: list[Statement] = []
     for s in statements:
@@ -408,13 +436,15 @@ def _coverage(
             unstated.append(s)
         else:
             groups.setdefault((s.account, s.currency), []).append(s)
-    for s in unstated:
-        if declared is None:
+    if unstated and (declared is None or declared_from is None):
+        for s in unstated:
             problems.add(
-                s.label,
                 "states no period (no FrToDt and no closing balance date); give "
-                "bank_data_through in the config to say how far the bank data runs",
+                "bank_data_from and bank_data_through in the config to say what the "
+                "bank data covers",
+                s.label,
             )
+    firsts: dict[str, str] = {}
     lasts: dict[str, str] = {}
     periods: dict[str, list[dict[str, str]]] = {}
     for (account, currency), group in sorted(
@@ -435,47 +465,151 @@ def _coverage(
             assert a.period and b.period
             if b.period.first <= a.period.last:
                 problems.add(
-                    b.label,
                     f"period {b.period.first} to {b.period.last} overlaps "
                     f"{a.label} ({a.period.first} to {a.period.last}); overlapping "
                     "statements would repeat entries. Remove one, or export "
                     "non-overlapping periods",
-                )
-            elif b.period.first > a.period.last + timedelta(days=1):
-                problems.add(
                     b.label,
-                    f"a gap follows {a.label} (last day {a.period.last}); this "
-                    f"statement starts {b.period.first}. Entries in the gap would "
-                    "look missing from the bank",
                 )
-        lasts[key] = max(s.period.last for s in group if s.period).isoformat()
+            elif b.period.covered_first > a.period.covered_last + timedelta(days=1):
+                problems.add(
+                    f"a gap follows {a.label} (last day covered "
+                    f"{a.period.covered_last}); this statement covers whole days "
+                    f"from {b.period.covered_first}. Entries in the gap would "
+                    "look missing from the bank",
+                    b.label,
+                )
+        assert group[0].period
+        firsts[key] = group[0].period.covered_first.isoformat()
+        lasts[key] = max(s.period.covered_last for s in group if s.period).isoformat()
     computed = min(date.fromisoformat(v) for v in lasts.values()) if lasts else None
+    computed_from = (
+        max(date.fromisoformat(v) for v in firsts.values()) if firsts else None
+    )
     if declared is not None and computed is not None and declared > computed:
         problems.add(
-            "config",
             f"bank_data_through {declared} is later than the statements show "
             f"({computed}, the earliest last day covered across accounts)",
+            "config",
         )
+    if declared_from is not None and computed_from is not None:
+        if declared_from < computed_from:
+            problems.add(
+                f"bank_data_from {declared_from} is earlier than the statements "
+                f"show ({computed_from}, the latest first day covered across "
+                "accounts)",
+                "config",
+            )
     through = declared if declared is not None else computed
-    return through, {
-        "periods_by_account": periods,
-        "last_day_by_account": lasts,
-        "statements_without_period": [s.label for s in unstated],
-        "bank_data_through_declared_in_config": declared.isoformat()
-        if declared
-        else None,
-        "bank_data_through_from_statements": computed.isoformat() if computed else None,
-    }
+    start = declared_from if declared_from is not None else computed_from
+    if start is not None and through is not None and start > through:
+        problems.add(
+            f"the statements cover no whole day: coverage would start {start} "
+            f"and end {through}",
+            "config",
+        )
+    return (
+        start,
+        through,
+        {
+            "periods_by_account": periods,
+            "first_day_by_account": firsts,
+            "last_day_by_account": lasts,
+            "statements_without_period": [s.label for s in unstated],
+            "bank_data_from_declared_in_config": declared_from.isoformat()
+            if declared_from
+            else None,
+            "bank_data_through_declared_in_config": declared.isoformat()
+            if declared
+            else None,
+            "bank_data_from_from_statements": computed_from.isoformat()
+            if computed_from
+            else None,
+            "bank_data_through_from_statements": computed.isoformat()
+            if computed
+            else None,
+        },
+    )
 
 
-def read_camt053(
+def _signed(bal: _El, currency: str, problems: Problems, label: str) -> Decimal | None:
+    """A balance as a signed amount, or None when it is in another currency or
+    cannot be read (the latter is a problem)."""
+    amt = bal.find("Amt")
+    indicator = bal.value("CdtDbtInd")
+    text = amt.text.strip() if amt is not None else ""
+    if amt is None or amt.attrs.get("Ccy") != currency:
+        return None
+    if not _AMOUNT.fullmatch(text) or indicator not in ("CRDT", "DBIT"):
+        problems.add(
+            f"balance {text!r} {indicator!r} is not a plain amount with CRDT or DBIT",
+            label,
+        )
+        return None
+    try:
+        value = Decimal(text)
+    except InvalidOperation:
+        problems.add(f"balance {text!r} is not a number", label)
+        return None
+    return value if indicator == "CRDT" else -value
+
+
+def _check_balances(
+    stmt: Statement, credits: Decimal, debits: Decimal, problems: Problems
+) -> None:
+    """Opening plus booked credits minus booked debits must equal the closing
+    balance, when the statement states both in its currency."""
+    found: dict[str, _El] = {}
+    for bal in stmt.node.findall("Bal"):
+        code = bal.value("Tp", "CdOrPrtry", "Cd")
+        if code in ("OPBD", "PRCD", "CLBD"):
+            found.setdefault(code, bal)
+    opening = found.get("OPBD") or found.get("PRCD")
+    closing = found.get("CLBD")
+    if opening is None or closing is None:
+        return
+    close_amt = closing.find("Amt")
+    currency = stmt.currency or (close_amt.attrs.get("Ccy") if close_amt else None)
+    if not currency:
+        return
+    before = _signed(opening, currency, problems, stmt.label)
+    after = _signed(closing, currency, problems, stmt.label)
+    if before is None or after is None:
+        return
+    expected = before + credits - debits
+    if expected != after:
+        problems.add(
+            f"opening {before} + booked credits {credits} - booked debits {debits} "
+            f"= {expected}, but the closing balance is {after} ({currency}); the "
+            "statement is incomplete or its entries are wrong",
+            stmt.label,
+        )
+
+
+def _check_count(stmt: Statement, problems: Problems) -> None:
+    stated = stmt.node.value("TxsSummry", "TtlNtries", "NbOfNtries")
+    if stated is None:
+        return
+    present = len(stmt.node.findall("Ntry"))
+    if not (stated.isascii() and stated.isdigit()):
+        problems.add(f"NbOfNtries {stated!r} is not a count", stmt.label)
+    elif int(stated) != present:
+        problems.add(
+            f"states {int(stated)} entries (TxsSummry/TtlNtries/NbOfNtries) but "
+            f"contains {present}; the statement is incomplete",
+            stmt.label,
+        )
+
+
+def _read(
     files: Sequence[Path],
+    reference_fields: Sequence[str],
+    fee_codes: Sequence[Sequence[str]],
+    declared_from: date | None,
+    declared: date | None,
     *,
-    reference_fields: Sequence[str] = ("EndToEndId",),
-    fee_codes: Sequence[Sequence[str]] = DEFAULT_FEE_CODES,
-    bank_data_through: date | None = None,
+    complete: bool,
 ) -> CamtData:
-    """Bank rows for `bank_transactions` and the date the statements run to."""
     bad = [f for f in reference_fields if f not in REFERENCE_KINDS]
     if bad or not reference_fields:
         raise ValueError(
@@ -484,7 +618,7 @@ def read_camt053(
     if not files:
         raise ValueError("no CAMT.053 file given")
     codes = frozenset(tuple(c) for c in fee_codes)
-    problems = _Problems()
+    problems = Problems("CAMT.053 files", "entry")
     seen: dict[str, Statement] = {}
     unique: list[Statement] = []
     repeats: list[str] = []
@@ -498,40 +632,63 @@ def read_camt053(
                 repeats.append(f"{s.label} repeats {first.label}")
             else:
                 problems.add(
-                    s.label,
                     f"has the same Stmt/Id as {first.label} but different content",
+                    s.label,
                 )
-    through, coverage = _coverage(unique, bank_data_through, problems)
-    out = CamtData(bank_data_through=through)
+    start = through = None
+    coverage: dict[str, Any] = {}
+    if complete:
+        start, through, coverage = _coverage(unique, declared_from, declared, problems)
+        for stmt in unique:
+            _check_count(stmt, problems)
+    out = CamtData(bank_data_from=start, bank_data_through=through)
     excluded: Counter[str] = Counter()
     used_ref: Counter[str] = Counter()
     id_used: Counter[str] = Counter()
     ids: dict[str, str] = {}
     for stmt in unique:
+        credits = debits = Decimal(0)
+        readable = True
         for position, entry in enumerate(stmt.node.findall("Ntry"), start=1):
             where = f"{stmt.label} Ntry #{position} (line {entry.line})"
             sts = _status(entry)
+            if sts not in ENTRY_STATUSES:
+                readable = False
+                problems.add(
+                    f"Sts is {sts!r}, not one of {list(ENTRY_STATUSES)}; an entry "
+                    "of unknown status cannot be counted in or out",
+                    where,
+                )
+                continue
             if sts != "BOOK":
-                excluded[str(sts)] += 1
+                excluded[sts] += 1
                 continue
             try:
                 row = _entry_row(
                     stmt, entry, position, reference_fields, codes, used_ref, id_used
                 )
             except _Bad as e:
-                problems.add(where, str(e))
+                readable = False
+                problems.add(str(e), where)
                 continue
+            amount = Decimal(row["amount"] or "0")
+            if row["direction"] == "credit":
+                credits += amount
+            else:
+                debits += amount
             ident = row["bank_transaction_id"] or ""
             if ident in ids:
                 problems.add(
-                    where,
                     f"bank_transaction_id {ident!r} is also used by {ids[ident]}; "
                     "two entries must not share an ID",
+                    where,
                 )
                 continue
             ids[ident] = where
             out.rows.append(row)
             out.where.append(where)
+        if complete and readable:
+            _check_balances(stmt, credits, debits, problems)
     problems.raise_if_any()
     types = Counter(r["transaction_type"] for r in out.rows)
     out.extras = {
@@ -551,3 +708,35 @@ def read_camt053(
         ),
     }
     return out
+
+
+def read_camt053(
+    files: Sequence[Path],
+    *,
+    reference_fields: Sequence[str] = ("EndToEndId",),
+    fee_codes: Sequence[Sequence[str]] = DEFAULT_FEE_CODES,
+    bank_data_from: date | None = None,
+    bank_data_through: date | None = None,
+) -> CamtData:
+    """Bank rows for `bank_transactions` and the days the statements cover. A
+    statement that is not shown complete (entry count, balances) is refused."""
+    return _read(
+        files,
+        reference_fields,
+        fee_codes,
+        bank_data_from,
+        bank_data_through,
+        complete=True,
+    )
+
+
+def read_entries(
+    files: Sequence[Path],
+    *,
+    reference_fields: Sequence[str] = ("EndToEndId",),
+    fee_codes: Sequence[Sequence[str]] = DEFAULT_FEE_CODES,
+) -> CamtData:
+    """The entries only, as `read_camt053` maps them, without the checks that a
+    statement is complete and without coverage. For excerpts and samples: rows
+    from it must not be used as evidence that a bank row is absent."""
+    return _read(files, reference_fields, fee_codes, None, None, complete=False)

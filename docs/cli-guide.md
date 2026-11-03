@@ -32,14 +32,26 @@ It prepares an invented company's CSV files (shipped inside the package), invest
 - `xero-camt`: `PATH` is a small TOML config naming saved Xero JSON files and CAMT.053 XML files. See `fixtures/xero_camt/config.toml` and `docs/input-mapping.md`.
 - `finrca`: for the public benchmark only; it needs `--key-file` and `--source-revision`.
 
-The cutoff is the last day of data you trust. Rows after it are dropped. The command prints row counts, `bank_data_through`, `tables_not_supplied`, `fee_journals_recognised` and `reference_quality`. Read them: they decide what the tool can say. A missing table means that table cannot support a conclusion; no fee journals recognised means fee questions abstain.
+The cutoff is the last day of data you trust. Rows after it are dropped. The command prints row counts, `bank_data_from`, `bank_data_through`, `tables_not_supplied`, `all_paying_accounts_covered`, `fee_journals_recognised` (your `fee_journals_typed` declaration), `reference_matching` and `reference_quality`. Read them: they decide what the tool can say. A missing table means that table cannot support a conclusion; fee journals not declared as typed means fee questions abstain.
+
+### What you must declare
+
+The tool cannot see whether your export is complete, so you say so, and the report repeats what you said as "declared by whoever prepared the data". A declaration is not checked against anything: if it is wrong, a payment that is really missing from the bank can look settled, or a settled payment can look missing.
+
+- `bank_data_from` and `bank_data_through`: the bank data is complete between these dates. For `csv-bundle` set both in `mapping.toml` (`bank_data_from` is required). For `xero-camt` they come from the period each CAMT.053 statement states, not from the dates of its entries, and the common period is used. The config may also state `bank_data_from` and `bank_data_through`; that is required only when a statement states no period, and neither may claim more than the statements show.
+- `all_paying_accounts_covered` (`csv-bundle`, must be `true`) or `statements_cover_all_paying_accounts` (`xero-camt`, must be `true`): you have supplied bank data for every account that payments are made from. If a paying account has no statements, its payments would look missing, so preparation refuses to run without this statement. It is a declaration; the tool does not check which account a statement belongs to.
+- `reference_matching` (both formats): `exact` or `normalised`. There is no default. Choose `exact` unless you know better: references match only if they are equal after trimming surrounding whitespace. `normalised` also ignores case and collapses inner spaces, which can make two different references look the same. The setting is recorded in the manifest.
+- `fee_journals_typed` (`csv-bundle`): `true` only if every bank-fee journal in the general ledger file is typed `bank_fee` and sourced to its bank row, so that no such journal means no fee was booked. Otherwise leave it `false`, and a bank debit smaller than its payment abstains instead of being reported as an unexplained shortfall. A Xero export types no journal as a bank fee, so fee questions abstain there.
 
 ### What is refused, and why
 
 - A cutoff after `bank_data_through`: a payment made after the bank data ends would look missing from the bank.
+- A `bank_data_from` after `bank_data_through`, a coverage statement that is not `true`, or a `reference_matching` other than `exact` or `normalised`: the data cannot be used as a basis for "missing from the bank" without them.
+- Not a refusal but an abstention: a payment dated before `bank_data_from` is not reported as missing from the bank or as pending (`payment_before_bank_coverage`), because a missing bank row says nothing about a period the data does not cover.
 - A date, number or status that matches no declared rule, or two rules that disagree: nothing is guessed. Every offending file, line and value is listed.
 - An existing output folder: nothing is overwritten.
-- A later `--cutoff` when investigating than the snapshot was prepared with: rows after it were dropped, so a search would wrongly report them as absent.
+- A request whose cutoff differs from the snapshot's, from a request file or a `--requests` line (which is named): rows after the cutoff were dropped when the data was prepared, so a search would wrongly report them as absent. `investigate` and `batch` take no `--cutoff`; they use the one the data was prepared with. To use a different cutoff, prepare the data again.
+- A malformed value in the mapping or config file (for example a number where text belongs): one `error:` line, no traceback.
 
 ## Investigate one record
 
@@ -106,4 +118,6 @@ Scoring is not a `reconcile` command, because the tool never imports evaluation 
 
 - With real exports, many checks abstain. For Xero plus CAMT, every `legitimate_*` all-clear abstains unless approval history is supplied, and fee checks abstain without recognised fee journals. See `docs/input-mapping.md` section 10 for what was measured on synthetic fixtures and public samples.
 - No real export has been tested, and no practitioner has confirmed any mapping.
-- Foreign-currency payments, batch debits and truncated references are not modelled and abstain.
+- There is no currency conversion. Where the tool compares the payment with a bank row found by reference, an invoice, another payment allocated to the same invoice, or a fee journal in another currency, it abstains (`unsupported_fx`). A payment journal in another currency also abstains (`payment_journal_currency_differs`). Comparisons this tool does not make are not guarded.
+- A bank debit whose reference matches no payment is looked for only among debits from the same counterparty account in the same currency. If its amount equals the payment's, lies within the clearing window, or equals the payment plus some other unbanked payments to that account (a bounded search), the case abstains. A debit from another account, or without a counterparty account (which also abstains), is not covered by these guards.
+- A payment with no bank row anywhere in the searches shown can be reported as possibly missing from the bank (F12). That depends on your coverage declarations above being true.

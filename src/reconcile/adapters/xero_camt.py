@@ -6,10 +6,9 @@ The readers are in `xero` and `camt053`; the rows then go through
 `prepare_operational_snapshot` unchanged.
 """
 
-import hashlib
 import tomllib
-from datetime import date
-from pathlib import Path, PurePosixPath
+from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 from reconcile.adapters.camt053 import (
@@ -17,7 +16,8 @@ from reconcile.adapters.camt053 import (
     REFERENCE_KINDS,
     read_camt053,
 )
-from reconcile.adapters.operational import prepare_operational_snapshot
+from reconcile.adapters.inputs import inside, sha256_file
+from reconcile.adapters.operational import REFERENCE_RULES, prepare_operational_snapshot
 from reconcile.adapters.xero import KINDS, REFERENCE_FIELDS, read_xero
 
 CONFIG_VERSION = 1
@@ -31,32 +31,15 @@ _KEYS = {
     "default_payment_method",
     "bank_reference_fields",
     "fee_codes",
+    "bank_data_from",
     "bank_data_through",
+    "statements_cover_all_paying_accounts",
+    "reference_matching",
 }
 
 
 def _fail(where: str, message: str) -> ValueError:
     return ValueError(f"config {where}: {message}")
-
-
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _inside(base: Path, name: object, where: str, *, directory: bool = False) -> Path:
-    if not isinstance(name, str) or not name:
-        raise _fail(where, "must be a path")
-    posix = PurePosixPath(name.replace("\\", "/"))
-    if posix.is_absolute() or ".." in posix.parts or Path(name).is_absolute():
-        raise _fail(
-            where, f"{name!r} must be a relative path inside the config's folder"
-        )
-    path = (base / name).resolve()
-    if not path.is_relative_to(base):
-        raise _fail(where, f"{name!r} leaves the config's folder")
-    if not (path.is_dir() if directory else path.is_file()):
-        raise _fail(where, f"{name!r} is not a {'folder' if directory else 'file'}")
-    return path
 
 
 def _text_list(config: dict[str, Any], key: str, default: list[str]) -> list[str]:
@@ -66,18 +49,18 @@ def _text_list(config: dict[str, Any], key: str, default: list[str]) -> list[str
     return value
 
 
-def _through(value: object) -> date | None:
+def _day(key: str, value: object) -> date | None:
     if value is None:
         return None
-    if isinstance(value, date):
-        return value
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value  # TOML's own date literal
     if isinstance(value, str):
         try:
             if date.fromisoformat(value).isoformat() == value:
                 return date.fromisoformat(value)
         except ValueError:
             pass
-    raise _fail("bank_data_through", "must be a date such as 2026-06-30")
+    raise _fail(key, "must be a date such as 2026-06-30")
 
 
 def prepare_xero_camt(
@@ -129,20 +112,44 @@ def prepare_xero_camt(
         )
     ):
         raise _fail("fee_codes", "must be a list of [domain, family, sub-family] codes")
-    declared = _through(config.get("bank_data_through"))
+    declared_from = _day("bank_data_from", config.get("bank_data_from"))
+    declared = _day("bank_data_through", config.get("bank_data_through"))
+    if config.get("statements_cover_all_paying_accounts") is not True:
+        raise _fail(
+            "statements_cover_all_paying_accounts",
+            "is required and must be true: statements for every account "
+            "payments are made from must be supplied, or a payment paid from "
+            "another account would look missing from the bank",
+        )
+    matching = config.get("reference_matching")
+    if matching not in REFERENCE_RULES:
+        raise _fail(
+            "reference_matching",
+            f"is required, one of {list(REFERENCE_RULES)}: 'exact' (references "
+            "equal after trimming) or 'normalised' (also ignoring case and inner "
+            "spacing)",
+        )
 
-    xero_dir = _inside(base, config["xero_dir"], "xero_dir", directory=True)
+    xero_dir = inside(
+        base, config["xero_dir"], "xero_dir", owner="config", directory=True
+    )
     camt_names = config["camt_files"]
     if not (isinstance(camt_names, list) and camt_names):
         raise _fail("camt_files", "must be a non-empty list of files")
     camt_paths = [
-        _inside(base, n, f"camt_files[{i}]") for i, n in enumerate(camt_names)
+        inside(base, n, f"camt_files[{i}]", owner="config")
+        for i, n in enumerate(camt_names)
     ]
     xero_files: dict[str, list[Path]] = {}
     for kind in KINDS:
         found = sorted(p for p in xero_dir.glob(f"{kind}*.json") if p.is_file())
         xero_files[kind] = [
-            _inside(base, p.relative_to(base).as_posix(), f"xero_dir/{p.name}")
+            inside(
+                base,
+                p.relative_to(base).as_posix(),
+                f"xero_dir/{p.name}",
+                owner="config",
+            )
             for p in found
         ]
 
@@ -157,25 +164,33 @@ def prepare_xero_camt(
         camt_paths,
         reference_fields=bank_fields,
         fee_codes=fee_codes,
+        bank_data_from=declared_from,
         bank_data_through=declared,
     )
-    assert camt.bank_data_through is not None  # read_camt053 refuses otherwise
+    # read_camt053 refuses otherwise
+    assert camt.bank_data_from is not None and camt.bank_data_through is not None
 
     tables = {**xero.tables, "bank_transactions": camt.rows}
     where = {**xero.where, "bank_transactions": camt.where}
     sources = [*camt_paths, *(p for ps in xero_files.values() for p in ps)]
-    digests = {p.relative_to(base).as_posix(): _sha256(p) for p in sources}
+    digests = {p.relative_to(base).as_posix(): sha256_file(p) for p in sources}
     return prepare_operational_snapshot(
         tables,
         out_dir,
         cutoff=cutoff,
+        bank_data_from=camt.bank_data_from,
         bank_data_through=camt.bank_data_through,
+        all_paying_accounts_covered=True,
+        reference_matching=matching,
+        # A Xero export has no journal type for a bank fee, so none can be
+        # recognised as one.
+        fee_journals_typed=False,
         source_format="xero_camt053",
         source_files=digests,
         extras={
             "config_version": CONFIG_VERSION,
             "config_file": config_path.name,
-            "config_sha256": _sha256(config_path),
+            "config_sha256": sha256_file(config_path),
             "xero": xero.extras,
             "camt053": camt.extras,
             "approval_events": (

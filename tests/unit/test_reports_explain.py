@@ -1,8 +1,10 @@
 """explain(): fixed templates only, checked against every public fixture."""
 
 import ast
+import csv
 import json
 import re
+import sqlite3
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -457,3 +459,180 @@ def test_explanation_avoids_the_word_packet(
     for name, packet in packets.items():
         for text in (*explain(packet), title(packet)):
             assert "packet" not in text.lower(), (name, text)
+
+
+# ------------------------------------------- wording says what the code checks
+
+
+def _text(packet: EvidencePacket) -> str:
+    return " ".join(explain(packet))
+
+
+def _bank_references(scenario: str) -> list[str]:
+    path = FIXTURES / scenario / "bank_transactions.csv"
+    with path.open(newline="") as f:
+        return [r["payment_reference"] for r in csv.DictReader(f)]
+
+
+@pytest.mark.parametrize(
+    ("scenario", "reason"),
+    [
+        ("real_truncated_bank_reference", "reference_unmatched_candidate_bank_row"),
+        ("real_bank_batch_debit", "bank_batch_grouping_unmodelled"),
+        ("real_truncated_reference_netted_fee", "reference_unmatched_nearby_debit"),
+    ],
+)
+def test_a_bank_row_with_an_unmatched_reference_is_not_called_unreferenced(
+    packets: dict[str, EvidencePacket], scenario: str, reason: str
+) -> None:
+    refs = _bank_references(scenario)
+    assert refs and all(r.strip() for r in refs)  # a reference is present
+    packet = packets[scenario]
+    assert packet.diagnosis.reason == reason
+    text = _text(packet)
+    assert "without a payment reference" not in text
+    assert "payment reference matches no payment" in text
+
+
+def test_the_bounded_subset_search_is_described_as_bounded(
+    packets: dict[str, EvidencePacket],
+) -> None:
+    text = _text(packets["real_truncated_reference_netted_fee"])
+    assert "same counterparty account" in text
+    assert "some of the other unbanked payments" in text
+    assert "among the combinations this tool tests" in text
+    assert "equals no combination of payments" not in text
+
+
+def _mutated(
+    tmp_path: Path, scenario: str, *sql: str
+) -> tuple[Path, InvestigationRequest]:
+    key = tmp_path / "key"
+    create_key_file(key)
+    m = prepare_finrca_snapshot(
+        FIXTURES / scenario,
+        tmp_path / "prep",
+        key_path=key,
+        source_revision=f"fixture:{scenario}",
+        cutoff=CUTOFF,
+    )
+    snap = tmp_path / "prep" / m["snapshot"]["file"]
+    snap.chmod(0o644)
+    con = sqlite3.connect(snap)
+    for statement in sql:
+        assert con.execute(statement).rowcount != 0, statement
+    con.commit()
+    con.close()
+    digest = m["snapshot"]["content_sha256"]
+    e = EXPECTED[scenario]["primary_entity"]
+    token = _Tokens(_load_key(key)).token(NAMESPACE[e["table"]], e["id"])
+    return snap, InvestigationRequest(
+        "req_test",
+        digest,
+        RecordRef(digest, e["table"], token),
+        "Check whether there is a reconciliation issue.",
+        CUTOFF,
+        "policy_test",
+    )
+
+
+def _extra_line(source: str, kind: str, debit: str, credit: str, like: str) -> str:
+    return (
+        "INSERT INTO gl_entries (journal_id, journal_line_id, source_transaction_id,"
+        " transaction_type, posting_date, accounting_period, gl_account, debit,"
+        f" credit, currency) SELECT journal_id, journal_line_id || 'x', '{source}',"
+        f" '{kind}', posting_date, accounting_period, gl_account, '{debit}',"
+        f" '{credit}', currency FROM gl_entries WHERE transaction_type = '{like}'"
+        " LIMIT 1"
+    )
+
+
+def test_a_journal_that_balances_but_whose_attributed_lines_do_not(
+    tmp_path: Path,
+) -> None:
+    # The whole journal balances (800 = 800); the lines attributed to the payment
+    # do not (800 against 700), so "not balanced" alone would misdescribe it.
+    snap, request = _mutated(
+        tmp_path,
+        "weekend_clearing",
+        "UPDATE gl_entries SET credit = '700.00' WHERE credit = '800.00'",
+        _extra_line("OTHER", "accrual", "0.00", "100.00", "payment"),
+    )
+    packet = investigate(snap, request)
+    assert packet.diagnosis.reason == "payment_journal_unbalanced"
+    text = _text(packet)
+    assert "lines attributed to this payment" in text
+    assert "balanced in one currency" in text
+
+
+def test_a_fee_journal_with_an_invalid_attribution(tmp_path: Path) -> None:
+    snap, request = _mutated(
+        tmp_path,
+        "net_fee_accounting",
+        _extra_line("OTHER", "accrual", "5.00", "0.00", "bank_fee"),
+    )
+    packet = investigate(snap, request)
+    assert packet.diagnosis.reason == "fee_journal_invalid"
+    text = _text(packet)
+    assert "lines attributed to this bank row" in text
+    assert "not balanced or mixes currencies" not in text
+
+
+def test_a_negative_calculated_balance_is_not_called_unassessed(
+    packets: dict[str, EvidencePacket],
+) -> None:
+    packet = packets["real_check_double_payment"]
+    assert packet.diagnosis.reason == "invoice_over_allocated"
+    assert any(str(c.result).startswith("-") for c in packet.calculations)
+    text = _text(packet)
+    assert "negative" in text and "could not be assessed" not in text
+
+
+def test_no_template_claims_a_search_for_an_explanation() -> None:
+    for reason, text in REASONS.items():
+        assert "no explanation was found" not in text, reason
+    unexplained = {
+        "bank_amount_above_payment",
+        "bank_row_before_payment",
+        "clearing_lag_exceeds_limit",
+        "debit_differs_from_payment",
+        "allocations_differ_from_payment",
+        "fee_journal_amount_differs",
+        "reversal_credit_before_debit",
+        "payment_over_allocated",
+        "payment_journal_amount_differs",
+    }
+    for reason in unexplained:
+        assert "does not establish an explanation" in REASONS[reason], reason
+
+
+def test_absence_conclusions_speak_of_principal_rows_in_the_stated_searches() -> None:
+    for category in ("F12", "legitimate_pending_settlement"):
+        text = CATEGORIES[category]
+        assert "principal (non-fee) bank row" in text, category
+        assert "searches shown" in text, category
+    assert "no bank row was found" not in CATEGORIES["F12"]
+
+
+def test_tolerance_is_stated_for_equal_to_the_invoice_total() -> None:
+    for category in ("legitimate_split_payment", "legitimate_due_date_payment"):
+        assert "within the stated tolerance" in CATEGORIES[category]
+
+
+def test_templates_added_for_the_new_reason_codes() -> None:
+    assert REASONS["cutoff_differs_from_snapshot"] == (
+        "The request's cutoff differs from the cutoff the data was prepared "
+        "with, so the investigation did not run. Prepare the data again with "
+        "this cutoff."
+    )
+    assert REASONS["payment_before_bank_coverage"] == (
+        "The payment is dated before the bank data starts, so a missing bank "
+        "row says nothing. No conclusion was drawn."
+    )
+    assert (
+        "was not declared to mark bank-fee journals"
+        in REASONS["fee_journals_not_recognised"]
+    )
+    assert "pending or not final" in REASONS["pending_payment_beyond_clearing_limit"]
+    assert "counterparty account" in REASONS["batch_search_limit_exceeded"]
+    assert "could not be established" in REASONS["required_records_missing"]

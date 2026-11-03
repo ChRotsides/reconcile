@@ -142,7 +142,7 @@ def test_the_shortfall_is_kept_as_evidence_when_fees_cannot_be_ruled_out(
 
 
 def build_with_approvals(
-    out: Path, drop: frozenset[str] = frozenset()
+    out: Path, drop: frozenset[str] = frozenset(), *, approved: bool = True
 ) -> tuple[Path, str]:
     xero = read_xero(
         {k: [FIXTURE / "xero" / f"{k}.json"] for k in KINDS},
@@ -165,13 +165,21 @@ def build_with_approvals(
         }
         for inv in xero.tables["invoices"]
     ]
-    assert bank.bank_data_through is not None
+    assert bank.bank_data_from is not None and bank.bank_data_through is not None
     rows = [r for r in bank.rows if r["bank_transaction_id"] not in drop]
     manifest = prepare_operational_snapshot(
-        {**xero.tables, "bank_transactions": rows, "approval_events": approvals},
+        {
+            **xero.tables,
+            "bank_transactions": rows,
+            **({"approval_events": approvals} if approved else {}),
+        },
         out,
         cutoff=CUTOFF,
+        bank_data_from=bank.bank_data_from,
         bank_data_through=bank.bank_data_through,
+        all_paying_accounts_covered=True,
+        reference_matching="exact",
+        fee_journals_typed=False,
         source_format="test",
         source_files={},
     )
@@ -206,6 +214,22 @@ def test_one_debit_without_counterparty_stops_every_unmatched_payment_search(
     )
 
 
+def test_without_the_unmatched_debit_pending_still_needs_approvals(
+    tmp_path: Path,
+) -> None:
+    # Removing the debit alone is not enough for the pending all-clear: the
+    # formats carry no approvals (section 10.3 of docs/input-mapping.md).
+    snapshot, digest = build_with_approvals(
+        tmp_path / "out", frozenset({"SVC-UNM-1"}), approved=False
+    )
+    assert run(snapshot, digest, AS_PREPARED["F12"]) == ("answered", "F12", None)
+    assert run(snapshot, digest, AS_PREPARED["PEND"]) == (
+        "abstained",
+        None,
+        "invoice_approval_not_completed",
+    )
+
+
 def test_a_reversal_shape_is_never_answered(
     prepared: tuple[Path, dict[str, Any]], with_approvals: tuple[Path, str]
 ) -> None:
@@ -235,7 +259,10 @@ def test_manifest_states_what_was_read_and_what_is_missing(
 ) -> None:
     _, m = prepared
     assert m["format"] == "xero_camt053"
+    assert m["bank_data_from"] == "2026-06-01"
     assert m["bank_data_through"] == "2026-07-31"
+    assert m["all_paying_accounts_covered"] is True
+    assert m["reference_matching"] == "exact"
     assert "approval_events" in m["tables_not_supplied"]
     assert m["tables"]["bank_transactions"]["dropped_by_cutoff"] == 1
     assert m["fee_journals_recognised"] is False  # no Xero journal is typed bank_fee
@@ -315,6 +342,42 @@ def prepare(folder: Path, tmp_path: Path) -> dict[str, Any]:
             'version = 1\nbank_data_through = "30/06/2026"',
             "bank_data_through",
         ),
+        (
+            "version = 1",
+            "version = 1\nbank_data_through = 2026-07-31T10:00:00",
+            "bank_data_through: must be a date",
+        ),
+        (
+            "version = 1",
+            "version = 1\nbank_data_from = 2026-06-01T10:00:00",
+            "bank_data_from: must be a date",
+        ),
+        (
+            "statements_cover_all_paying_accounts = true",
+            "statements_cover_all_paying_accounts = false",
+            "statements_cover_all_paying_accounts.*every account payments",
+        ),
+        (
+            "statements_cover_all_paying_accounts = true",
+            'statements_cover_all_paying_accounts = "yes"',
+            "statements_cover_all_paying_accounts.*must be true",
+        ),
+        (
+            'reference_matching = "exact"',
+            'reference_matching = "fuzzy"',
+            "reference_matching.*exact.*normalised",
+        ),
+        ('reference_matching = "exact"', "", "reference_matching.*is required"),
+        (
+            'bank_reference_fields = ["EndToEndId"]',
+            "bank_reference_fields = 3",
+            "bank_reference_fields",
+        ),
+        (
+            "version = 1",
+            'version = 1\nbank_data_from = "2026-05-01"',
+            "bank_data_from 2026-05-01 is earlier than the statements show",
+        ),
     ],
 )
 def test_config_errors_are_refused(
@@ -380,7 +443,14 @@ def test_the_config_may_name_the_bank_end_date_for_a_statement_without_a_period(
     with pytest.raises(ValueError, match="states no period"):
         prepare(folder, tmp_path)
     edit_config(folder, "version = 1", 'version = 1\nbank_data_through = "2026-07-31"')
-    assert prepare(folder, tmp_path)["bank_data_through"] == "2026-07-31"
+    with pytest.raises(ValueError, match="bank_data_from"):
+        prepare(folder, tmp_path)
+    edit_config(folder, "version = 1", 'version = 1\nbank_data_from = "2026-06-01"')
+    manifest = prepare(folder, tmp_path)
+    assert (manifest["bank_data_from"], manifest["bank_data_through"]) == (
+        "2026-06-01",
+        "2026-07-31",
+    )
 
 
 def test_bad_data_in_several_files_is_reported_together(tmp_path: Path) -> None:
@@ -394,3 +464,69 @@ def test_bad_data_in_several_files_is_reported_together(tmp_path: Path) -> None:
         prepare(folder, tmp_path)
     assert "Payments.json Payments pay-f06-1" in str(e.value)
     assert "Payments.json Payments pay-f06-2" in str(e.value)
+
+
+# --- coverage across accounts and from the start of the statements
+
+
+def other_account_statement(last: str) -> str:
+    """A second account's statement, June 1 to `last` (invented IBAN)."""
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">'
+        "<BkToCstmrStmt>"
+        "<Stmt><Id>STMT-B</Id>"
+        f"<FrToDt><FrDtTm>2026-06-01T00:00:00</FrDtTm><ToDtTm>{last}T23:59:59</ToDtTm></FrToDt>"
+        "<Acct><Id><IBAN>DE00OTHERACCOUNT0001</IBAN></Id><Ccy>EUR</Ccy></Acct>"
+        '<Ntry><Amt Ccy="EUR">5.00</Amt><CdtDbtInd>DBIT</CdtDbtInd><Sts>BOOK</Sts>'
+        "<BookgDt><Dt>2026-06-05</Dt></BookgDt><AcctSvcrRef>SVC-B-1</AcctSvcrRef></Ntry>"
+        "</Stmt></BkToCstmrStmt></Document>"
+    )
+
+
+def test_two_accounts_with_different_end_dates_prepare_at_the_common_horizon(
+    tmp_path: Path,
+) -> None:
+    # Account A's statements run to July 31 and hold a July row; account
+    # B's end June 20. The horizon is June 20: A's later rows are past the cutoff
+    # and dropped, not refused as lying beyond the data.
+    folder = copy_fixture(tmp_path)
+    (folder / "bank" / "b.xml").write_text(other_account_statement("2026-06-20"))
+    edit_config(folder, '"bank/2026-07.xml"]', '"bank/2026-07.xml", "bank/b.xml"]')
+    manifest = prepare_xero_camt(
+        folder / "config.toml", tmp_path / "snap", cutoff=date(2026, 6, 20)
+    )
+    assert manifest["bank_data_through"] == "2026-06-20"
+    assert manifest["bank_data_from"] == "2026-06-01"
+    assert manifest["tables"]["bank_transactions"]["dropped_by_cutoff"] >= 1
+    assert manifest["tables"]["bank_transactions"]["rows_after"] >= 2
+
+
+def test_statements_that_start_after_a_payment_stop_it_being_called_missing(
+    tmp_path: Path,
+) -> None:
+    # Only the July statement is supplied: coverage starts July 1. The June 4
+    # payment has no bank row because the June statement is not here, not
+    # because the bank never paid it.
+    folder = copy_fixture(tmp_path)
+    edit_config(folder, '"bank/2026-06.xml", "bank/2026-07.xml"', '"bank/2026-07.xml"')
+    manifest = prepare_xero_camt(
+        folder / "config.toml", tmp_path / "snap", cutoff=date(2026, 7, 31)
+    )
+    assert manifest["bank_data_from"] == "2026-07-01"
+    snapshot = tmp_path / "snap" / "snapshot.sqlite"
+    digest = manifest["snapshot"]["content_sha256"]
+    for record in ("pay-f12", "pay-pend"):
+        request = InvestigationRequest(
+            "r",
+            digest,
+            RecordRef(digest, "payments", record),
+            "check",
+            date(2026, 7, 31),
+            "p",
+        )
+        d = investigate(snapshot, request).diagnosis
+        assert (d.disposition.value, d.reason) == (
+            "abstained",
+            "payment_before_bank_coverage",
+        )

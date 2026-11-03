@@ -2,6 +2,7 @@
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 from datetime import date
@@ -14,6 +15,7 @@ from reconcile import cli
 from reconcile.demo import MAPPING
 from reconcile.diagnosis.policy import POLICY_VERSION
 from reconcile.domain.contracts import InvestigationRequest, RecordRef
+from reconcile.reports.write import file_stems
 
 DEMO_CUTOFF = "2026-06-30"
 
@@ -144,27 +146,42 @@ def test_investigate_abstains_on_unknown_record_with_exit_0(
     assert code == 0 and "No conclusion reached" in text
 
 
-def test_later_cutoff_is_refused_earlier_is_accepted(
+def test_investigate_and_batch_have_no_cutoff_option(
     snapshot: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    code, _, err = run_cli(
-        capsys, "investigate", "--snapshot", snapshot, "--payment", "PAY-5004",
-        "--cutoff", "2026-07-01", "--output", tmp_path / "late",
-    )  # fmt: skip
-    assert code == 2 and "snapshot's cutoff" in err
-    assert not (tmp_path / "late").exists()
     records = write_records(tmp_path / "r.csv", "payments,PAY-5003")
-    code, _, err = run_cli(
-        capsys, "batch", "--snapshot", snapshot, "--records", records,
-        "--cutoff", "2026-07-01", "--output", tmp_path / "late-batch",
-    )  # fmt: skip
-    assert code == 2 and "snapshot's cutoff" in err
-    assert not (tmp_path / "late-batch").exists()
-    code, _, _ = run_cli(
-        capsys, "investigate", "--snapshot", snapshot, "--payment", "PAY-5004",
-        "--cutoff", "2026-06-15", "--output", tmp_path / "early",
-    )  # fmt: skip
-    assert code == 0
+    for argv in (
+        ("investigate", "--snapshot", snapshot, "--payment", "PAY-5004"),
+        ("batch", "--snapshot", snapshot, "--records", records),
+    ):
+        code, _, err = run_cli(
+            capsys, *argv, "--cutoff", "2026-06-15", "--output", tmp_path / "x"
+        )
+        assert code == 2 and "--cutoff" in err
+        assert not (tmp_path / "x").exists()
+
+
+def test_request_file_with_another_cutoff_than_the_snapshot_is_refused(
+    snapshot: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    d = digest(snapshot)
+    for cutoff in (date(2026, 7, 1), date(2026, 6, 15)):
+        r = InvestigationRequest(
+            "case-x",
+            d,
+            RecordRef(d, "payments", "PAY-5004"),
+            "s",
+            cutoff,
+            POLICY_VERSION,
+        )
+        path = tmp_path / f"{cutoff}.json"
+        path.write_text(r.to_json())
+        code, _, err = run_cli(
+            capsys, "investigate", "--snapshot", snapshot, "--request", path,
+            "--output", tmp_path / f"o-{cutoff}",
+        )  # fmt: skip
+        assert code == 2 and "prepare the data again" in err.lower()
+        assert not (tmp_path / f"o-{cutoff}").exists()
 
 
 def test_investigate_refuses_existing_output(
@@ -533,7 +550,7 @@ def test_inference_image_drops_the_cli_and_demo() -> None:
         assert f"/app/reconcile/{name}" in dockerfile
 
 
-def test_batch_requests_with_a_later_cutoff_are_refused(
+def test_batch_requests_with_another_cutoff_are_refused(
     snapshot: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     d = digest(snapshot)
@@ -545,19 +562,15 @@ def test_batch_requests_with_a_later_cutoff_are_refused(
         return r.to_json() + "\n"
 
     path = tmp_path / "r.jsonl"
-    path.write_text(line("ok", date(2026, 6, 30)) + line("late", date(2026, 7, 1)))
-    code, _, err = run_cli(
-        capsys, "batch", "--snapshot", snapshot, "--requests", path,
-        "--output", tmp_path / "run",
-    )  # fmt: skip
-    assert code == 2 and "line 2" in err and "snapshot's cutoff" in err
-    assert not (tmp_path / "run").exists()
-    path.write_text(line("ok", date(2026, 6, 30)))
-    code, _, err = run_cli(
-        capsys, "batch", "--snapshot", snapshot, "--requests", path,
-        "--cutoff", "2026-06-01", "--output", tmp_path / "run2",
-    )  # fmt: skip
-    assert code == 2 and "--records only" in err
+    for other in (date(2026, 7, 1), date(2026, 6, 15)):
+        path.write_text(line("ok", date(2026, 6, 30)) + line("odd", other))
+        code, _, err = run_cli(
+            capsys, "batch", "--snapshot", snapshot, "--requests", path,
+            "--output", tmp_path / f"run-{other}",
+        )  # fmt: skip
+        assert code == 2 and "line 2" in err and "snapshot's cutoff" in err
+        assert "prepare the data again" in err.lower()
+        assert not (tmp_path / f"run-{other}").exists()
     path.write_text(line("ok", date(2026, 6, 30)) + "not json\n")
     code, _, err = run_cli(
         capsys, "batch", "--snapshot", snapshot, "--requests", path,
@@ -569,3 +582,102 @@ def test_batch_requests_with_a_later_cutoff_are_refused(
         capsys, "batch", "--snapshot", snapshot, "--requests", path,
         "--output", tmp_path / "run4",
     )[0] == 0  # fmt: skip
+
+
+def test_malformed_mapping_value_is_one_error_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Fails until adapters turn this TypeError into a ValueError naming the field.
+    bundle = tmp_path / "bundle"
+    shutil.copytree(MAPPING.parent, bundle)
+    mapping = bundle / "mapping.toml"
+    text = mapping.read_text()
+    assert 'subtotal = "subtotal"' in text
+    mapping.write_text(
+        text.replace(
+            'subtotal = "subtotal"',
+            'subtotal = { column = "subtotal", decimal_separator = 1 }',
+        )
+    )
+    code, _, err = run_cli(
+        capsys, "data", "prepare", "--format", "csv-bundle", "--source", mapping,
+        "--output", tmp_path / "s", "--cutoff", DEMO_CUTOFF,
+    )  # fmt: skip
+    assert code == 2 and err.startswith("error: ") and "Traceback" not in err
+    assert "decimal_separator" in err
+
+
+def test_oversized_xero_date_is_one_error_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Fails until adapters turn this OverflowError into a ValueError.
+    src = tmp_path / "xero_camt"
+    shutil.copytree(Path(__file__).resolve().parents[2] / "fixtures" / "xero_camt", src)
+    payments = src / "xero" / "Payments.json"
+    payments.write_text(
+        payments.read_text().replace(
+            "/Date(1780272000000+0000)/", "/Date(99999999999999999999+0000)/"
+        )
+    )
+    code, _, err = run_cli(
+        capsys, "data", "prepare", "--format", "xero-camt",
+        "--source", src / "config.toml", "--output", tmp_path / "s",
+        "--cutoff", DEMO_CUTOFF,
+    )  # fmt: skip
+    assert code == 2 and err.startswith("error: ") and "Traceback" not in err
+
+
+# The request contract admits only [A-Za-z0-9_.:-] after a first alphanumeric, so
+# through the CLI the characters that need sanitising are ':' and '.'.
+ODD_REQUEST_IDS = ["a:b", "con:..", "x..y", "C:1", "z.:."]
+SAFE_NAME = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def test_request_ids_are_sanitised_before_they_name_report_files(
+    snapshot: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Request IDs reach file naming unhashed here; the earlier test hashes them.
+    d = digest(snapshot)
+    path = tmp_path / "r.jsonl"
+    path.write_text(
+        "".join(
+            InvestigationRequest(
+                rid, d, RecordRef(d, "payments", f"PAY-{n}"), "s",
+                date(2026, 6, 30), POLICY_VERSION,
+            ).to_json() + "\n"
+            for n, rid in enumerate(ODD_REQUEST_IDS)
+        )
+    )  # fmt: skip
+    run = tmp_path / "run"
+    assert (
+        run_cli(
+            capsys, "batch", "--snapshot", snapshot, "--requests", path, "--output", run
+        )[0]
+        == 0
+    )
+    for fmt in ("html", "json"):
+        out = tmp_path / f"rep-{fmt}"
+        code, _, _ = run_cli(
+            capsys, "report", "--run", run, "--format", fmt, "--output", out
+        )
+        assert code == 0
+        files = [p for p in out.rglob("*") if p.is_file()]
+        assert len(files) >= len(ODD_REQUEST_IDS)
+        assert all(SAFE_NAME.fullmatch(p.name) for p in files)
+        assert all(out.resolve() in p.resolve().parents for p in files)
+    # ':' became '_': "a:b" is stored as a_b.
+    assert (tmp_path / "rep-json" / "a_b.json").is_file()
+
+
+def test_file_stems_sanitise_ids_the_contract_does_not_validate() -> None:
+    # The baseline report reads request IDs from files outside the contract.
+    hostile = ["../escape", "/tmp/abs", "a/b", "..", "x\\y", "con:..", "a\x00c", "é"]
+    stems = file_stems(hostile)
+    assert set(stems) == set(hostile)
+    for stem in stems.values():
+        assert SAFE_NAME.fullmatch(stem), stem
+    assert stems["../escape"] == ".._escape" and stems["a/b"] == "a_b"
+    with pytest.raises(ValueError, match="same report file name"):
+        file_stems(["a/b", "a_b"])
+    with pytest.raises(ValueError, match="same report file name"):
+        file_stems(["Ab", "aB"])

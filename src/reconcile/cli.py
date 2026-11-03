@@ -55,7 +55,7 @@ class CliError(Exception):
 
 
 def _request_for(
-    manifest: dict[str, Any], table: str, record_id: str, cutoff: date
+    manifest: dict[str, Any], table: str, record_id: str
 ) -> InvestigationRequest:
     digest = manifest["snapshot"]["content_sha256"]
     short = hashlib.sha256(record_id.encode()).hexdigest()[:12]
@@ -64,23 +64,19 @@ def _request_for(
         snapshot=digest,
         primary_entity=RecordRef(digest, table, record_id),
         symptom=SYMPTOM,
-        cutoff=cutoff,
+        cutoff=date.fromisoformat(manifest["cutoff"]),
         policy_version=POLICY_VERSION,
     )
 
 
-def _cutoff(manifest: dict[str, Any], given: date | None) -> date:
+def _cutoff_mismatch(cutoff: date, manifest: dict[str, Any], where: str) -> CliError:
     prepared = date.fromisoformat(manifest["cutoff"])
-    if given is None:
-        return prepared
-    if given > prepared:
-        raise CliError(
-            f"cutoff {given} is later than the snapshot's cutoff {prepared}: rows "
-            "after it were dropped when the data was prepared, so a search "
-            "would wrongly report them as absent. Prepare the data again with "
-            "a later cutoff."
-        )
-    return given
+    return CliError(
+        f"{where}cutoff {cutoff} differs from the snapshot's cutoff {prepared}: "
+        "rows after the snapshot's cutoff were dropped when the data was "
+        "prepared, and the investigation uses exactly that cutoff. Prepare the "
+        "data again with the cutoff you want."
+    )
 
 
 def _parse_date(text: str) -> date:
@@ -93,7 +89,7 @@ def _parse_date(text: str) -> date:
 
 
 def _records_requests(
-    path: Path, manifest: dict[str, Any], cutoff: date
+    path: Path, manifest: dict[str, Any]
 ) -> list[InvestigationRequest]:
     try:
         f = path.open(newline="", encoding="utf-8-sig")
@@ -118,7 +114,7 @@ def _records_requests(
             if (table, record_id) in seen:
                 raise CliError(f"{path} line {line}: duplicate record")
             seen.add((table, record_id))
-            requests.append(_request_for(manifest, table, record_id, cutoff))
+            requests.append(_request_for(manifest, table, record_id))
     if not requests:
         raise CliError(f"{path} lists no records")
     return requests
@@ -164,6 +160,16 @@ def _fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+# Manifest values the preparer stated, not something the tool measured.
+DECLARED = frozenset(
+    {
+        "all_paying_accounts_covered",
+        "reference_matching",
+        "fee_journals_recognised",
+    }
+)
+
+
 def _print_manifest(manifest: dict[str, Any]) -> None:
     for name, info in manifest.get("tables", {}).items():
         if isinstance(info, dict) and "rows_after" in info:
@@ -172,13 +178,18 @@ def _print_manifest(manifest: dict[str, Any]) -> None:
                 f"  {name}: {info['rows_after']} rows ({dropped} dropped after cutoff)"
             )
     for key in (
+        "bank_data_from",
         "bank_data_through",
+        "all_paying_accounts_covered",
+        "reference_matching",
         "tables_not_supplied",
         "fee_journals_recognised",
         "reference_quality",
     ):
         if key in manifest:
-            print(f"  {key}: {json.dumps(manifest[key], sort_keys=True)}")
+            shown = json.dumps(manifest[key], sort_keys=True)
+            note = " (declared by the preparer)" if key in DECLARED else ""
+            print(f"  {key}: {shown}{note}")
 
 
 def _prepare(args: argparse.Namespace) -> int:
@@ -249,7 +260,6 @@ def _investigate(args: argparse.Namespace) -> int:
     from reconcile.reports.html import render_packet
 
     manifest = read_snapshot_manifest(args.snapshot)
-    cutoff = _cutoff(manifest, args.cutoff)
     if args.request is not None:
         try:
             request = InvestigationRequest.from_json(args.request.read_text())
@@ -265,11 +275,9 @@ def _investigate(args: argparse.Namespace) -> int:
             )
             if v is not None
         )
-        request = _request_for(manifest, table, record_id, cutoff)
-    if request.cutoff > date.fromisoformat(manifest["cutoff"]):
-        raise CliError(
-            f"the request's cutoff {request.cutoff} is later than the snapshot's"
-        )
+        request = _request_for(manifest, table, record_id)
+    if request.cutoff != date.fromisoformat(manifest["cutoff"]):
+        raise _cutoff_mismatch(request.cutoff, manifest, "the request's ")
     started = now_utc()
     out = make_private_dir(args.output)
     packet = investigate(args.snapshot / "snapshot.sqlite", request)
@@ -330,27 +338,15 @@ def _check_request_cutoffs(path: Path, data: bytes, manifest: dict[str, Any]) ->
             request = InvestigationRequest.from_json(line)
         except (ValueError, TypeError) as e:
             raise CliError(f"{path} line {number}: invalid request: {e}") from e
-        if request.cutoff > prepared:
-            raise CliError(
-                f"{path} line {number}: cutoff {request.cutoff} is later than "
-                f"the snapshot's cutoff {prepared}: rows after it were dropped, "
-                "so a search would wrongly report them as absent"
-            )
+        if request.cutoff != prepared:
+            raise _cutoff_mismatch(request.cutoff, manifest, f"{path} line {number}: ")
 
 
 def _batch(args: argparse.Namespace) -> int:
     manifest = read_snapshot_manifest(args.snapshot)
     if args.records is not None:
-        requests = _records_requests(
-            args.records, manifest, _cutoff(manifest, args.cutoff)
-        )
-        data = _lines(requests)
+        data = _lines(_records_requests(args.records, manifest))
     else:
-        if args.cutoff is not None:
-            raise CliError(
-                "--cutoff applies to --records only; each request in --requests "
-                "carries its own cutoff"
-            )
         try:
             data = args.requests.read_bytes()
         except OSError as e:
@@ -385,7 +381,7 @@ def _demo(args: argparse.Namespace) -> int:
     cutoff = date.fromisoformat(CUTOFF)
     snapshot = root / "snapshot"
     manifest = prepare_csv_bundle(MAPPING, snapshot, cutoff=cutoff)
-    requests = _records_requests(RECORDS, manifest, cutoff)
+    requests = _records_requests(RECORDS, manifest)
     _run_batch(snapshot, _lines(requests), root / "run")
     index = write_report(root / "run", root / "report", "html")
     packets = [
@@ -453,7 +449,6 @@ def _parser() -> argparse.ArgumentParser:
     which.add_argument("--payment")
     which.add_argument("--invoice")
     which.add_argument("--bank-transaction")
-    inv.add_argument("--cutoff", type=_parse_date)
     inv.add_argument("--output", type=Path, required=True)
     inv.set_defaults(handler=_investigate)
 
@@ -462,7 +457,6 @@ def _parser() -> argparse.ArgumentParser:
     source = batch.add_mutually_exclusive_group(required=True)
     source.add_argument("--requests", type=Path)
     source.add_argument("--records", type=Path)
-    batch.add_argument("--cutoff", type=_parse_date)
     batch.add_argument("--output", type=Path, required=True)
     batch.set_defaults(handler=_batch)
 

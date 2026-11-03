@@ -11,7 +11,12 @@ from pathlib import Path
 
 from reconcile.diagnosis.invoice import diagnose_invoice
 from reconcile.diagnosis.ledger import FieldMissing
-from reconcile.diagnosis.payment import diagnose_bank_row, diagnose_payment
+from reconcile.diagnosis.payment import (
+    F12,
+    PENDING,
+    diagnose_bank_row,
+    diagnose_payment,
+)
 from reconcile.diagnosis.policy import declared
 from reconcile.domain.contracts import (
     Diagnosis,
@@ -56,11 +61,16 @@ class _Failure(Exception):
 
 def _check_snapshot(
     path: Path, request: InvestigationRequest
-) -> tuple[tuple[str, ...], bool]:
+) -> tuple[tuple[str, ...], bool, str | None]:
     """Bind the file to the request through the manifest written beside it and
-    return the data-coverage limitations the manifest declares (none for FinRCA)
-    and whether fee journals are recognisable in this data (true unless the
-    manifest says `fee_journals_recognised: false`; FinRCA has no such key).
+    return the data-coverage limitations the manifest declares (none for FinRCA),
+    whether fee journals are recognisable in this data (true unless the manifest
+    says `fee_journals_recognised: false`; FinRCA has no such key) and the first
+    day the bank data covers (`bank_data_from`, absent for FinRCA).
+
+    The request's cutoff must be the one the data was prepared with: rows after
+    it are absent, rows before it were all kept, and some queries have no date
+    bound, so a later or earlier cutoff would read a different cut of the data.
 
     Trusts the manifest; the content digest is not recomputed (assumption).
     """
@@ -71,6 +81,14 @@ def _check_snapshot(
         raise _Failure("snapshot_manifest_unreadable", f"{type(e).__name__}") from e
     if digest != request.snapshot:
         raise _Failure("snapshot_mismatch", "request names a different snapshot")
+    prepared = manifest.get("cutoff")
+    if prepared is not None and prepared != request.cutoff.isoformat():
+        raise _Failure(
+            "cutoff_differs_from_snapshot",
+            f"the request's cutoff {request.cutoff.isoformat()} differs from the "
+            f"cutoff {prepared} the data was prepared with; prepare the data again "
+            "with the cutoff to investigate",
+        )
     notes: list[str] = []
     missing = manifest.get("tables_not_supplied")
     if isinstance(missing, list) and missing:
@@ -80,12 +98,22 @@ def _check_snapshot(
             f"{', '.join(str(t) for t in missing)}."
         )
     through = manifest.get("bank_data_through")
-    if through:
+    start = manifest.get("bank_data_from")
+    if through and start:
+        notes.append(
+            f"Bank data was declared complete from {start} through {through}, "
+            "for every account payments are made from, by whoever prepared the data."
+        )
+    elif through:
         notes.append(
             f"Bank data was declared complete through {through} by whoever "
             "prepared the data."
         )
-    return tuple(notes), manifest.get("fee_journals_recognised") is not False
+    return (
+        tuple(notes),
+        manifest.get("fee_journals_recognised") is not False,
+        start if isinstance(start, str) else None,
+    )
 
 
 def _fee_not_ruled_out(packet: EvidencePacket) -> EvidencePacket:
@@ -104,6 +132,28 @@ def _fee_not_ruled_out(packet: EvidencePacket) -> EvidencePacket:
     return replace(packet, diagnosis=diagnosis, recommendations=())
 
 
+def _before_bank_coverage(packet: EvidencePacket, bank_from: str) -> EvidencePacket:
+    """F12 and pending settlement rest on finding no bank row. A payment dated
+    before the bank data begins could have settled where nothing was supplied, so
+    the absence proves nothing. Evidence and calculations stay; the finding and
+    recommendations are not established."""
+    early = any(
+        item.record is not None
+        and item.record.table == "payments"
+        and dict(item.timestamps).get("payment_date", bank_from)[:10] < bank_from
+        for item in packet.evidence
+    )
+    if not early:
+        return packet
+    diagnosis = Diagnosis(
+        Disposition.ABSTAINED,
+        None,
+        reason="payment_before_bank_coverage",
+        missing_information=("bank statements covering the payment date",),
+    )
+    return replace(packet, diagnosis=diagnosis, recommendations=())
+
+
 def investigate(
     snapshot_path: Path,
     request: InvestigationRequest,
@@ -118,10 +168,12 @@ def investigate(
         *declared(),
     )
     try:
-        notes, fees_recognised = _check_snapshot(snapshot_path, request)
+        notes, fees_recognised, bank_from = _check_snapshot(snapshot_path, request)
         packet = _investigate(snapshot_path, request, limits, prov)
         if not fees_recognised and packet.diagnosis.category == "F14":
             packet = _fee_not_ruled_out(packet)
+        if bank_from and packet.diagnosis.category in (F12, PENDING):
+            packet = _before_bank_coverage(packet, bank_from)
         return replace(packet, limitations=(*packet.limitations, *notes))
     except _Failure as e:
         return _failed(request, prov, e.reason, str(e))

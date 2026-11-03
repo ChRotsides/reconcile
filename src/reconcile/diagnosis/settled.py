@@ -9,7 +9,7 @@ not define abstain with their own reason; none is called legitimate.
 from dataclasses import dataclass
 from datetime import date
 
-from reconcile.diagnosis.ledger import Ledger, is_effective, req
+from reconcile.diagnosis.ledger import FieldMissing, Ledger, is_effective, req
 from reconcile.diagnosis.policy import CLEARING_LIMITS, clearing_policy, quantum
 from reconcile.domain.calendar import business_days, spans_weekend
 from reconcile.domain.contracts import (
@@ -134,6 +134,10 @@ def _shortfall(
         return led.abstain(
             "fee_journal_invalid", "balanced single-currency fee journals"
         )
+    if any(dict(led.items[e].values)["currency"] != cur for e in evs):
+        return led.abstain(
+            "unsupported_fx", "a documented conversion path between currencies"
+        )
     q = quantum(cur)
     led.calc("explained", "sum", [(e, "amount") for e in evs])
     unexplained = led.calc(
@@ -169,7 +173,7 @@ def _shortfall(
 class _Balance:
     calc_id: str | None  # None when no effective allocation exists
     evidence: list[str]
-    status: str
+    status: str | None  # None when the data has no invoice status
     others: list[str]  # effective payments other than the primary one
 
 
@@ -217,7 +221,7 @@ def _balance(
         if pid != primary:
             others.append(pid)
     cited.extend(allocs)
-    status = facts.invoice["status"] or ""
+    status = facts.invoice["status"]
     if not allocs:
         return _Balance(None, cited, status, others)
     q = quantum(cur)
@@ -440,6 +444,8 @@ def _reversal(
     if isinstance(bals, EvidencePacket):
         return bals
     for b in bals:
+        if b.status is None:  # an absent status cannot show the invoice reopened
+            raise FieldMissing("status")
         if b.status == "paid":  # the contract needs the invoice reopened
             reason = (
                 "reversal_followed_by_repayment"

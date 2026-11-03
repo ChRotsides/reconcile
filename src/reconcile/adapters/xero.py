@@ -21,10 +21,10 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from reconcile.adapters.inputs import Problems
 from reconcile.diagnosis.policy import CLEARING_LIMITS
 
 KINDS = ("Invoices", "Payments", "BatchPayments", "Journals")
-PROBLEM_CAP = 25
 REFERENCE_FIELDS = ("Reference", "Details")
 _ID_KEY = {
     "Invoices": "InvoiceID",
@@ -53,25 +53,6 @@ class XeroData:
     extras: dict[str, Any] = field(default_factory=dict)
 
 
-class _Problems:
-    def __init__(self) -> None:
-        self.items: list[str] = []
-
-    def add(self, where: str, message: str) -> None:
-        self.items.append(f"{where}: {message}")
-
-    def raise_if_any(self) -> None:
-        if not self.items:
-            return
-        shown = "\n  ".join(self.items[:PROBLEM_CAP])
-        more = len(self.items) - PROBLEM_CAP
-        tail = f"\n  ... and {more} more" if more > 0 else ""
-        raise ValueError(
-            f"{len(self.items)} problem(s) in the Xero files; nothing was prepared "
-            f"(no object is dropped or guessed):\n  {shown}{tail}"
-        )
-
-
 class _Bad(Exception):
     """A value that cannot be mapped; the caller attaches the object's name."""
 
@@ -84,7 +65,10 @@ def xero_date(value: object) -> str:
         raise _Bad(f"date must be text, not {type(value).__name__}")
     m = _MS_DATE.fullmatch(value)
     if m:
-        moment = _EPOCH + timedelta(milliseconds=int(m.group(1)))
+        try:
+            moment = _EPOCH + timedelta(milliseconds=int(m.group(1)))
+        except (OverflowError, ValueError):  # beyond the years a date can hold
+            raise _Bad(f"date {value!r} is out of range") from None
         if (moment.hour, moment.minute, moment.second, moment.microsecond) != (
             0,
             0,
@@ -143,7 +127,7 @@ def _refuse_constant(name: str) -> Any:
 
 
 def _load(
-    kind: str, paths: Sequence[Path], problems: _Problems
+    kind: str, paths: Sequence[Path], problems: Problems
 ) -> tuple[list[tuple[str, dict[str, Any]]], int]:
     """Objects of one kind as (file name, object), exact repeats across files
     removed (the count is returned) and conflicting repeats reported."""
@@ -160,15 +144,15 @@ def _load(
                 parse_constant=_refuse_constant,
             )
         except (OSError, UnicodeDecodeError, ValueError) as e:
-            problems.add(path.name, f"cannot read as JSON: {e}")
+            problems.add(f"cannot read as JSON: {e}", path.name)
             continue
         items = doc.get(kind) if isinstance(doc, dict) else None
         if not isinstance(items, list):
-            problems.add(path.name, f"expected an object with a {kind!r} list")
+            problems.add(f"expected an object with a {kind!r} list", path.name)
             continue
         for i, obj in enumerate(items):
             if not isinstance(obj, dict) or not isinstance(obj.get(key), str):
-                problems.add(f"{path.name} {kind}[{i}]", f"no {key}")
+                problems.add(f"no {key}", f"{path.name} {kind}[{i}]")
                 continue
             ident = obj[key]
             if ident in found:
@@ -177,8 +161,8 @@ def _load(
                     repeats += 1
                 else:
                     problems.add(
-                        f"{path.name} {kind} {ident}",
                         f"differs from the same {key} in {first_file}",
+                        f"{path.name} {kind} {ident}",
                     )
                 continue
             found[ident] = (path.name, obj)
@@ -205,6 +189,35 @@ def check_methods(by_account: Mapping[str, str], default: str | None) -> None:
         raise ValueError(f"payment methods {bad} are not among {list(CLEARING_LIMITS)}")
 
 
+def _agree(
+    standalone: tuple[str, dict[str, Any]],
+    bid: str,
+    status: str,
+    invoice_id: str,
+    amount: Decimal,
+) -> None:
+    """The member's own record in Payments must say the same as the batch."""
+    where, pay = standalone
+    named = pay.get("BatchPaymentID")
+    if named is None:
+        raise _Bad(f"{where} is listed by batch {bid} but has no BatchPaymentID")
+    if str(named) != bid:
+        raise _Bad(f"{where} names batch {named}, but batch {bid} lists it")
+    if pay.get("Status") != status:
+        raise _Bad(
+            f"{where}: Status {pay.get('Status')!r} differs from the batch's {status!r}"
+        )
+    own_invoice = _sub(pay, "Invoice").get("InvoiceID")
+    if own_invoice != invoice_id:
+        raise _Bad(
+            f"{where}: invoice {own_invoice} differs from invoice {invoice_id} "
+            f"in batch {bid}"
+        )
+    own_amount = _amount(pay.get("Amount"), "Amount")
+    if own_amount != amount:
+        raise _Bad(f"{where}: Amount {own_amount} differs from {amount} in batch {bid}")
+
+
 def read_xero(
     files: Mapping[str, Sequence[Path]],
     *,
@@ -228,7 +241,7 @@ def read_xero(
                 f"no {kind} file given; save the {kind} response even when it is "
                 "empty, so a missing export is not read as no records"
             )
-    problems = _Problems()
+    problems = Problems("Xero files", "object")
     loaded = {k: _load(k, files[k], problems) for k in KINDS}
 
     def reference(obj: Mapping[str, Any]) -> str | None:
@@ -287,11 +300,24 @@ def read_xero(
                 },
             )
         except _Bad as e:
-            problems.add(where, str(e))
+            problems.add(str(e), where)
 
     # --- payments
+    # A payment that a batch lists, or that names a batch, is represented by the
+    # batch alone; the two records must agree, or it would be counted twice or
+    # with the batch's version of the money.
+    listed: dict[str, list[str]] = {}
+    for _fname, batch in loaded["BatchPayments"][0]:
+        if batch.get("Type") == "PAYBATCH" and isinstance(batch.get("Payments"), list):
+            for member in batch["Payments"]:
+                if isinstance(member, dict) and isinstance(
+                    member.get("PaymentID"), str
+                ):
+                    listed.setdefault(member["PaymentID"], []).append(
+                        str(batch["BatchPaymentID"])
+                    )
     other_payments: Counter[str] = Counter()
-    members: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    claimed: dict[str, tuple[str, dict[str, Any]]] = {}  # standalone batch members
     for fname, pay in loaded["Payments"][0]:
         pid = pay["PaymentID"]
         where = f"{fname} Payments {pid}"
@@ -306,9 +332,8 @@ def read_xero(
                     f"invoice {invoice_id} is not an ACCPAY invoice in the "
                     "Invoices files"
                 )
-            batch_id = pay.get("BatchPaymentID")
-            if batch_id is not None:
-                members.setdefault(str(batch_id), []).append((where, pay))
+            if pay.get("BatchPaymentID") is not None or pid in listed:
+                claimed[pid] = (where, pay)
                 continue
             amount = _amount(pay.get("Amount"), "Amount")
             if amount < 0:
@@ -344,7 +369,7 @@ def read_xero(
                 },
             )
         except _Bad as e:
-            problems.add(where, str(e))
+            problems.add(str(e), where)
 
     # --- batch payments: one contract payment, member payments as allocations
     other_batches: Counter[str] = Counter()
@@ -363,19 +388,26 @@ def read_xero(
             if status not in _STATUS:
                 raise _Bad(f"Status {status!r} is not one of {sorted(_STATUS)}")
             pay_status, settle = _STATUS[status]
-            listed = batch.get("Payments")
-            if not isinstance(listed, list) or not listed:
+            listed_members = batch.get("Payments")
+            if not isinstance(listed_members, list) or not listed_members:
                 raise _Bad("has no member Payments")
             date_text = xero_date(batch.get("Date"))
             per_invoice: dict[str, Decimal] = {}
             currencies: set[str] = set()
             ids: list[str] = []
             total = Decimal(0)
-            for k, member in enumerate(listed):
+            for k, member in enumerate(listed_members):
                 if not isinstance(member, dict):
                     raise _Bad(f"Payments[{k}] is not an object")
                 mid = _str(member, "PaymentID", f"Payments[{k}].PaymentID")
                 ids.append(mid)
+                times = listed.get(mid, [])
+                if len(times) > 1:
+                    raise _Bad(
+                        f"member {mid} is listed {len(times)} times, by "
+                        f"batches {sorted(set(times))}; a payment belongs to "
+                        "one batch, once"
+                    )
                 invoice_id = _str(
                     _sub(member, "Invoice"), "InvoiceID", f"Payments[{k}].Invoice"
                 )
@@ -387,6 +419,8 @@ def read_xero(
                 amount = _amount(member.get("Amount"), f"Payments[{k}].Amount")
                 if amount < 0:
                     raise _Bad(f"member {mid}: Amount is negative")
+                if mid in claimed:
+                    _agree(claimed[mid], bid, status, invoice_id, amount)
                 per_invoice[invoice_id] = (
                     per_invoice.get(invoice_id, Decimal(0)) + amount
                 )
@@ -402,17 +436,6 @@ def read_xero(
                     f"TotalAmount {declared} differs from the sum of its member "
                     f"Payments {total}"
                 )
-            for twhere, tpay in members.get(bid, []):
-                mid = str(tpay["PaymentID"])
-                if mid not in ids:
-                    raise _Bad(
-                        f"{twhere} names this batch but is not among its Payments"
-                    )
-                if tpay.get("Status") != status:
-                    raise _Bad(
-                        f"{twhere}: Status {tpay.get('Status')!r} differs from the "
-                        f"batch's {status!r}"
-                    )
             batch_members[bid] = ids
             add(
                 "payments",
@@ -443,15 +466,19 @@ def read_xero(
                     },
                 )
         except _Bad as e:
-            problems.add(where, str(e))
-    for bid, group in members.items():
-        if bid not in seen_batches:
-            for twhere, _ in group:
-                problems.add(
-                    twhere,
-                    f"names batch {bid}, which is not a PAYBATCH in the "
-                    "BatchPayments files",
-                )
+            problems.add(str(e), where)
+    for pid, (twhere, tpay) in claimed.items():
+        named = tpay.get("BatchPaymentID")
+        if named is None:
+            continue  # listed by a batch; _agree reported the missing BatchPaymentID
+        if str(named) not in seen_batches:
+            problems.add(
+                f"names batch {named}, which is not a PAYBATCH in the "
+                "BatchPayments files",
+                twhere,
+            )
+        elif str(named) not in listed.get(pid, []):
+            problems.add("names this batch but is not among its Payments", twhere)
 
     # --- journals
     other_sources: Counter[str] = Counter()
@@ -498,7 +525,7 @@ def read_xero(
             if net != 0:
                 unbalanced.append(jid)
         except _Bad as e:
-            problems.add(where, str(e))
+            problems.add(str(e), where)
 
     problems.raise_if_any()
     out.extras = {

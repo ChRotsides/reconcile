@@ -6,13 +6,16 @@ that: the analyst must be able to find a record in their own system by the ID
 the report shows, and the investigator only tests IDs for equality. So source
 record IDs are stored unchanged here.
 
-Two kinds of column are normalised, because the investigator compares their
-values across tables and a stray space or letter case would make equal
-references look different: bank references (`payments.reference_number`,
-`bank_transactions.payment_reference`) and the account columns they are
-compared with (`payments.bank_account_id`, `bank_transactions.counterparty_token`).
-The original text is not kept in the snapshot; the ID leads back to it in the
-source file, whose digest is in the manifest.
+The investigator compares bank references (`payments.reference_number`,
+`bank_transactions.payment_reference`) and account columns
+(`payments.bank_account_id`, `bank_transactions.counterparty_token`) across
+tables. Account columns are always normalised, because their format is defined
+(a printed and an electronic IBAN are the same account). Whether two references
+that differ only in case or spacing are the same reference is the preparer's
+choice (`reference_matching`): `exact` trims surrounding whitespace only;
+`normalised` also collapses inner whitespace and ignores case. The original
+text is not kept in the snapshot; the ID leads back to it in the source file,
+whose digest is in the manifest.
 """
 
 import json
@@ -118,13 +121,16 @@ _SPECIAL: dict[tuple[str, str], tuple[str, ...]] = {
     ("approval_events", "new_status"): ("approved",),
 }
 
-REFERENCE_RULE = "trim, collapse runs of whitespace to one space, uppercase"
+REFERENCE_RULES = {
+    "exact": "trim surrounding whitespace only",
+    "normalised": "trim, collapse runs of whitespace to one space, uppercase",
+}
 ACCOUNT_RULE = (
     "remove all whitespace, uppercase (so printed and electronic IBANs agree)"
 )
 
 
-def _reference(v: str) -> str:
+def _normalised_reference(v: str) -> str:
     return re.sub(r"\s+", " ", v.strip()).upper()
 
 
@@ -132,12 +138,18 @@ def _account(v: str) -> str:
     return re.sub(r"\s+", "", v).upper()
 
 
-_NORMALISED: dict[tuple[str, str], Callable[[str], str]] = {
-    ("payments", "reference_number"): _reference,
-    ("bank_transactions", "payment_reference"): _reference,
-    ("payments", "bank_account_id"): _account,
-    ("bank_transactions", "counterparty_token"): _account,
-}
+def _normalisers(
+    reference_matching: str,
+) -> dict[tuple[str, str], Callable[[str], str]]:
+    reference = (
+        _normalised_reference if reference_matching == "normalised" else str.strip
+    )
+    return {
+        ("payments", "reference_number"): reference,
+        ("bank_transactions", "payment_reference"): reference,
+        ("payments", "bank_account_id"): _account,
+        ("bank_transactions", "counterparty_token"): _account,
+    }
 
 
 def _squash(v: str) -> str:
@@ -176,7 +188,11 @@ def prepare_operational_snapshot(
     out_dir: Path,
     *,
     cutoff: date,
+    bank_data_from: date,
     bank_data_through: date,
+    all_paying_accounts_covered: bool,
+    reference_matching: str,
+    fee_journals_typed: bool,
     source_format: str,
     source_files: Mapping[str, str],
     extras: Mapping[str, Any] | None = None,
@@ -188,12 +204,34 @@ def prepare_operational_snapshot(
     `tables` maps table names (those of `finrca.TABLES`) to rows keyed by
     contract column names. `locate(table, n)` names the n-th row (from 1) of a
     table in errors; the default is "row n".
+
+    The declarations are the preparer's, recorded in the manifest and never
+    inferred: the bank data is complete from `bank_data_from` through
+    `bank_data_through` for every account payments are made from;
+    `reference_matching` is "exact" or "normalised"; `fee_journals_typed` is true
+    when every bank-fee journal in the GL file is typed `bank_fee` and sourced to
+    its bank row, so that no such journal means no fee was booked.
     """
+    if bank_data_from > bank_data_through:
+        raise ValueError(
+            f"bank_data_from {bank_data_from} is after bank_data_through "
+            f"{bank_data_through}"
+        )
     if cutoff > bank_data_through:
         raise ValueError(
             f"cutoff {cutoff} is after bank_data_through {bank_data_through}: "
             "payments made after the bank data ends would look missing from the bank"
         )
+    if all_paying_accounts_covered is not True:
+        raise ValueError(
+            "all_paying_accounts_covered must be true: bank statements for every "
+            "account payments are made from must be supplied, or a payment paid "
+            "from an account without a statement would look missing from the bank"
+        )
+    if reference_matching not in REFERENCE_RULES:
+        raise ValueError(f"reference_matching must be one of {list(REFERENCE_RULES)}")
+    if not isinstance(fee_journals_typed, bool):
+        raise ValueError("fee_journals_typed must be true or false")
     unknown = sorted(set(tables) - set(TABLES))
     if unknown:
         raise ValueError(f"unknown tables: {unknown}")
@@ -211,7 +249,9 @@ def prepare_operational_snapshot(
             tables,
             work,
             cutoff,
-            bank_data_through,
+            (bank_data_from, bank_data_through),
+            reference_matching,
+            fee_journals_typed,
             source_format,
             dict(source_files),
             dict(extras or {}),
@@ -229,7 +269,7 @@ def _clean(
     name: str,
     raw: Mapping[str, str | None],
     where: str,
-    bank_data_through: date,
+    normalise: Mapping[tuple[str, str], Callable[[str], str]],
 ) -> dict[str, str | None]:
     """One row with empty values as None, the required columns present, values
     inside the vocabulary and the reference columns normalised."""
@@ -251,7 +291,7 @@ def _clean(
         problem = _check_value(name, col, v)
         if problem:
             raise ValueError(f"{name} {where}: {col}: {problem}")
-        fn = _NORMALISED.get((name, col))
+        fn = normalise.get((name, col))
         row[col] = fn(v) if fn else v
         if fn and not row[col]:
             raise ValueError(f"{name} {where}: {col} is empty")
@@ -268,14 +308,6 @@ def _clean(
             raise ValueError(
                 f"{name} {where}: {col} {v!r} is not an ISO {spec.kind}"
             ) from None
-    if name == "bank_transactions":
-        posted = row["posted_date"]
-        assert posted is not None  # required
-        if date.fromisoformat(posted) > bank_data_through:
-            raise ValueError(
-                f"{name} {where}: posted_date {posted} is after "
-                f"bank_data_through {bank_data_through}"
-            )
     return row
 
 
@@ -293,13 +325,16 @@ def _prepare(
     tables: Mapping[str, Sequence[Mapping[str, str | None]]],
     out_dir: Path,
     cutoff: date,
-    bank_data_through: date,
+    coverage: tuple[date, date],
+    reference_matching: str,
+    fee_journals_typed: bool,
     source_format: str,
     source_files: dict[str, str],
     extras: dict[str, Any],
     locate: Callable[[str, int], str],
 ) -> dict[str, Any]:
     stats = _MoneyStats()
+    normalise = _normalisers(reference_matching)
     currency_of: dict[str, dict[str, str]] = {}
     snapshot_tables: dict[str, tuple[list[str], list[Row]]] = {}
     report: dict[str, Any] = {}
@@ -318,7 +353,7 @@ def _prepare(
         cut = dupes = 0
         for n, raw in enumerate(source_rows, start=1):
             where = locate(name, n)
-            row = _clean(name, raw, where, bank_data_through)
+            row = _clean(name, raw, where, normalise)
             if table.cutoff_column:
                 day = row[table.cutoff_column]
                 assert day is not None  # required in checked tables
@@ -368,20 +403,24 @@ def _prepare(
         "adapter_version": ADAPTER_VERSION,
         "format": source_format,
         "cutoff": cutoff.isoformat(),
-        "bank_data_through": bank_data_through.isoformat(),
+        "bank_data_from": coverage[0].isoformat(),
+        "bank_data_through": coverage[1].isoformat(),
+        "all_paying_accounts_covered": True,
         "sqlite_version": sqlite3.sqlite_version,
         "source_file_sha256": source_files,
         "identifiers": "source record IDs stored unchanged (no tokenising)",
         "normalisation": {
-            "references": REFERENCE_RULE,
+            "references": REFERENCE_RULES[reference_matching],
             "accounts": ACCOUNT_RULE,
-            "columns": sorted(f"{t}.{c}" for t, c in _NORMALISED),
+            "columns": sorted(f"{t}.{c}" for t, c in normalise),
             "original_text_kept": False,
         },
         "tables_not_supplied": not_supplied,
-        # F14 rests on "no bank_fee journal"; where none exists in the data, a
-        # fee journal may simply not be recognisable (a Xero export has no type).
-        "fee_journals_recognised": _has_fee_journal(snapshot_tables["gl_entries"]),
+        "reference_matching": reference_matching,
+        # F14 rests on "no bank_fee journal", which proves nothing where fee
+        # journals cannot be recognised (a Xero export has no type): the preparer
+        # declares whether they are.
+        "fee_journals_recognised": fee_journals_typed,
         "tables": report,
         "vocabulary": {k: dict(sorted(v.items())) for k, v in vocabulary.items()},
         "unrecognised_payment_methods": {
@@ -453,12 +492,6 @@ def _transform(
         else:
             out.append(v)  # keep, remap, date, timestamp, poly_remap: as cleaned
     return tuple(out)
-
-
-def _has_fee_journal(gl: tuple[list[str], list[Row]]) -> bool:
-    names, rows = gl
-    kind = names.index("transaction_type")
-    return any(r[kind] == "bank_fee" for r in rows)
 
 
 def _reference_quality(

@@ -146,8 +146,8 @@ def test_manifest_coverage_notes_reach_the_packet(tmp_path: Path) -> None:
         "approval_events." in packet.limitations
     )
     assert (
-        "Bank data was declared complete through 2026-07-31 by whoever prepared "
-        "the data."
+        "Bank data was declared complete from 2026-01-01 through 2026-07-31, for "
+        "every account payments are made from, by whoever prepared the data."
     ) in packet.limitations
 
 
@@ -171,7 +171,7 @@ def test_a_finrca_shaped_manifest_adds_no_note(tmp_path: Path) -> None:
     assert manifest["tables_not_supplied"] == []
     path = tmp_path / "snap" / MANIFEST_FILE
     bare = json.loads(path.read_text())
-    del bare["tables_not_supplied"], bare["bank_data_through"]
+    del bare["tables_not_supplied"], bare["bank_data_through"], bare["bank_data_from"]
     path.chmod(0o644)
     path.write_text(json.dumps(bare))
     packet = run(manifest, tmp_path, *primary(scenario))
@@ -182,7 +182,25 @@ def test_a_finrca_shaped_manifest_adds_no_note(tmp_path: Path) -> None:
     path.write_text(json.dumps({**bare, "bank_data_through": "2026-07-31"}))
     packet = run(manifest, tmp_path, *primary(scenario))
     assert not any("not supplied" in x for x in packet.limitations)
-    assert any("declared complete" in x for x in packet.limitations)
+    assert any("declared complete through 2026-07-31" in x for x in packet.limitations)
+
+
+def test_a_reversal_with_no_invoice_status_abstains(tmp_path: Path) -> None:
+    # The reversal all-clear needs the invoice to be no longer paid. An absent
+    # status once read as "not paid" and answered legitimate_payment_reversal.
+    scenario = "payment_reversal"
+    assert result(scenario, load(scenario), tmp_path / "control") == (
+        "answered",
+        "legitimate_payment_reversal",
+        None,
+    )
+    rows = load(scenario)
+    with_null(rows, "invoices", "status")
+    assert result(scenario, rows, tmp_path / "null") == (
+        "abstained",
+        None,
+        "required_field_missing",
+    )
 
 
 def test_snapshot_directory_is_private(tmp_path: Path) -> None:

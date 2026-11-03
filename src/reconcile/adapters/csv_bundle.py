@@ -13,24 +13,32 @@ The rows then go through `prepare_operational_snapshot` unchanged.
 """
 
 import csv
-import hashlib
 import re
 import tomllib
 from dataclasses import dataclass
 from datetime import date, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from reconcile.adapters.finrca import TABLES
+from reconcile.adapters.inputs import Problems, inside, sha256_file
 from reconcile.adapters.operational import (
+    REFERENCE_RULES,
     REQUIRED_TABLES,
     optional_columns,
     prepare_operational_snapshot,
 )
 
 MAPPING_VERSION = 1
-PROBLEM_CAP = 25
-_TOP_KEYS = {"version", "bank_data_through", "tables"}
+_TOP_KEYS = {
+    "version",
+    "bank_data_from",
+    "bank_data_through",
+    "all_paying_accounts_covered",
+    "reference_matching",
+    "fee_journals_typed",
+    "tables",
+}
 _TABLE_KEYS = {"file", "columns", "delimiter"}
 _SPEC_KEYS = {
     "column",
@@ -65,15 +73,7 @@ def _fail(where: str, message: str) -> ValueError:
     return ValueError(f"mapping {where}: {message}")
 
 
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _bank_date(value: object) -> date:
+def _bank_date(key: str, value: object) -> date:
     if isinstance(value, date) and not isinstance(value, datetime):
         return value  # TOML's own date literal
     if isinstance(value, str):
@@ -82,24 +82,7 @@ def _bank_date(value: object) -> date:
                 return date.fromisoformat(value)
         except ValueError:
             pass
-    raise _fail("bank_data_through", "must be a date such as 2026-06-30")
-
-
-def _file_path(base: Path, table: str, name: object) -> Path:
-    if not isinstance(name, str) or not name:
-        raise _fail(f"tables.{table}.file", "must be a file name")
-    posix = PurePosixPath(name.replace("\\", "/"))
-    if posix.is_absolute() or ".." in posix.parts or Path(name).is_absolute():
-        raise _fail(
-            f"tables.{table}.file",
-            f"{name!r} must be a relative path inside the mapping's folder",
-        )
-    path = (base / name).resolve()
-    if not path.is_relative_to(base.resolve()):
-        raise _fail(f"tables.{table}.file", f"{name!r} leaves the mapping's folder")
-    if not path.is_file():
-        raise _fail(f"tables.{table}.file", f"{name!r} is not a file")
-    return path
+    raise _fail(key, "must be a date such as 2026-06-30")
 
 
 def _field(table: str, col: str, spec: object) -> _Field:
@@ -119,6 +102,13 @@ def _field(table: str, col: str, spec: object) -> _Field:
     for key in ("column", "value", "blank_as", "debit_sign"):
         if key in spec and not isinstance(spec[key], str):
             raise _fail(where, f"'{key}' must be text")
+    for key in ("decimal_separator", "thousands_separator"):
+        if key in spec and not isinstance(spec[key], str):
+            raise _fail(where, f"'{key}' must be text")
+    if "direction_from_sign" in spec and not isinstance(
+        spec["direction_from_sign"], bool
+    ):
+        raise _fail(where, "'direction_from_sign' must be true or false")
     formats = spec.get("date_formats", [])
     if not (isinstance(formats, list) and all(isinstance(f, str) for f in formats)):
         raise _fail(where, "'date_formats' must be a list of strptime formats")
@@ -240,31 +230,12 @@ def _when(raw: str, f: _Field) -> tuple[str | None, str]:
     return next(iter(found.values())), ""
 
 
-class _Problems:
-    def __init__(self) -> None:
-        self.items: list[str] = []
-
-    def add(self, message: str) -> None:
-        self.items.append(message)
-
-    def raise_if_any(self) -> None:
-        if not self.items:
-            return
-        shown = "\n  ".join(self.items[:PROBLEM_CAP])
-        more = len(self.items) - PROBLEM_CAP
-        tail = f"\n  ... and {more} more" if more > 0 else ""
-        raise ValueError(
-            f"{len(self.items)} problem(s) in the CSV files; nothing was prepared "
-            f"(no row is dropped or guessed):\n  {shown}{tail}"
-        )
-
-
 def _read_table(
     path: Path,
     rel: str,
     fields: dict[str, _Field],
     delimiter: str,
-    problems: _Problems,
+    problems: Problems,
 ) -> tuple[list[dict[str, str | None]], list[int]]:
     rows: list[dict[str, str | None]] = []
     lines: list[int] = []
@@ -316,7 +287,7 @@ def _extract(
     row: dict[str, str | None],
     rel: str,
     n: int,
-    problems: _Problems,
+    problems: Problems,
     unmapped: dict[tuple[str, str], list[int]],
 ) -> None:
     if fl.source is None and fl.constant is None:
@@ -381,13 +352,38 @@ def prepare_csv_bundle(
         raise _fail("top level", f"unknown keys {unknown}")
     if mapping.get("version") != MAPPING_VERSION:
         raise _fail("version", f"must be {MAPPING_VERSION}")
-    if "bank_data_through" not in mapping:
+    required = {
+        "bank_data_from": "is required: the first day the bank export covers, so a "
+        "payment made before it is not reported as missing from the bank",
+        "bank_data_through": "is required: the date the bank export runs to, so a "
+        "payment made after it is not reported as missing from the bank",
+        "all_paying_accounts_covered": "is required: write "
+        "all_paying_accounts_covered = true once the bank export holds every "
+        "account payments are made from (and false or absent means it does not)",
+        "reference_matching": "is required: 'exact' (references equal after "
+        "trimming) or 'normalised' (also ignoring case and inner spacing)",
+        "fee_journals_typed": "is required: true when every bank-fee journal in "
+        "the GL file is mapped to the type bank_fee and sourced to its bank row, "
+        "false when fee journals cannot be recognised in this data",
+    }
+    for key, why in required.items():
+        if key not in mapping:
+            raise _fail(key, why)
+    start = _bank_date("bank_data_from", mapping["bank_data_from"])
+    through = _bank_date("bank_data_through", mapping["bank_data_through"])
+    if mapping["all_paying_accounts_covered"] is not True:
         raise _fail(
-            "bank_data_through",
-            "is required: the date the bank export runs to, so a payment made "
-            "after it is not reported as missing from the bank",
+            "all_paying_accounts_covered",
+            "must be true: bank statements for every account payments are made "
+            "from must be supplied, or a payment paid from another account would "
+            "look missing from the bank",
         )
-    through = _bank_date(mapping["bank_data_through"])
+    matching = mapping["reference_matching"]
+    if matching not in REFERENCE_RULES:
+        raise _fail("reference_matching", f"must be one of {list(REFERENCE_RULES)}")
+    fee_typed = mapping["fee_journals_typed"]
+    if not isinstance(fee_typed, bool):
+        raise _fail("fee_journals_typed", "must be true or false")
     configs = mapping.get("tables")
     if not isinstance(configs, dict):
         raise _fail("tables", "needs at least the required tables")
@@ -398,7 +394,7 @@ def prepare_csv_bundle(
     if absent:
         raise _fail("tables", f"required tables not mapped: {absent}")
 
-    problems = _Problems()
+    problems = Problems("CSV files", "row")
     tables: dict[str, list[dict[str, str | None]]] = {}
     lines: dict[str, list[int]] = {}
     files: dict[str, str] = {}
@@ -409,10 +405,10 @@ def prepare_csv_bundle(
             continue
         cfg = configs[name]
         fields, delimiter = _table_fields(name, cfg)
-        path = _file_path(base, name, cfg.get("file"))
+        path = inside(base, cfg.get("file"), f"tables.{name}.file", owner="mapping")
         rel = path.relative_to(base.resolve()).as_posix()
         files[name] = rel
-        digests[rel] = _sha256_file(path)
+        digests[rel] = sha256_file(path)
         tables[name], lines[name] = _read_table(path, rel, fields, delimiter, problems)
         rows_read[name] = len(tables[name])
     problems.raise_if_any()
@@ -424,13 +420,17 @@ def prepare_csv_bundle(
         tables,
         out_dir,
         cutoff=cutoff,
+        bank_data_from=start,
         bank_data_through=through,
+        all_paying_accounts_covered=True,
+        reference_matching=matching,
+        fee_journals_typed=fee_typed,
         source_format="csv_bundle",
         source_files=digests,
         extras={
             "mapping_version": MAPPING_VERSION,
             "mapping_file": mapping_path.name,
-            "mapping_sha256": _sha256_file(mapping_path),
+            "mapping_sha256": sha256_file(mapping_path),
             "table_files": files,
             "rows_read": rows_read,
         },

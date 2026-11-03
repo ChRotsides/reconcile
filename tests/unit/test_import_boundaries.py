@@ -41,6 +41,7 @@ PREPARATION = {
     "reconcile.adapters.csv_bundle",
     "reconcile.adapters.finrca",
     "reconcile.adapters.finrca_requests",
+    "reconcile.adapters.inputs",
     "reconcile.adapters.operational",
     "reconcile.adapters.xero",
     "reconcile.adapters.xero_camt",

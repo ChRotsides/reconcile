@@ -13,6 +13,7 @@ from reconcile.diagnosis.guard import guarded
 from reconcile.diagnosis.ledger import Ledger, is_effective, req, val
 from reconcile.diagnosis.policy import quantum
 from reconcile.domain.contracts import (
+    Calculation,
     Diagnosis,
     Disposition,
     EvidencePacket,
@@ -191,6 +192,24 @@ def diagnose_invoice(
     # --- F06, section 4.1 ------------------------------------------------
     if -total_minus_allocated.result.amount > q.amount:
         committed_legs = [leg for leg in live if leg.debit_ev is not None]
+        # An allocation is committed only where the bank debit supports the
+        # payment amount (contract 4.1, note of 2026-11): a debit far below the
+        # payment would otherwise count the whole allocation as paid out.
+        for leg in committed_legs:
+            assert leg.debit_ev is not None
+            # Checked without a calculation on the answered path (the debit and
+            # payment are cited records); the abstention records the difference.
+            gap = led.money(leg.debit_ev, "amount") - led.money(
+                leg.pay_ev, "payment_amount"
+            )
+            if abs(gap).amount > q.amount:
+                _debit_minus_payment(led, leg, q)
+                return _abstain(
+                    led,
+                    legs,
+                    "debit_differs_from_payment",
+                    "an explanation of the debit difference",
+                )
         if committed_legs:
             led.calc(
                 "committed",
@@ -240,13 +259,7 @@ def diagnose_invoice(
     debit_calcs: list[str] = []
     for leg in live:
         assert leg.debit_ev is not None
-        pid = leg.pay_ev.removeprefix("pay:")
-        diff = led.calc(
-            f"debit_minus_payment:{pid}",
-            "difference",
-            [(leg.debit_ev, "amount"), (leg.pay_ev, "payment_amount")],
-            q,
-        )
+        diff = _debit_minus_payment(led, leg, q)
         if abs(diff.result).amount > q.amount:
             return _abstain(
                 led,
@@ -290,6 +303,17 @@ def diagnose_invoice(
     )
     pids = [leg.pay_ev.removeprefix("pay:") for leg in live]
     return guarded(led, reader, pids, packet)
+
+
+def _debit_minus_payment(led: Ledger, leg: _Leg, q: Money) -> Calculation:
+    assert leg.debit_ev is not None
+    pid = leg.pay_ev.removeprefix("pay:")
+    return led.calc(
+        f"debit_minus_payment:{pid}",
+        "difference",
+        [(leg.debit_ev, "amount"), (leg.pay_ev, "payment_amount")],
+        q,
+    )
 
 
 def _f06(led: Ledger, live: list[_Leg], committed: list[_Leg]) -> EvidencePacket:

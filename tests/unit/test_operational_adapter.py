@@ -7,7 +7,7 @@ give the same dispositions as the FinRCA path (expected.json is the label).
 import csv
 import json
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -43,20 +43,31 @@ def prepare(
     tmp_path: Path,
     *,
     cutoff: date = CUTOFF,
+    start: date = date(2026, 1, 1),
     through: date = date(2026, 7, 31),
+    reference_matching: str = "normalised",
+    fee_journals_typed: bool = True,
 ) -> dict[str, Any]:
     return prepare_operational_snapshot(
         rows,
         tmp_path / "snap",
         cutoff=cutoff,
+        bank_data_from=start,
         bank_data_through=through,
+        all_paying_accounts_covered=True,
+        reference_matching=reference_matching,
+        fee_journals_typed=fee_journals_typed,
         source_format="test",
         source_files={"payments.csv": "0" * 64},
     )
 
 
 def run(
-    manifest: dict[str, Any], tmp_path: Path, table: str, record: str
+    manifest: dict[str, Any],
+    tmp_path: Path,
+    table: str,
+    record: str,
+    cutoff: date = CUTOFF,
 ) -> EvidencePacket:
     digest = manifest["snapshot"]["content_sha256"]
     request = InvestigationRequest(
@@ -64,7 +75,7 @@ def run(
         digest,
         RecordRef(digest, table, record),
         "Check whether there is a reconciliation issue.",
-        CUTOFF,
+        cutoff,
         "policy_test",
     )
     return investigate(tmp_path / "snap" / "snapshot.sqlite", request)
@@ -85,66 +96,71 @@ def primary(name: str) -> tuple[str, str]:
     return e["table"], e["id"]
 
 
-def add_unrelated_fee_journal(rows: Rows) -> None:
-    """A balanced bank_fee journal for some other bank row: proof that this data
-    types fee journals, without touching the record under test."""
-    currency = rows["payments"][0]["payment_currency"]
-    for n, (account, debit, credit) in enumerate(
-        (("650000", "5.00", "0.00"), ("100000", "0.00", "5.00")), start=1
-    ):
-        rows["gl_entries"].append(
-            {
-                "journal_id": "J_OTHER_FEE",
-                "journal_line_id": f"J_OTHER_FEE_L{n}",
-                "source_transaction_id": "BT_OTHER",
-                "transaction_type": "bank_fee",
-                "posting_date": "2026-06-03",
-                "accounting_period": "2026-06",
-                "gl_account": account,
-                "debit": debit,
-                "credit": credit,
-                "currency": currency,
-            }
-        )
-
-
 @pytest.mark.parametrize("name", sorted(EXPECTED))
 def test_every_fixture_gives_the_expected_outcome_with_raw_ids(
     name: str, tmp_path: Path
 ) -> None:
-    rows = load(name)
-    if name == "f14_amount_shortfall":  # this fixture has no fee journal at all
-        add_unrelated_fee_journal(rows)
-    manifest = prepare(rows, tmp_path)
+    manifest = prepare(load(name), tmp_path)
     assert outcome(run(manifest, tmp_path, *primary(name))) == expected(name)
 
 
-def test_f14_needs_proof_that_fee_journals_are_recognised(tmp_path: Path) -> None:
+def test_f14_needs_the_declaration_that_fee_journals_are_typed(tmp_path: Path) -> None:
     rows = load("f14_amount_shortfall")
-    manifest = prepare(rows, tmp_path / "none")
-    assert manifest["fee_journals_recognised"] is False
-    packet = run(manifest, tmp_path / "none", *primary("f14_amount_shortfall"))
+    untyped = prepare(rows, tmp_path / "no", fee_journals_typed=False)
+    assert untyped["fee_journals_recognised"] is False
+    packet = run(untyped, tmp_path / "no", *primary("f14_amount_shortfall"))
     assert outcome(packet) == ("abstained", None, "fee_journals_not_recognised")
     assert packet.diagnosis.findings == () and packet.recommendations == ()
     assert [c.calculation_id for c in packet.calculations] == ["delta"]
     assert packet.evidence  # kept
-    add_unrelated_fee_journal(rows)
-    manifest = prepare(rows, tmp_path / "some")
-    assert manifest["fee_journals_recognised"] is True
-    packet = run(manifest, tmp_path / "some", *primary("f14_amount_shortfall"))
+    typed = prepare(rows, tmp_path / "yes", fee_journals_typed=True)
+    assert typed["fee_journals_recognised"] is True
+    packet = run(typed, tmp_path / "yes", *primary("f14_amount_shortfall"))
     assert outcome(packet) == ("answered", "F14", None)
 
 
-def test_the_net_fee_all_clear_is_unaffected_by_the_fee_journal_flag(
+def test_one_typed_fee_journal_does_not_stand_for_the_whole_file(
     tmp_path: Path,
 ) -> None:
-    manifest = prepare(load("net_fee_accounting"), tmp_path)
-    assert manifest["fee_journals_recognised"] is True
+    # The old inference called fee journals recognised when any row was typed
+    # bank_fee, so an unrelated typed journal hid that this payment's own fee
+    # journal (xero_cashpaid) was not recognised: a confident F14.
+    rows = load("net_fee_accounting")
+    other = [
+        {
+            **r,
+            "journal_id": "J_OTHER",
+            "journal_line_id": f"J_OTHER_{n}",
+            "source_transaction_id": "BT_OTHER",
+        }
+        for n, r in enumerate(rows["gl_entries"][:2])
+        if r["transaction_type"] == "bank_fee"
+    ]
+    for r in rows["gl_entries"]:
+        if r["transaction_type"] == "bank_fee":
+            r["transaction_type"] = "xero_cashpaid"
+    rows["gl_entries"].extend(other)
+    assert other  # the control row exists
+    manifest = prepare(rows, tmp_path, fee_journals_typed=False)
     assert outcome(run(manifest, tmp_path, *primary("net_fee_accounting"))) == (
-        "answered",
-        "legitimate_net_fee_accounting",
+        "abstained",
         None,
+        "fee_journals_not_recognised",
     )
+
+
+def test_the_net_fee_all_clear_is_unaffected_by_the_fee_journal_declaration(
+    tmp_path: Path,
+) -> None:
+    for typed in (True, False):
+        folder = tmp_path / str(typed)
+        manifest = prepare(load("net_fee_accounting"), folder, fee_journals_typed=typed)
+        assert manifest["fee_journals_recognised"] is typed
+        assert outcome(run(manifest, folder, *primary("net_fee_accounting"))) == (
+            "answered",
+            "legitimate_net_fee_accounting",
+            None,
+        )
 
 
 def test_a_manifest_without_the_key_still_answers_f14(tmp_path: Path) -> None:
@@ -220,13 +236,42 @@ def test_cutoff_after_bank_data_through_is_refused(tmp_path: Path) -> None:
     assert not (tmp_path / "snap").exists()
 
 
-def test_bank_row_after_bank_data_through_is_refused(tmp_path: Path) -> None:
+def test_a_bank_row_after_the_common_horizon_is_dropped_not_refused(
+    tmp_path: Path,
+) -> None:
+    # With several accounts the horizon is the earliest end, so a row of a longer
+    # account lies after it and is dropped like any row after the cutoff. The
+    # end-to-end version with two statements is in test_xero_camt_end_to_end.
     rows = load("f06_double_payment")
-    with pytest.raises(
-        ValueError, match=r"bank_transactions row 2.*after bank_data_through"
-    ):
-        prepare(rows, tmp_path, cutoff=date(2026, 6, 5), through=date(2026, 6, 5))
-    assert not list(tmp_path.glob(".prepare-*"))
+    manifest = prepare(
+        rows, tmp_path, cutoff=date(2026, 6, 5), through=date(2026, 6, 5)
+    )
+    assert manifest["tables"]["bank_transactions"]["dropped_by_cutoff"] == 1
+
+
+def test_coverage_declarations_are_recorded_and_checked(tmp_path: Path) -> None:
+    rows = load("f12_payment_missing_from_bank")
+    manifest = prepare(rows, tmp_path / "a", start=date(2026, 5, 1))
+    assert manifest["bank_data_from"] == "2026-05-01"
+    assert manifest["all_paying_accounts_covered"] is True
+    assert manifest["reference_matching"] == "normalised"
+    with pytest.raises(ValueError, match="bank_data_from 2026-07-01 is after"):
+        prepare(rows, tmp_path / "b", start=date(2026, 7, 1), through=date(2026, 6, 30))
+    with pytest.raises(ValueError, match="statements for every account"):
+        prepare_operational_snapshot(
+            rows,
+            tmp_path / "c",
+            cutoff=CUTOFF,
+            bank_data_from=date(2026, 1, 1),
+            bank_data_through=date(2026, 7, 31),
+            all_paying_accounts_covered=False,
+            reference_matching="exact",
+            fee_journals_typed=True,
+            source_format="t",
+            source_files={},
+        )
+    with pytest.raises(ValueError, match="reference_matching must be one of"):
+        prepare(rows, tmp_path / "d", reference_matching="fuzzy")
 
 
 def test_bank_rows_between_cutoff_and_bank_end_are_excluded_by_the_cutoff(
@@ -482,7 +527,11 @@ def test_manifest_records_what_a_report_needs(tmp_path: Path) -> None:
         rows,
         tmp_path / "snap",
         cutoff=CUTOFF,
+        bank_data_from=date(2026, 5, 1),
         bank_data_through=date(2026, 7, 15),
+        all_paying_accounts_covered=True,
+        reference_matching="exact",
+        fee_journals_typed=False,
         source_format="unit_test",
         source_files={"payments.csv": "1" * 64},
         extras={"note": "x"},
@@ -490,7 +539,10 @@ def test_manifest_records_what_a_report_needs(tmp_path: Path) -> None:
     on_disk = json.loads((tmp_path / "snap" / "manifest.json").read_text())
     assert on_disk == manifest
     assert manifest["format"] == "unit_test"
+    assert manifest["bank_data_from"] == "2026-05-01"
     assert manifest["bank_data_through"] == "2026-07-15"
+    assert manifest["reference_matching"] == "exact"
+    assert manifest["fee_journals_recognised"] is False
     assert manifest["tables_not_supplied"][-1] == "approval_events"
     assert manifest["source_file_sha256"] == {"payments.csv": "1" * 64}
     assert manifest["extras"] == {"note": "x"}
@@ -519,3 +571,188 @@ def test_existing_output_directory_is_refused(tmp_path: Path) -> None:
     (tmp_path / "snap").mkdir()
     with pytest.raises(FileExistsError):
         prepare(load("f06_double_payment"), tmp_path)
+
+
+# --- the snapshot's cutoff ---------------------------------------------------
+
+
+@pytest.mark.parametrize("requested", [date(2026, 7, 10), date(2026, 6, 15)])
+def test_a_request_cutoff_other_than_the_prepared_one_fails(
+    requested: date, tmp_path: Path
+) -> None:
+    # Queries without a date bound (reference lookups) would read rows prepared
+    # for a different cutoff: a June 30 snapshot holds no July debit, so a July 10
+    # request would find a June 29 payment "missing" (F12).
+    manifest = prepare(load("f12_payment_missing_from_bank"), tmp_path)
+    packet = run(manifest, tmp_path, "payments", "PAY_1", cutoff=requested)
+    assert outcome(packet) == ("failed", None, "cutoff_differs_from_snapshot")
+    detail = packet.limitations[0]
+    assert requested.isoformat() in detail and "2026-06-30" in detail
+    assert packet.diagnosis.findings == () and packet.evidence == ()
+
+
+# --- bank coverage start -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "scenario", ["f12_payment_missing_from_bank", "pending_settlement"]
+)
+def test_a_payment_before_the_bank_data_begins_is_not_called_missing(
+    scenario: str, tmp_path: Path
+) -> None:
+    rows = load(scenario)
+    paid = rows["payments"][0]["payment_date"]
+    assert paid is not None
+    first = date.fromisoformat(paid)
+    covered = prepare(rows, tmp_path / "in", start=first)
+    answered = run(covered, tmp_path / "in", *primary(scenario))
+    assert outcome(answered) == expected(scenario)  # the day itself is covered
+    late = prepare(rows, tmp_path / "out", start=first + timedelta(days=1))
+    packet = run(late, tmp_path / "out", *primary(scenario))
+    assert outcome(packet) == ("abstained", None, "payment_before_bank_coverage")
+    assert packet.diagnosis.missing_information == (
+        "bank statements covering the payment date",
+    )
+    assert packet.diagnosis.findings == () and packet.recommendations == ()
+    assert packet.evidence and [c for c in packet.calculations] == list(
+        answered.calculations
+    )
+    assert any(
+        f"complete from {first + timedelta(days=1)} through 2026-07-31" in x
+        for x in packet.limitations
+    )
+
+
+def test_coverage_start_does_not_touch_an_answer_that_needs_a_bank_row(
+    tmp_path: Path,
+) -> None:
+    # The F06 payments are dated before this start, but each has its debit.
+    rows = load("f06_double_payment")
+    manifest = prepare(rows, tmp_path, start=date(2026, 6, 20))
+    assert outcome(run(manifest, tmp_path, *primary("f06_double_payment"))) == expected(
+        "f06_double_payment"
+    )
+
+
+# --- reference matching (review item 5) ----------------------------------------
+
+
+def case_collision(rows: Rows) -> None:
+    """Payment P (reference RunA) and an unrelated debit to another account whose
+    reference differs from it only in case."""
+    rows["payments"][0]["reference_number"] = "RunA"
+    rows["bank_transactions"][0]["payment_reference"] = "RUNA"
+    rows["bank_transactions"][0]["counterparty_token"] = "SOMEONE_ELSE"
+
+
+def test_normalised_matching_lets_a_case_collision_clear_a_payment(
+    tmp_path: Path,
+) -> None:
+    # Documents the hazard that made matching a declared choice.
+    rows = load("check_clearing")
+    case_collision(rows)
+    manifest = prepare(rows, tmp_path, reference_matching="normalised")
+    assert outcome(run(manifest, tmp_path, "payments", "PAY_1")) == (
+        "answered",
+        "legitimate_check_clearing",
+        None,
+    )
+
+
+def test_exact_matching_does_not_clear_a_payment_on_a_case_collision(
+    tmp_path: Path,
+) -> None:
+    rows = load("check_clearing")
+    case_collision(rows)
+    manifest = prepare(rows, tmp_path, reference_matching="exact")
+    assert manifest["reference_matching"] == "exact"
+    assert "trim surrounding whitespace only" in manifest["normalisation"]["references"]
+    # No bank row carries P's reference: P is missing from the bank, not cleared.
+    assert outcome(run(manifest, tmp_path, "payments", "PAY_1")) == (
+        "answered",
+        "F12",
+        None,
+    )
+
+
+def test_exact_matching_still_trims_and_normalises_accounts(tmp_path: Path) -> None:
+    rows = load("f06_double_payment")
+    rows["payments"][0]["reference_number"] = "  REF_1 "
+    rows["payments"][0]["bank_account_id"] = "ba v1"
+    manifest = prepare(rows, tmp_path, reference_matching="exact")
+    con = sqlite3.connect(tmp_path / "snap" / "snapshot.sqlite")
+    assert con.execute(
+        "SELECT reference_number, bank_account_id FROM payments "
+        "WHERE payment_id='PAY_1'"
+    ).fetchone() == ("REF_1", "BAV1")
+    con.close()
+    assert outcome(run(manifest, tmp_path, "invoices", "INV_1")) == expected(
+        "f06_double_payment"
+    )
+
+
+# --- F06 commitment (review item 10) -------------------------------------------
+
+
+def test_f06_does_not_count_an_allocation_whose_debit_is_far_below_the_payment(
+    tmp_path: Path,
+) -> None:
+    rows = load("f06_double_payment")
+    rows["bank_transactions"][1]["amount"] = "0.01"  # PAY_2 is 1000.00
+    manifest = prepare(rows, tmp_path)
+    packet = run(manifest, tmp_path, "invoices", "INV_1")
+    assert outcome(packet) == ("abstained", None, "debit_differs_from_payment")
+
+
+def test_f06_packets_keep_their_citations_and_the_abstention_carries_the_calculation(
+    tmp_path: Path,
+) -> None:
+    manifest = prepare(load("f06_double_payment"), tmp_path / "ok")
+    packet = run(manifest, tmp_path / "ok", "invoices", "INV_1")
+    assert outcome(packet) == ("answered", "F06", None)
+    assert packet.diagnosis.findings[0].calculation_ids == (
+        "allocated",
+        "committed",
+        "invoice_total_minus_committed",
+    )
+    assert not any(
+        c.calculation_id.startswith("debit_minus") for c in packet.calculations
+    )
+    rows = load("f06_double_payment")
+    rows["bank_transactions"][1]["amount"] = "0.01"
+    manifest = prepare(rows, tmp_path / "bad")
+    packet = run(manifest, tmp_path / "bad", "invoices", "INV_1")
+    assert [
+        c.calculation_id
+        for c in packet.calculations
+        if c.calculation_id.startswith("debit_minus")
+    ] == ["debit_minus_payment:PAY_2"]
+
+
+# --- fee journal in another currency (review item 18) --------------------------
+
+
+def usd_fee_journal(rows: Rows) -> None:
+    for r in rows["gl_entries"]:
+        if r["transaction_type"] == "bank_fee":
+            r["currency"] = "USD"
+
+
+@pytest.mark.parametrize(
+    ("scenario", "table", "record"),
+    [
+        ("net_fee_accounting", "payments", "PAY_1"),
+        ("accounted_bank_fee", "bank_transactions", "BT_2"),
+    ],
+)
+def test_a_fee_journal_in_another_currency_abstains_as_fx(
+    scenario: str, table: str, record: str, tmp_path: Path
+) -> None:
+    rows = load(scenario)
+    usd_fee_journal(rows)
+    manifest = prepare(rows, tmp_path)
+    assert outcome(run(manifest, tmp_path, table, record)) == (
+        "abstained",
+        None,
+        "unsupported_fx",
+    )

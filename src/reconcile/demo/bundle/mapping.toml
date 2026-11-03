@@ -1,6 +1,10 @@
 # Invented demo company. Column names equal the contract names, so every line maps a column to itself.
 version = 1
+bank_data_from = "2026-05-01"
 bank_data_through = "2026-06-30"
+all_paying_accounts_covered = true  # the one bank file holds every paying account
+reference_matching = "exact"        # remittance references are copied unchanged
+fee_journals_typed = true           # every bank-fee journal is typed bank_fee
 
 [tables.invoices]
 file = "invoices.csv"

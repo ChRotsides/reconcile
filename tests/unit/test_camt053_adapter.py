@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from reconcile.adapters.camt053 import parse_xml, read_camt053
+from reconcile.adapters.camt053 import parse_xml, read_camt053, read_entries
 
 NS = "urn:iso:std:iso:20022:tech:xsd:camt.053.001.02"
 OWN = "NL91ABNA0417164300"
@@ -52,9 +52,14 @@ def statement(
     account: str = OWN,
     ccy: str | None = "EUR",
     balance_date: str | None = None,
+    first_time: str = "00:00:00",
+    last_time: str = "23:59:59",
+    summary: str = "",
+    balances: str = "",
 ) -> str:
     period = (
-        f"<FrToDt><FrDtTm>{first}T00:00:00</FrDtTm><ToDtTm>{last}T23:59:59</ToDtTm></FrToDt>"
+        f"<FrToDt><FrDtTm>{first}T{first_time}</FrDtTm>"
+        f"<ToDtTm>{last}T{last_time}</ToDtTm></FrToDt>"
         if first
         else ""
     )
@@ -68,8 +73,20 @@ def statement(
     currency = f"<Ccy>{ccy}</Ccy>" if ccy else ""
     return (
         f"<Stmt><Id>{sid}</Id>{period}<Acct><Id><IBAN>{account}</IBAN></Id>{currency}</Acct>"
-        f"{bal}{entries}</Stmt>"
+        f"{summary}{bal}{balances}{entries}</Stmt>"
     )
+
+
+def balance(code: str, amount: str, ind: str, ccy: str = "EUR") -> str:
+    return (
+        f"<Bal><Tp><CdOrPrtry><Cd>{code}</Cd></CdOrPrtry></Tp>"
+        f'<Amt Ccy="{ccy}">{amount}</Amt><CdtDbtInd>{ind}</CdtDbtInd>'
+        "<Dt><Dt>2026-06-30</Dt></Dt></Bal>"
+    )
+
+
+def count(n: str) -> str:
+    return f"<TxsSummry><TtlNtries><NbOfNtries>{n}</NbOfNtries></TtlNtries></TxsSummry>"
 
 
 def document(*statements: str, ns: str = NS) -> str:
@@ -94,6 +111,20 @@ def refused(tmp_path: Path, *xml: str, match: str, **kw: object) -> str:
     with pytest.raises(ValueError, match=match) as e:
         read_camt053(files, **kw)  # type: ignore[arg-type]
     return str(e.value)
+
+
+def test_several_txdtls_know_the_counterparty_only_if_all_agree(tmp_path: Path) -> None:
+    same = txd("A", "de89 3704 0044 0532 0130 00") + txd("B", "DE89370400440532013000")
+    rows = read_one(tmp_path, document(statement(entry("300.00", details=same))))
+    assert rows[0]["counterparty_token"] == "DE89370400440532013000"
+    partial = txd("A", "DE89370400440532013000") + txd("B")
+    rows = read_one(tmp_path, document(statement(entry("300.00", details=partial))))
+    assert rows[0]["counterparty_token"] is None
+    differ = txd("A", "DE89370400440532013000") + txd(
+        "B", "FR1420041010050500013M02606"
+    )
+    rows = read_one(tmp_path, document(statement(entry("300.00", details=differ))))
+    assert rows[0]["counterparty_token"] is None
 
 
 def test_a_booked_entry_becomes_one_row(tmp_path: Path) -> None:
@@ -216,6 +247,35 @@ def test_counterparty_follows_direction_and_never_a_name(tmp_path: Path) -> None
         ]
         is None
     )
+
+
+@pytest.mark.parametrize("sts", ["", "<Sts>BOOOK</Sts>", "<Sts>booked</Sts>"])
+def test_a_missing_or_unrecognised_entry_status_is_refused(
+    sts: str, tmp_path: Path
+) -> None:
+    refused(
+        tmp_path,
+        document(statement(entry(sts=sts))),
+        match=r"Ntry #1.*not one of \['BOOK', 'PDNG', 'INFO'\]",
+    )
+
+
+def test_info_entries_are_excluded_and_counted(tmp_path: Path) -> None:
+    result = read_camt053(
+        [
+            write(
+                tmp_path,
+                "a.xml",
+                document(
+                    statement(
+                        entry(svc="A") + entry(svc="B", sts="<Sts><Cd>INFO</Cd></Sts>")
+                    )
+                ),
+            )
+        ]
+    )
+    assert len(result.rows) == 1
+    assert result.extras["entries_excluded_not_booked"] == {"INFO": 1}
 
 
 def test_not_booked_entries_are_excluded_and_counted(tmp_path: Path) -> None:
@@ -406,6 +466,65 @@ def test_contiguous_statements_set_the_end_date(tmp_path: Path) -> None:
     assert result.bank_data_through == date(2026, 7, 15)
 
 
+def test_from_is_the_first_covered_day_and_the_latest_across_accounts(
+    tmp_path: Path,
+) -> None:
+    a = document(statement(entry(svc="A"), "S1", "2026-06-01", "2026-06-30"))
+    b = document(
+        statement(
+            entry(svc="B", book="2026-06-12"),
+            "S2",
+            "2026-06-10",
+            "2026-06-30",
+            account="DE00OTHER",
+        )
+    )
+    one = read_camt053([write(tmp_path, "a.xml", a)])
+    assert (one.bank_data_from, one.bank_data_through) == (
+        date(2026, 6, 1),
+        date(2026, 6, 30),
+    )
+    both = read_camt053([write(tmp_path, "a.xml", a), write(tmp_path, "b.xml", b)])
+    assert both.bank_data_from == date(2026, 6, 10)  # account B has nothing before
+
+
+@pytest.mark.parametrize(
+    ("first_time", "last_time", "start", "end"),
+    [
+        ("00:00:00", "23:59:59", date(2026, 6, 1), date(2026, 6, 30)),
+        ("00:00:59", "23:59:00", date(2026, 6, 1), date(2026, 6, 30)),
+        ("00:01:00", "23:58:59", date(2026, 6, 2), date(2026, 6, 29)),
+        ("12:00:00", "12:00:00", date(2026, 6, 2), date(2026, 6, 29)),
+    ],
+)
+def test_a_partly_covered_first_or_last_day_is_not_counted(
+    first_time: str, last_time: str, start: date, end: date, tmp_path: Path
+) -> None:
+    xml = document(
+        statement(
+            entry(book="2026-06-30"),
+            first_time=first_time,
+            last_time=last_time,
+        )
+    )
+    result = read_camt053([write(tmp_path, "a.xml", xml)])
+    assert (result.bank_data_from, result.bank_data_through) == (start, end)
+    assert len(result.rows) == 1  # an entry on the partial day is still read
+
+
+def test_a_gap_that_a_partial_day_leaves_is_refused(tmp_path: Path) -> None:
+    a = document(
+        statement(
+            entry(svc="A"), "S1", "2026-06-01", "2026-06-10", last_time="12:00:00"
+        )
+    )
+    b = document(
+        statement(entry(svc="B", book="2026-06-12"), "S2", "2026-06-11", "2026-06-30")
+    )
+    # S1 covers June 10 only until noon, S2 starts June 11: June 10 is a gap.
+    refused(tmp_path, a, b, match="gap")
+
+
 def test_through_is_the_earliest_last_day_across_accounts(tmp_path: Path) -> None:
     a = document(statement(entry(svc="A"), "S1", "2026-06-01", "2026-06-30"))
     b = document(
@@ -464,10 +583,25 @@ def test_balance_date_is_the_period_when_there_is_no_frtodt(tmp_path: Path) -> N
 def test_a_statement_with_no_period_needs_the_config_date(tmp_path: Path) -> None:
     xml = document(statement(entry(), first=None, last=None))
     refused(tmp_path, xml, match="states no period")
+    refused(tmp_path, xml, match="bank_data_from", bank_data_through=date(2026, 6, 30))
     result = read_camt053(
-        [write(tmp_path, "a.xml", xml)], bank_data_through=date(2026, 6, 30)
+        [write(tmp_path, "a.xml", xml)],
+        bank_data_from=date(2026, 6, 1),
+        bank_data_through=date(2026, 6, 30),
     )
-    assert result.bank_data_through == date(2026, 6, 30)
+    assert (result.bank_data_from, result.bank_data_through) == (
+        date(2026, 6, 1),
+        date(2026, 6, 30),
+    )
+
+
+def test_a_config_start_earlier_than_the_statements_is_refused(tmp_path: Path) -> None:
+    refused(
+        tmp_path,
+        document(statement(entry())),
+        match="bank_data_from 2026-05-01 is earlier than the statements show",
+        bank_data_from=date(2026, 5, 1),
+    )
 
 
 def test_a_config_date_later_than_the_statements_is_refused(tmp_path: Path) -> None:
@@ -493,3 +627,89 @@ def test_different_currencies_of_one_account_are_separate_coverage(
         [write(tmp_path, "a.xml", eur), write(tmp_path, "b.xml", usd)]
     )
     assert len(result.rows) == 2
+
+
+# --- completeness
+
+
+def test_a_stated_entry_count_must_match_the_entries_present(tmp_path: Path) -> None:
+    xml = document(statement(entry(), summary=count("9")))
+    message = refused(tmp_path, xml, match="'S1'.*states 9 entries.*contains 1")
+    assert "incomplete" in message
+    ok = document(statement(entry(), summary=count("1")))
+    assert len(read_one(tmp_path, ok)) == 1
+
+
+def test_the_count_includes_entries_that_are_not_booked(tmp_path: Path) -> None:
+    xml = document(
+        statement(entry() + entry(svc="B", sts="<Sts>PDNG</Sts>"), summary=count("2"))
+    )
+    assert len(read_one(tmp_path, xml)) == 1
+
+
+def test_a_count_that_is_not_a_number_is_refused(tmp_path: Path) -> None:
+    xml = document(statement(entry(), summary=count("many")))
+    refused(tmp_path, xml, match="not a count")
+
+
+def test_opening_plus_credits_minus_debits_must_equal_closing(tmp_path: Path) -> None:
+    entries = entry("100.00", "DBIT", svc="A") + entry("30.00", "CRDT", svc="B")
+    good = balance("OPBD", "1000.00", "CRDT") + balance("CLBD", "930.00", "CRDT")
+    assert len(read_one(tmp_path, document(statement(entries, balances=good)))) == 2
+    bad = balance("OPBD", "1000.00", "CRDT") + balance("CLBD", "900.00", "CRDT")
+    message = refused(
+        tmp_path,
+        document(statement(entries, balances=bad)),
+        match=r"opening 1000.00 \+ booked credits 30.00 - booked debits 100.00 = 930",
+    )
+    assert "closing balance is 900.00" in message
+
+
+def test_balance_signs_and_the_previous_closing_balance_are_respected(
+    tmp_path: Path,
+) -> None:
+    # An overdrawn account: opening -50 (PRCD, debit), a credit of 80, closing +30.
+    balances = balance("PRCD", "50.00", "DBIT") + balance("CLBD", "30.00", "CRDT")
+    xml = document(statement(entry("80.00", "CRDT"), balances=balances))
+    assert len(read_one(tmp_path, xml)) == 1
+    wrong = balance("PRCD", "50.00", "CRDT") + balance("CLBD", "30.00", "CRDT")
+    refused(
+        tmp_path,
+        document(statement(entry("80.00", "CRDT"), balances=wrong)),
+        match="closing balance",
+    )
+
+
+def test_balances_are_summed_without_a_float(tmp_path: Path) -> None:
+    entries = "".join(entry("0.10", "DBIT", svc=f"E{i}") for i in range(3))
+    balances = balance("OPBD", "1.00", "CRDT") + balance("CLBD", "0.70", "CRDT")
+    assert len(read_one(tmp_path, document(statement(entries, balances=balances)))) == 3
+
+
+def test_pending_entries_do_not_count_towards_the_balance(tmp_path: Path) -> None:
+    entries = entry("100.00", svc="A") + entry("500.00", svc="B", sts="<Sts>PDNG</Sts>")
+    balances = balance("OPBD", "1000.00", "CRDT") + balance("CLBD", "900.00", "CRDT")
+    assert len(read_one(tmp_path, document(statement(entries, balances=balances)))) == 1
+
+
+def test_balances_in_another_currency_are_not_checked(tmp_path: Path) -> None:
+    balances = balance("OPBD", "1.00", "CRDT", "USD") + balance(
+        "CLBD", "999.00", "CRDT", "USD"
+    )
+    assert len(read_one(tmp_path, document(statement(entry(), balances=balances)))) == 1
+
+
+def test_read_entries_parses_an_incomplete_statement_but_gives_no_coverage(
+    tmp_path: Path,
+) -> None:
+    xml = document(statement(entry(), summary=count("9")))
+    path = write(tmp_path, "a.xml", xml)
+    with pytest.raises(ValueError, match="states 9 entries"):
+        read_camt053([path])
+    result = read_entries([path])
+    assert len(result.rows) == 1
+    assert result.bank_data_from is None and result.bank_data_through is None
+    # An unknown status is still refused: the entry could not be placed.
+    bad = write(tmp_path, "b.xml", document(statement(entry(sts="<Sts>X</Sts>"))))
+    with pytest.raises(ValueError, match="not one of"):
+        read_entries([bad])
