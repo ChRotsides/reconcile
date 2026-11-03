@@ -1,6 +1,6 @@
 # Practitioner findings
 
-**Status:** Pending. No practitioners have been interviewed yet. Nothing in this file is a finding until a section below is filled in from a real interview.
+**Status:** Pending. No practitioners have been interviewed yet. Nothing in this file is a finding until a section below is filled in from a real interview. No report walkthrough session has been held either (section 6).
 
 ## 1. Purpose and use
 
@@ -149,3 +149,12 @@ Same table as P1; all responses pending.
 ### 5.3 Effect on decisions
 
 pending — no practitioners interviewed yet. When filled: state whether the three families are confirmed, revised or dropped; state the first accounting and bank formats chosen against `docs/export-formats.md`; record both as decisions.
+
+## 6. Walkthrough sessions
+
+Status: no walkthrough session has been held. The script and recording table are in `docs/practitioner-walkthrough.md`. Results are self-reported, from a small sample, and are kept apart from benchmark results. Mark every quote as the practitioner's words.
+
+| Code | Date | Cases shown | Followed without help (cases) | Hesitations | Distrust | Information wanted | Wrong readings | Report change made |
+|---|---|---|---|---|---|---|---|---|
+| P1 | pending | pending | pending | pending | pending | pending | pending | pending |
+| P2 | pending | pending | pending | pending | pending | pending | pending | pending |
