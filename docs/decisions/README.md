@@ -16,3 +16,4 @@ Numbers quoted here are development results on the synthetic FinRCA benchmark (t
 | [0006](0006-model-inclusion.md) | Model inclusion | accepted; drafting tested in M4 and removed |
 | [0007](0007-metric-choice.md) | Metric choice | accepted for M3; freezes with protocol-v1 |
 | [0008](0008-dataset-and-licence.md) | Dataset and licence handling | accepted; data licence unverified |
+| [0009](0009-real-export-handling.md) | Handling real exports | accepted for M5; fixtures and public samples only |
