@@ -36,6 +36,7 @@ ALLOWED_NAMES = {
 # Preparation adapters: handle key files and read upstream files. Inference
 # modules (everything else) must not import them.
 PREPARATION = {
+    "reconcile.cli",  # imports adapters lazily; absent from the inference image
     "reconcile.adapters.camt053",
     "reconcile.adapters.csv_bundle",
     "reconcile.adapters.finrca",

@@ -1,0 +1,83 @@
+# Invented demo company. Column names equal the contract names, so every line maps a column to itself.
+version = 1
+bank_data_through = "2026-06-30"
+
+[tables.invoices]
+file = "invoices.csv"
+[tables.invoices.columns]
+invoice_id = "invoice_id"
+vendor_id = "vendor_id"
+invoice_date = { column = "invoice_date", date_formats = ["%Y-%m-%d"] }
+received_date = { column = "received_date", date_formats = ["%Y-%m-%d"] }
+due_date = { column = "due_date", date_formats = ["%Y-%m-%d"] }
+currency = "currency"
+subtotal = "subtotal"
+tax = "tax"
+shipping = "shipping"
+invoice_total = "invoice_total"
+payment_terms = "payment_terms"
+status = "status"
+
+[tables.payments]
+file = "payments.csv"
+[tables.payments.columns]
+payment_id = "payment_id"
+vendor_id = "vendor_id"
+bank_account_id = "bank_account_id"
+reference_number = "reference_number"
+payment_date = { column = "payment_date", date_formats = ["%Y-%m-%d"] }
+payment_method = "payment_method"
+payment_currency = "payment_currency"
+payment_amount = "payment_amount"
+payment_status = "payment_status"
+settlement_status = "settlement_status"
+created_at = { column = "created_at", date_formats = ["%Y-%m-%dT%H:%M:%S"] }
+
+[tables.payment_allocations]
+file = "payment_allocations.csv"
+[tables.payment_allocations.columns]
+payment_id = "payment_id"
+invoice_id = "invoice_id"
+allocated_amount = "allocated_amount"
+allocation_date = { column = "allocation_date", date_formats = ["%Y-%m-%d"] }
+
+[tables.bank_transactions]
+file = "bank_transactions.csv"
+[tables.bank_transactions.columns]
+bank_transaction_id = "bank_transaction_id"
+counterparty_token = "counterparty_token"
+payment_reference = "payment_reference"
+bank_account_id = "bank_account_id"
+transaction_date = { column = "transaction_date", date_formats = ["%Y-%m-%d"] }
+posted_date = { column = "posted_date", date_formats = ["%Y-%m-%d"] }
+transaction_type = "transaction_type"
+amount = "amount"
+currency = "currency"
+direction = "direction"
+status = "status"
+
+[tables.gl_entries]
+file = "gl_entries.csv"
+[tables.gl_entries.columns]
+journal_id = "journal_id"
+journal_line_id = "journal_line_id"
+source_transaction_id = "source_transaction_id"
+transaction_type = "transaction_type"
+posting_date = { column = "posting_date", date_formats = ["%Y-%m-%d"] }
+accounting_period = "accounting_period"
+gl_account = "gl_account"
+debit = "debit"
+credit = "credit"
+currency = "currency"
+
+[tables.approval_events]
+file = "approval_events.csv"
+[tables.approval_events.columns]
+approval_event_id = "approval_event_id"
+invoice_id = "invoice_id"
+approval_level = "approval_level"
+approver_role = "approver_role"
+action = "action"
+event_timestamp = { column = "event_timestamp", date_formats = ["%Y-%m-%dT%H:%M:%S"] }
+previous_status = "previous_status"
+new_status = "new_status"

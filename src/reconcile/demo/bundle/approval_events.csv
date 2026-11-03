@@ -1,0 +1,15 @@
+approval_event_id,invoice_id,approval_level,approver_role,action,event_timestamp,previous_status,new_status
+APR-1001-S,INV-1001,0,workflow,submitted,2026-05-01T09:00:00,received,submitted
+APR-1001-A,INV-1001,1,manager,approved,2026-05-02T11:00:00,submitted,approved
+APR-1002-S,INV-1002,0,workflow,submitted,2026-05-01T09:00:00,received,submitted
+APR-1002-A,INV-1002,1,manager,approved,2026-05-02T11:00:00,submitted,approved
+APR-1003-S,INV-1003,0,workflow,submitted,2026-05-01T09:00:00,received,submitted
+APR-1003-A,INV-1003,1,manager,approved,2026-05-02T11:00:00,submitted,approved
+APR-1004-S,INV-1004,0,workflow,submitted,2026-05-01T09:00:00,received,submitted
+APR-1004-A,INV-1004,1,manager,approved,2026-05-02T11:00:00,submitted,approved
+APR-1005-S,INV-1005,0,workflow,submitted,2026-05-01T09:00:00,received,submitted
+APR-1005-A,INV-1005,1,manager,approved,2026-05-02T11:00:00,submitted,approved
+APR-1006-S,INV-1006,0,workflow,submitted,2026-05-01T09:00:00,received,submitted
+APR-1006-A,INV-1006,1,manager,approved,2026-05-02T11:00:00,submitted,approved
+APR-1007-S,INV-1007,0,workflow,submitted,2026-05-01T09:00:00,received,submitted
+APR-1007-A,INV-1007,1,manager,approved,2026-05-02T11:00:00,submitted,approved

@@ -1,0 +1,5 @@
+bank_transaction_id,counterparty_token,payment_reference,bank_account_id,transaction_date,posted_date,transaction_type,amount,currency,direction,status
+BNK-9001,ACCT-NORTHWIND,REM-5001,OPS-EUR,2026-06-03,2026-06-03,ACH debit,1000.00,EUR,debit,posted
+BNK-9002,ACCT-NORTHWIND,REM-5002,OPS-EUR,2026-06-10,2026-06-10,ACH debit,1000.00,EUR,debit,posted
+BNK-9003,ACCT-LINDEN,REM-5004,OPS-EUR,2026-06-03,2026-06-03,ACH debit,975.00,EUR,debit,posted
+BNK-9004,ACCT-ORCHARD,REM-5005,OPS-EUR,2026-06-03,2026-06-03,ACH debit,980.00,EUR,debit,posted
