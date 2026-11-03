@@ -142,6 +142,48 @@ All data is synthetic with opaque tokens. Quotes come from `artifacts/m4/replay.
 - The validator was corrected after seeing the rejected drafts, which the plan did not allow (it allowed prompt or effort changes only). Two false positives were fixed: action words that appear in the packet's limitations or assumptions, and a payment method after a number ("USD 7590.62 ACH payment") read as a currency. The declared 179/215 stays primary; the re-scored 192/215 is post-hoc. See `docs/m4-trial-plan.md`, section "Deviations".
 - Rejected drafts are stored only in `artifacts/m4/replay.jsonl`; the `drafts.jsonl` rows for them have `draft: null`.
 
+## 6a. Follow-up investigation (2026-11-03): why drafts failed, and whether accepted drafts are true
+
+Read-only analysis of the saved trial data; no new model calls. The audit method was committed before any audited draft was read (`docs/m4-trial-plan.md`, appendix).
+
+### Why the 36 drafts failed
+
+| Root cause | Drafts | Detail |
+|---|---:|---|
+| Validator rejected text consistent with the packet | 17 | 12 restate the F12 limitation "do not pay again unchecked" (all negated; two reword it slightly); 4 report the packet's own `alternatives` field; 1 reads "ACH" as a currency |
+| Cited a real packet record outside the finding's list | 10 | 9 on `invoice_approval_not_completed`, whose finding does not list the invoice it concerns; 1 on `payment_without_invoice_allocation` |
+| Invented a finding name | 3 | Abstentions with no findings ("none", "unsupported_fx", "abstained") |
+| Small length overrun | 3 | 601 and 606 characters against 600; 309 against 300 |
+| Output token cap (2,000) | 3 | Packets with 6 or 7 findings; no text was recorded, so content is unknown |
+
+**Correction to section 5:** the 4 category rejections there are consistent with the packet, which lists those categories as alternatives. They are validator false positives, not model errors. They remain rejected in both result columns, because the validator was not changed again.
+
+Apart from the "ACH" misread, the checks flagged no fabricated amount, id, date or count in any of the 33 rejected drafts. Only the "pay" sentences of those drafts were read for truth.
+
+**Repeat runs are noisy.** Haiku ran twice on the same 20 packets: 18 then 14 accepted as declared, and 20 then 15 with the post-hoc validator. So the stage 2 tie is weak evidence and 83% is not a precise figure.
+
+**Replay defect.** Stage 2 and stage 3 share 20 request keys with different responses, and `ReplayClient` keeps the last. The re-score used the stage 3 responses only because of recording order; an independent recount gives the same 192.
+
+### Audit of accepted drafts
+
+**Method.** A hash-selected sample of 30 of the 179 drafts accepted as declared, 3 further accepted drafts each with one seeded false sentence, and two independent reviewers (Claude Sonnet 5.5 and Codex gpt-6-astra), blind to each other, the sample design and the seeds, reading each sentence against its packet. Labels were never shown. The parent settled every flagged sentence by reading the packet. **The reviewers are AI systems, not finance experts, and no human has rated these drafts.** The parent saw the seed key while diagnosing a failed reviewer run, so its reading of those 3 seeded items was not blind; they are not counted below.
+
+**Sensitivity.** Both reviewers caught all 3 seeded falsehoods.
+
+**Result: 8 of 30 accepted drafts (26.7%; exact 95% interval 12.3% to 45.9%) contain a confirmed problem.** That is 8 sentences out of about 290. By the frozen rule (`max_unsupported_claims = 0`), drafting fails.
+
+| Item | Confirmed problem | Packet says | Harm |
+|---|---|---|---|
+| 33 | "cannot be distinguished from a duplicate by allocation arithmetic alone" | "cannot be told apart from a duplicate except by allocation arithmetic": the meaning is reversed | Higher |
+| 03 | The search found no final approval "for the invoices it settles" | The search covered one of the two invoices | Higher |
+| 08, 22, 26 | "so no action is required" | No recommendation exists, but the packet never says no action is required, and its all-clear scope lists unchecked areas | Medium |
+| 11, 20 | Tells the analyst to re-check or watch for a later posting | No recommendation exists; the packet only notes the payment may become an exception | Lower |
+| 31 | Payment "completed and settled on 2026-05-27" | That is the payment date; no settlement date exists, and the bank debit posted 2026-06-01 | Lower |
+
+**Flagged but not counted (3):** items 09 and 28 say payments were "allocated" with amounts that are true of the allocations, though one payment is larger than its allocation; item 23's summary is literally true and its claims give the rest. If these were counted, the figure would be 11 of 30.
+
+**Limits.** The sample is small and comes from one model run per packet on development data. It tests truth to the packet, not usefulness. No draft in the sample invented an amount or a record, or named a different diagnosis; the problems are in wording, inference and added actions, which is what the validator cannot see.
+
 ## 7. Decision under the frozen protocol (proposed)
 
 `evaluation/protocol.toml` `[model_assistance]` says a drafting-only path that cannot change the primary metric is kept only if a recorded practitioner review finds a usefulness benefit, and is otherwise removed. No such review exists. In addition, review round 1 shows the validator cannot establish that a claim is true (blocker 1), and the post-hoc action-word rule can admit the opposite of a limitation (blocker 2). An earlier version of this section proposed keeping drafting as an optional, off-by-default feature; that contradicted the frozen protocol (review finding 9) and is withdrawn. Off-by-default is not an exception.
