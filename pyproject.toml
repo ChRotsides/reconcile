@@ -18,9 +18,6 @@ dev = [
 eval = [
     "scikit-learn>=1.9.1",
 ]
-model = [
-    "anthropic==1.15.0",
-]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

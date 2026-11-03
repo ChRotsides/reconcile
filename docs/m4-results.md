@@ -184,13 +184,13 @@ Apart from the "ACH" misread, the checks flagged no fabricated amount, id, date 
 
 **Limits.** The sample is small and comes from one model run per packet on development data. It tests truth to the packet, not usefulness. No draft in the sample invented an amount or a record, or named a different diagnosis; the problems are in wording, inference and added actions, which is what the validator cannot see.
 
-## 7. Decision under the frozen protocol (proposed)
+## 7. Decision under the frozen protocol
 
 `evaluation/protocol.toml` `[model_assistance]` says a drafting-only path that cannot change the primary metric is kept only if a recorded practitioner review finds a usefulness benefit, and is otherwise removed. No such review exists. In addition, review round 1 shows the validator cannot establish that a claim is true (blocker 1), and the post-hoc action-word rule can admit the opposite of a limitation (blocker 2). An earlier version of this section proposed keeping drafting as an optional, off-by-default feature; that contradicted the frozen protocol (review finding 9) and is withdrawn. Off-by-default is not an exception.
 
-PROPOSED outcome: remove model drafting from the product path. Keep the trial artifacts under `artifacts/m4/`, these documents, and a git tag of the code as research evidence. Drafting is not part of the headline claim. The final decision is left to the user at the M4 gate.
+**Decision (user, M4 gate, 2026-11-03): model drafting is removed from the product.** The audit in section 6a also confirms the frozen rule is not met. The code named in this document is no longer on `main`; it is preserved at the git tag `m4-drafting-experiment`. The trial artifacts stay untracked under `artifacts/m4/` in the M4 worktree. Drafting is not part of the headline claim.
 
-### Not fixed because removal is proposed
+### Not fixed because drafting was removed
 
 Other review round 1 findings, listed so a future design starts from them (one line each):
 
