@@ -23,7 +23,10 @@ from reconcile.reports.explain import summary, title
 
 _TAG = re.compile(r"[a-z][a-z0-9]*")
 _ATTR = re.compile(r"[a-z][a-z0-9-]*")
-_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+# Only the relative forms the report writer generates: `name.html` or
+# `cases/name.html`. Anything else, including a leading space or a backslash that
+# a browser may read as an absolute URL, is refused.
+_RELATIVE_LINK = re.compile(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*")
 _VOID = frozenset({"meta", "br"})
 
 
@@ -434,8 +437,14 @@ def _unknowns(packet: EvidencePacket) -> Element:
     return el(
         "section",
         {"id": "unknowns"},
-        el("h2", None, "Alternatives considered, and unknowns"),
-        el("h3", None, "Alternatives ruled out"),
+        el("h2", None, "Other supported patterns, and unknowns"),
+        el("h3", None, "Other patterns the records also support"),
+        el(
+            "p",
+            {"class": "note"},
+            "The checks for these patterns also hold. The records alone do not "
+            "choose between them and the conclusion.",
+        ),
         _list(d.alternatives, none),
         el("h3", None, "Missing information"),
         _list(d.missing_information, none),
@@ -445,6 +454,8 @@ def _unknowns(packet: EvidencePacket) -> Element:
 
 
 def _plain(value: Any) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
     if isinstance(value, (list, tuple)):
         return ", ".join(_plain(v) for v in value)
     if isinstance(value, dict):
@@ -467,6 +478,19 @@ def _manifest_pairs(manifest: dict[str, Any]) -> list[tuple[str, str | Element |
                 "(declared by whoever prepared the data)",
             )
         )
+    for key, label in (
+        ("bank_data_from", "Bank data from"),
+        ("all_paying_accounts_covered", "All paying accounts covered"),
+        ("fee_journals_recognised", "Bank-fee journals declared as typed"),
+        ("reference_matching", "Reference matching"),
+    ):
+        if key in manifest:
+            pairs.append(
+                (
+                    label,
+                    f"{_plain(manifest[key])} (declared by whoever prepared the data)",
+                )
+            )
     for key, label in (
         ("tables_not_supplied", "Tables not supplied"),
         ("format", "Source format"),
@@ -540,7 +564,7 @@ def render_packet(
 
 
 def _href(value: str) -> str:
-    if _SCHEME.match(value) or value.startswith("//"):
+    if not _RELATIVE_LINK.fullmatch(value) or ".." in value.split("/"):
         raise ValueError(f"index links must be relative, got {value!r}")
     return value
 

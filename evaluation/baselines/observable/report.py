@@ -35,6 +35,8 @@ from features import Snapshot  # noqa: E402
 
 from reconcile.reports.explain import TITLES  # noqa: E402
 from reconcile.reports.html import Element, document, el  # noqa: E402
+from reconcile.reports.write import file_stems  # noqa: E402
+from reconcile.runs.record import make_private_dir, write_private_file  # noqa: E402
 
 PROTOCOL = Path(__file__).resolve().parents[2] / "protocol.toml"
 
@@ -126,13 +128,21 @@ def render_case(
 
 
 def render_index(
-    cases: list[dict[str, Any]], configs: list[tuple[str, float | None]]
+    cases: list[dict[str, Any]],
+    configs: list[tuple[str, float | None]],
+    names: dict[str, str] | None = None,
 ) -> str:
+    """`names` maps request_id -> file stem; without it the ID is used as is."""
+    names = names or {}
     rows: list[list[str | Element]] = []
     for c in cases:
         rows.append(
             [
-                el("a", {"href": f"{c['request_id']}.html"}, c["request_id"]),
+                el(
+                    "a",
+                    {"href": f"{names.get(c['request_id'], c['request_id'])}.html"},
+                    c["request_id"],
+                ),
                 f"{c['table']} {c['record_id']}",
                 plain_title(c["predicted"]),
                 repr(float(c["confidence"])),
@@ -163,8 +173,8 @@ def write_report(
     out_dir: Path,
     configs: list[tuple[str, float | None]],
 ) -> int:
-    """Write `index.html` and one `<request_id>.html` per prediction. Returns
-    the number of cases."""
+    """Write `index.html` and one page per prediction into the new folder
+    `out_dir`. Returns the number of cases."""
     reqs = {r["request_id"]: r for r in _read(requests)}
     cases: list[dict[str, Any]] = []
     for p in _read(predictions):  # safe fields only
@@ -181,7 +191,12 @@ def write_report(
         )
     cases.sort(key=lambda c: c["request_id"])
     snaps: dict[str, Snapshot] = {}
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # Request IDs are data: names come from the sanitising helper, files are
+    # created exclusively, and the folder must be new.
+    names = file_stems(c["request_id"] for c in cases)
+    if any(stem.lower() == "index" for stem in names.values()):
+        raise ValueError("a request ID gives the file name 'index', used by the index")
+    make_private_dir(out_dir)
     for c in cases:
         snap = snaps.setdefault(
             c["cutoff"], Snapshot(snapshot, date.fromisoformat(c["cutoff"]))
@@ -192,10 +207,13 @@ def write_report(
             c["table"],
             c["record_id"],
         )
-        (out_dir / f"{c['request_id']}.html").write_text(
-            render_case(c, reqs_met, configs), encoding="utf-8"
+        write_private_file(
+            out_dir / f"{names[c['request_id']]}.html",
+            render_case(c, reqs_met, configs).encode(),
         )
-    (out_dir / "index.html").write_text(render_index(cases, configs), encoding="utf-8")
+    write_private_file(
+        out_dir / "index.html", render_index(cases, configs, names).encode()
+    )
     return len(cases)
 
 

@@ -7,6 +7,7 @@ give the same name are refused.
 
 import json
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -29,13 +30,12 @@ def _order(p: EvidencePacket) -> tuple[str, str]:
     return (e.table, e.record_id)
 
 
-def case_file_names(packets: list[EvidencePacket]) -> dict[str, str]:
+def file_stems(request_ids: Iterable[str]) -> dict[str, str]:
     """request_id -> file stem, refusing collisions (case-insensitively, since
     some filesystems fold case)."""
     names: dict[str, str] = {}
     seen: dict[str, str] = {}
-    for p in packets:
-        rid = p.request.request_id
+    for rid in request_ids:
         stem = _UNSAFE.sub("_", rid)
         if stem.lower() in seen:
             raise ValueError(
@@ -47,10 +47,14 @@ def case_file_names(packets: list[EvidencePacket]) -> dict[str, str]:
     return names
 
 
+def case_file_names(packets: list[EvidencePacket]) -> dict[str, str]:
+    return file_stems(p.request.request_id for p in packets)
+
+
 def _load(run_dir: Path) -> tuple[list[EvidencePacket], dict[str, Any]]:
-    verify_run(run_dir)
+    listed = verify_run(run_dir)["files"]
     packets_path = run_dir / PACKETS_FILE
-    if not packets_path.is_file():
+    if PACKETS_FILE not in listed:
         raise ValueError(
             f"{run_dir} has no {PACKETS_FILE}: it is a single investigation; "
             "open its report.html"

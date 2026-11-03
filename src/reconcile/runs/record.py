@@ -123,7 +123,9 @@ def write_run_manifest(
 
 def verify_run(run_dir: Path) -> dict[str, Any]:
     """Return the run manifest, or raise `RunRecordError` when it is missing,
-    incomplete, unreadable or any listed file differs from its recorded hash."""
+    incomplete, unreadable, does not list the snapshot manifest copy or any
+    listed file differs from its recorded hash. Readers must open only files
+    this lists: an unlisted file was never verified."""
     path = run_dir / MANIFEST_FILE
     if not path.is_file():
         raise RunRecordError(
@@ -138,9 +140,18 @@ def verify_run(run_dir: Path) -> dict[str, Any]:
         raise RunRecordError(f"{path} is unreadable: {type(e).__name__}") from e
     if not ok:
         raise RunRecordError(f"{path} does not say the run is complete")
+    if SNAPSHOT_MANIFEST_COPY not in files:
+        raise RunRecordError(f"{path} does not list {SNAPSHOT_MANIFEST_COPY}")
     for name, entry in files.items():
         if name != Path(name).name or name.startswith("."):
             raise RunRecordError(f"{path} lists an unsafe file name")
+        if not (
+            isinstance(entry, dict)
+            and isinstance(entry.get("sha256"), str)
+            and isinstance(entry.get("size"), int)
+            and not isinstance(entry["size"], bool)
+        ):
+            raise RunRecordError(f"{path} has a malformed entry for {name}")
         target = run_dir / name
         if target.is_symlink() or not target.is_file():
             raise RunRecordError(f"{name} is missing from {run_dir}")

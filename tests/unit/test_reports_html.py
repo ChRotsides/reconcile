@@ -2,6 +2,7 @@
 
 import json
 import re
+from dataclasses import replace
 from datetime import date
 from html import escape
 from html.parser import HTMLParser
@@ -329,6 +330,51 @@ def test_manifest_fields_are_shown_when_present_and_quiet_when_absent(
     assert "Bank data through" not in none.text
 
 
+def test_declarations_in_the_manifest_are_shown_as_declared(
+    packets: dict[str, EvidencePacket],
+) -> None:
+    p = packets["split_payment"]
+    manifest = {
+        "snapshot": {"content_sha256": "b" * 64},
+        "bank_data_from": "2026-01-01",
+        "all_paying_accounts_covered": True,
+        "fee_journals_recognised": False,
+        "reference_matching": "exact",
+    }
+    text = check_safe(render_packet(p, manifest=manifest)).text
+    for label, value in (
+        ("Bank data from", "2026-01-01"),
+        ("All paying accounts covered", "yes"),
+        ("Bank-fee journals declared as typed", "no"),
+        ("Reference matching", "exact"),
+    ):
+        row = re.search(rf"{label}.{{0,60}}", text, re.S)
+        assert row, label
+        assert value in row.group(0), (label, row.group(0))
+    assert text.count("declared by whoever prepared the data") >= 4
+    bare = check_safe(render_packet(p, manifest={"format": "x"})).text
+    for label in ("Bank data from", "Reference matching", "Bank-fee journals"):
+        assert label not in bare
+
+
+def test_two_supported_patterns_are_not_called_ruled_out(
+    packets: dict[str, EvidencePacket],
+) -> None:
+    # The investigator puts a second pattern whose checks also hold in
+    # `alternatives` (test_batch_lists_the_clearing_variant_that_also_holds).
+    base = packets["split_payment"]
+    d = replace(
+        base.diagnosis,
+        alternatives=("legitimate_check_clearing", "legitimate_weekend_clearing"),
+    )
+    page = check_safe(render_packet(replace(base, diagnosis=d)))
+    assert "ruled out" not in page.text.lower()
+    assert "Alternatives" not in page.text
+    assert "Other patterns the records also support" in page.text
+    assert "legitimate_check_clearing" in page.text
+    assert "legitimate_weekend_clearing" in page.text
+
+
 # ------------------------------------------------------------ injection
 
 
@@ -444,9 +490,27 @@ def test_css_survives_escaping_unchanged() -> None:
 
 def test_index_links_must_be_relative() -> None:
     packets = _hostile_packets()[:1]
-    for bad in ("javascript:alert(1)", "https://example.com/x", "//evil/x"):
+    bad_links = (
+        "javascript:alert(1)",
+        "https://example.com/x",
+        "//evil/x",
+        " https://example.invalid/",
+        "\thttps://example.invalid/",
+        "cases\\x.html",
+        "/etc/passwd",
+        "../x.html",
+        "cases/../../x.html",
+        "cases//x.html",
+        "cases/x.html?q=1",
+        "cases/x.html#f",
+        "",
+        "cases/x y.html",
+    )
+    for bad in bad_links:
         with pytest.raises(ValueError):
             render_index(packets, {"req_evil": bad})
+    for good in ("case.html", "cases/a_b-1.html"):
+        assert good in render_index(packets, {"req_evil": good})
 
 
 # ------------------------------------------------------------------ index

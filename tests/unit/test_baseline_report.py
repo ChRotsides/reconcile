@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -128,3 +129,73 @@ def test_write_report_reads_no_label_field(
 
 def test_configurations_come_from_the_frozen_protocol() -> None:
     assert R.configurations() == CONFIGS
+
+
+def _write_inputs(tmp_path: Path, ids: list[str]) -> tuple[Path, Path]:
+    preds = tmp_path / "p.jsonl"
+    reqs = tmp_path / "r.jsonl"
+    preds.write_text(
+        "".join(
+            json.dumps({"request_id": i, "predicted": "F12", "confidence": 0.9}) + "\n"
+            for i in ids
+        )
+    )
+    reqs.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "request_id": i,
+                    "cutoff": "2026-06-30",
+                    "primary_entity": {"table": "payments", "record_id": "rec1"},
+                }
+            )
+            + "\n"
+            for i in ids
+        )
+    )
+    return preds, reqs
+
+
+def _stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(R, "Snapshot", lambda path, cutoff: object())
+    monkeypatch.setattr(R.evidence, "retrieve", lambda *a: [("payment", True)])
+
+
+def test_hostile_request_ids_cannot_escape_or_overwrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub(monkeypatch)
+    outside = tmp_path / "outside.html"
+    outside.write_text("precious")
+    absolute = tmp_path / "abs"
+    ids = ["../outside", str(absolute), "a/b", "ok_1"]
+    preds, reqs = _write_inputs(tmp_path, ids)
+    out = tmp_path / "out"
+    assert R.write_report(preds, reqs, tmp_path / "s.sqlite", out, CONFIGS) == 4
+    assert outside.read_text() == "precious"
+    assert not absolute.with_suffix(".html").exists()
+    assert not Path(str(absolute) + ".html").exists()
+    root = out.resolve()
+    for p in out.rglob("*"):
+        assert p.resolve().parent == root
+    index = (out / "index.html").read_text()
+    for href in re.findall(r'href="([^"]*)"', index):
+        assert re.fullmatch(r"[A-Za-z0-9._-]+", href), href
+        assert (out / href).is_file()
+
+
+def test_report_folder_must_be_new_and_names_must_not_collide(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub(monkeypatch)
+    preds, reqs = _write_inputs(tmp_path, ["a:b", "a_b"])
+    with pytest.raises(ValueError, match="same report file name"):
+        R.write_report(preds, reqs, tmp_path / "s", tmp_path / "o1", CONFIGS)
+    assert not (tmp_path / "o1").exists()
+    preds, reqs = _write_inputs(tmp_path, ["index"])
+    with pytest.raises(ValueError, match="index"):
+        R.write_report(preds, reqs, tmp_path / "s", tmp_path / "o2", CONFIGS)
+    preds, reqs = _write_inputs(tmp_path, ["x"])
+    (tmp_path / "o3").mkdir()
+    with pytest.raises(FileExistsError):
+        R.write_report(preds, reqs, tmp_path / "s", tmp_path / "o3", CONFIGS)
