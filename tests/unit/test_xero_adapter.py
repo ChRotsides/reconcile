@@ -465,6 +465,51 @@ def test_a_member_listed_twice_in_one_batch_is_refused(tmp_path: Path) -> None:
     refused(tmp_path, "member m-1 is listed 2 times", **inputs)
 
 
+def test_a_padded_member_id_cannot_hide_a_conflicting_invoice(tmp_path: Path) -> None:
+    # Payments says "m-1" pays inv-1; the batch lists " m-1 " against inv-2. With
+    # two spellings of one ID the cross-check never ran and both were accepted.
+    inputs = batch_inputs()
+    inputs["batches"][0]["Payments"][0]["PaymentID"] = " m-1 "
+    inputs["batches"][0]["Payments"][0]["Invoice"] = {"InvoiceID": "inv-2"}
+    message = refused(tmp_path, "surrounding whitespace", **inputs)
+    assert "' m-1 '" in message and "bat-1" in message
+
+
+def test_a_padded_batch_id_on_a_member_is_refused(tmp_path: Path) -> None:
+    inputs = batch_inputs()
+    inputs["payments"][0]["BatchPaymentID"] = " bat-1"
+    refused(tmp_path, r"m-1.*BatchPaymentID ' bat-1'.*surrounding whitespace", **inputs)
+
+
+def test_a_padded_duplicate_member_is_refused(tmp_path: Path) -> None:
+    inputs = batch_inputs()
+    inputs["payments"] = []
+    other = batch("bat-2")
+    other["Payments"][0]["PaymentID"] = "m-1 "
+    inputs["batches"].append(other)
+    refused(tmp_path, "surrounding whitespace", **inputs)
+
+
+@pytest.mark.parametrize("kind", ["invoices", "payments", "batches"])
+def test_a_padded_object_id_is_refused_at_load(kind: str, tmp_path: Path) -> None:
+    inputs = batch_inputs()
+    key = {
+        "invoices": "InvoiceID",
+        "payments": "PaymentID",
+        "batches": "BatchPaymentID",
+    }
+    inputs[kind][0][key[kind]] = " " + inputs[kind][0][key[kind]]
+    refused(tmp_path, f"{key[kind]} ' .*' has surrounding whitespace", **inputs)
+
+
+def test_a_padded_invoice_reference_is_refused(tmp_path: Path) -> None:
+    refused(
+        tmp_path,
+        "InvoiceID ' inv-1' has surrounding whitespace",
+        payments=[payment("pay-1", " inv-1")],
+    )
+
+
 def test_receivable_batches_are_counted_not_used(tmp_path: Path) -> None:
     data = read(
         tmp_path,

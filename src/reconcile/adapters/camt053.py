@@ -12,13 +12,16 @@ Coverage (the period each statement states) decides `bank_data_from` and
 `bank_data_through`: per account the periods must follow each other without a
 gap, and overlapping statements are refused unless one is an exact repeat of
 another. Overlap would repeat entries; with position-based IDs that fakes a
-second, identical debit. A partly covered first or last day is not counted as
-covered.
+second, identical debit. The statements' exact
+time intervals are kept: they must follow each other within a second, and a day
+counts as covered only when the union of the intervals contains all of it.
 
-A statement that cannot be shown complete is refused, because the investigator
+A statement whose own controls disagree is refused, because the investigator
 reads "no bank row" as evidence: every entry needs a recognised status, a stated
-entry count must match the entries present, and opening plus booked credits
-minus booked debits must equal the closing balance when both are stated.
+entry count must match the entries present, and in each currency with both an
+opening and a closing balance, opening plus booked credits minus booked debits
+must equal the closing balance. A statement with no controls is accepted; that
+does not show it is complete.
 """
 
 import re
@@ -26,7 +29,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from xml.parsers import expat
@@ -41,10 +44,8 @@ DEFAULT_FEE_CODES = (("CAMT", "ACCB", "CHRG"),)
 _AMOUNT = re.compile(r"[0-9]+(\.[0-9]+)?", re.ASCII)
 _NOT_PROVIDED = "NOTPROVIDED"
 ENTRY_STATUSES = ("BOOK", "PDNG", "INFO")
-# A statement period given as date-times covers its first day from here ...
-_DAY_STARTS_BY = time(0, 0, 59)
-# ... and its last day from here, so a day cut off earlier is not fully covered.
-_DAY_ENDS_FROM = time(23, 59)
+_ONE_SECOND = timedelta(seconds=1)
+_END_OF_DAY = time(23, 59, 59)
 _SEP = " "  # namespace separator in expat names: "<uri> <local>"
 
 
@@ -138,11 +139,20 @@ def parse_xml(data: bytes) -> _El:
 
 @dataclass(frozen=True)
 class Period:
-    first: date  # as stated
-    last: date
+    """The interval a statement states, as wall-clock time (no zone conversion).
+    A date alone starts at 00:00:00 or ends at 23:59:59."""
+
+    start: datetime
+    end: datetime
     source: str  # "FrToDt" or "balance date"
-    covered_first: date  # the first and last day the statement covers whole
-    covered_last: date
+
+    @property
+    def first(self) -> date:
+        return self.start.date()
+
+    @property
+    def last(self) -> date:
+        return self.end.date()
 
 
 @dataclass
@@ -193,13 +203,15 @@ def _date_of(node: _El | None, what: str) -> date | None:
     return None
 
 
-def _clock(text: str, what: str) -> time | None:
-    """Wall-clock time of a date-time as written (no zone conversion); None for
-    a plain date."""
-    if len(text) == 10:
-        return None
+def _stamp(text: str, what: str, *, ends: bool) -> datetime:
+    """Date-time as written without its zone; a plain date is the start of the
+    day, or its last second when it ends a period."""
     try:
-        return datetime.fromisoformat(text).time()
+        if len(text) == 10:
+            return datetime.combine(
+                date.fromisoformat(text), _END_OF_DAY if ends else time(0)
+            )
+        return datetime.fromisoformat(text).replace(tzinfo=None)
     except ValueError:
         raise _Bad(f"{what} {text!r} is not an ISO date") from None
 
@@ -209,25 +221,21 @@ def _period(stmt: _El) -> Period | None:
     if window is not None:
         a, b = window.value("FrDtTm"), window.value("ToDtTm")
         if a and b:
-            first, last = _day(a, "FrDtTm"), _day(b, "ToDtTm")
-            start, end = _clock(a, "FrDtTm"), _clock(b, "ToDtTm")
-            return Period(
-                first,
-                last,
-                "FrToDt",
-                first
-                if start is None or start <= _DAY_STARTS_BY
-                else first + timedelta(days=1),
-                last
-                if end is None or end >= _DAY_ENDS_FROM
-                else last - timedelta(days=1),
-            )
+            start = _stamp(a, "FrDtTm", ends=False)
+            end = _stamp(b, "ToDtTm", ends=True)
+            if end < start:
+                raise _Bad(f"ToDtTm {b!r} is before FrDtTm {a!r}")
+            return Period(start, end, "FrToDt")
         raise _Bad("FrToDt lacks FrDtTm or ToDtTm")
     for bal in stmt.findall("Bal"):
         if bal.value("Tp", "CdOrPrtry", "Cd") == "CLBD":
             d = _date_of(bal.find("Dt"), "closing balance Dt")
             if d:
-                return Period(d, d, "balance date", d, d)
+                return Period(
+                    datetime.combine(d, time(0)),
+                    datetime.combine(d, _END_OF_DAY),
+                    "balance date",
+                )
     return None
 
 
@@ -450,38 +458,54 @@ def _coverage(
     for (account, currency), group in sorted(
         groups.items(), key=lambda kv: (kv[0][0], kv[0][1] or "")
     ):
-        group.sort(key=lambda s: (s.period.first, s.period.last))  # type: ignore[union-attr]
+        group.sort(key=lambda s: (s.period.start, s.period.end))  # type: ignore[union-attr]
         key = f"{account} {currency or '(no currency)'}"
         periods[key] = [
             {
                 "statement": s.label,
-                "from": s.period.first.isoformat(),  # type: ignore[union-attr]
-                "to": s.period.last.isoformat(),  # type: ignore[union-attr]
+                "from": s.period.start.isoformat(),  # type: ignore[union-attr]
+                "to": s.period.end.isoformat(),  # type: ignore[union-attr]
                 "stated_by": s.period.source,  # type: ignore[union-attr]
             }
             for s in group
         ]
-        for a, b in zip(group, group[1:], strict=False):
-            assert a.period and b.period
-            if b.period.first <= a.period.last:
+        latest = group[0]
+        for b in group[1:]:
+            assert latest.period and b.period
+            if b.period.start <= latest.period.end:
                 problems.add(
-                    f"period {b.period.first} to {b.period.last} overlaps "
-                    f"{a.label} ({a.period.first} to {a.period.last}); overlapping "
-                    "statements would repeat entries. Remove one, or export "
-                    "non-overlapping periods",
+                    f"period {b.period.start} to {b.period.end} overlaps "
+                    f"{latest.label} ({latest.period.start} to {latest.period.end}); "
+                    "overlapping statements would repeat entries. Remove one, or "
+                    "export non-overlapping periods",
                     b.label,
                 )
-            elif b.period.covered_first > a.period.covered_last + timedelta(days=1):
+            elif b.period.start - latest.period.end > _ONE_SECOND:
                 problems.add(
-                    f"a gap follows {a.label} (last day covered "
-                    f"{a.period.covered_last}); this statement covers whole days "
-                    f"from {b.period.covered_first}. Entries in the gap would "
-                    "look missing from the bank",
+                    f"a gap follows {latest.label} (it ends {latest.period.end}); "
+                    f"this statement starts {b.period.start}. Entries in the gap "
+                    "would look missing from the bank",
                     b.label,
                 )
-        assert group[0].period
-        firsts[key] = group[0].period.covered_first.isoformat()
-        lasts[key] = max(s.period.covered_last for s in group if s.period).isoformat()
+            if b.period.end > latest.period.end:
+                latest = b
+        # Whole days come from the union of the intervals, which is continuous
+        # here (gaps were refused): the day the union starts on counts only if it
+        # starts at midnight, the day it ends on only if it ends at its last second.
+        begins = group[0].period.start  # type: ignore[union-attr]
+        ends = latest.period.end  # type: ignore[union-attr]
+        first_day = (
+            begins.date()
+            if begins.time() == time(0)
+            else begins.date() + timedelta(days=1)
+        )
+        last_day = (
+            ends.date()
+            if ends.time() >= _END_OF_DAY
+            else ends.date() - timedelta(days=1)
+        )
+        firsts[key] = first_day.isoformat()
+        lasts[key] = last_day.isoformat()
     computed = min(date.fromisoformat(v) for v in lasts.values()) if lasts else None
     computed_from = (
         max(date.fromisoformat(v) for v in firsts.values()) if firsts else None
@@ -532,58 +556,57 @@ def _coverage(
     )
 
 
-def _signed(bal: _El, currency: str, problems: Problems, label: str) -> Decimal | None:
-    """A balance as a signed amount, or None when it is in another currency or
-    cannot be read (the latter is a problem)."""
+def _signed(bal: _El, problems: Problems, label: str) -> Decimal | None:
+    """A balance as a signed amount; unreadable ones are a problem."""
     amt = bal.find("Amt")
     indicator = bal.value("CdtDbtInd")
     text = amt.text.strip() if amt is not None else ""
-    if amt is None or amt.attrs.get("Ccy") != currency:
-        return None
     if not _AMOUNT.fullmatch(text) or indicator not in ("CRDT", "DBIT"):
         problems.add(
             f"balance {text!r} {indicator!r} is not a plain amount with CRDT or DBIT",
             label,
         )
         return None
-    try:
-        value = Decimal(text)
-    except InvalidOperation:
-        problems.add(f"balance {text!r} is not a number", label)
-        return None
+    value = Decimal(text)
     return value if indicator == "CRDT" else -value
 
 
 def _check_balances(
-    stmt: Statement, credits: Decimal, debits: Decimal, problems: Problems
+    stmt: Statement,
+    credits: dict[str, Decimal],
+    debits: dict[str, Decimal],
+    problems: Problems,
 ) -> None:
     """Opening plus booked credits minus booked debits must equal the closing
-    balance, when the statement states both in its currency."""
-    found: dict[str, _El] = {}
+    balance, in each currency for which the statement states both. Entries and
+    balances of one currency never count towards another's equation. A statement
+    with an account currency is checked in that currency only."""
+    found: dict[tuple[str, str], _El] = {}
     for bal in stmt.node.findall("Bal"):
         code = bal.value("Tp", "CdOrPrtry", "Cd")
-        if code in ("OPBD", "PRCD", "CLBD"):
-            found.setdefault(code, bal)
-    opening = found.get("OPBD") or found.get("PRCD")
-    closing = found.get("CLBD")
-    if opening is None or closing is None:
-        return
-    close_amt = closing.find("Amt")
-    currency = stmt.currency or (close_amt.attrs.get("Ccy") if close_amt else None)
-    if not currency:
-        return
-    before = _signed(opening, currency, problems, stmt.label)
-    after = _signed(closing, currency, problems, stmt.label)
-    if before is None or after is None:
-        return
-    expected = before + credits - debits
-    if expected != after:
-        problems.add(
-            f"opening {before} + booked credits {credits} - booked debits {debits} "
-            f"= {expected}, but the closing balance is {after} ({currency}); the "
-            "statement is incomplete or its entries are wrong",
-            stmt.label,
-        )
+        amt = bal.find("Amt")
+        ccy = amt.attrs.get("Ccy") if amt is not None else None
+        if code in ("OPBD", "PRCD", "CLBD") and ccy:
+            found.setdefault((code, ccy), bal)
+    currencies = sorted({c for _, c in found} if not stmt.currency else {stmt.currency})
+    for ccy in currencies:
+        opening = found.get(("OPBD", ccy)) or found.get(("PRCD", ccy))
+        closing = found.get(("CLBD", ccy))
+        if opening is None or closing is None:
+            continue
+        before = _signed(opening, problems, stmt.label)
+        after = _signed(closing, problems, stmt.label)
+        if before is None or after is None:
+            continue
+        credit, debit = credits.get(ccy, Decimal(0)), debits.get(ccy, Decimal(0))
+        expected = before + credit - debit
+        if expected != after:
+            problems.add(
+                f"opening {before} + booked credits {credit} - booked debits "
+                f"{debit} = {expected}, but the closing balance is {after} "
+                f"({ccy}); the statement is incomplete or its entries are wrong",
+                stmt.label,
+            )
 
 
 def _check_count(stmt: Statement, problems: Problems) -> None:
@@ -647,7 +670,8 @@ def _read(
     id_used: Counter[str] = Counter()
     ids: dict[str, str] = {}
     for stmt in unique:
-        credits = debits = Decimal(0)
+        credits: dict[str, Decimal] = {}
+        debits: dict[str, Decimal] = {}
         readable = True
         for position, entry in enumerate(stmt.node.findall("Ntry"), start=1):
             where = f"{stmt.label} Ntry #{position} (line {entry.line})"
@@ -672,10 +696,9 @@ def _read(
                 problems.add(str(e), where)
                 continue
             amount = Decimal(row["amount"] or "0")
-            if row["direction"] == "credit":
-                credits += amount
-            else:
-                debits += amount
+            ccy = row["currency"] or ""
+            side = credits if row["direction"] == "credit" else debits
+            side[ccy] = side.get(ccy, Decimal(0)) + amount
             ident = row["bank_transaction_id"] or ""
             if ident in ids:
                 problems.add(
@@ -719,7 +742,7 @@ def read_camt053(
     bank_data_through: date | None = None,
 ) -> CamtData:
     """Bank rows for `bank_transactions` and the days the statements cover. A
-    statement that is not shown complete (entry count, balances) is refused."""
+    statement whose entry count or balances disagree with its entries is refused."""
     return _read(
         files,
         reference_fields,

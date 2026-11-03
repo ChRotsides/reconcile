@@ -8,6 +8,7 @@ import csv
 import json
 import sqlite3
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from reconcile.domain.contracts import (
     InvestigationRequest,
     RecordRef,
 )
+from reconcile.reports.explain import explain
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "public"
 EXPECTED: dict[str, Any] = json.loads((FIXTURES / "expected.json").read_text())
@@ -164,11 +166,13 @@ def test_the_net_fee_all_clear_is_unaffected_by_the_fee_journal_declaration(
 
 
 def test_a_manifest_without_the_key_still_answers_f14(tmp_path: Path) -> None:
+    # Only a manifest that is not identified as operational (FinRCA) may lack the
+    # fee key; an operational one without it is refused (see below).
     rows = load("f14_amount_shortfall")
     manifest = prepare(rows, tmp_path)
     path = tmp_path / "snap" / "manifest.json"
     bare = json.loads(path.read_text())
-    del bare["fee_journals_recognised"]
+    del bare["fee_journals_recognised"], bare["adapter_version"]
     path.chmod(0o644)
     path.write_text(json.dumps(bare))
     assert outcome(run(manifest, tmp_path, *primary("f14_amount_shortfall"))) == (
@@ -756,3 +760,244 @@ def test_a_fee_journal_in_another_currency_abstains_as_fx(
         None,
         "unsupported_fx",
     )
+
+
+# --- operational manifests must carry their declarations (review 2, D) ---------
+
+
+def edit_manifest(tmp_path: Path, change: Any) -> None:
+    path = tmp_path / "snap" / "manifest.json"
+    doc = json.loads(path.read_text())
+    change(doc)
+    path.chmod(0o644)
+    path.write_text(json.dumps(doc))
+
+
+def f12_with(tmp_path: Path, change: Any) -> EvidencePacket:
+    manifest = prepare(load("f12_payment_missing_from_bank"), tmp_path)
+    edit_manifest(tmp_path, change)
+    return run(manifest, tmp_path, "payments", "PAY_1")
+
+
+def test_a_legacy_operational_manifest_must_be_prepared_again(tmp_path: Path) -> None:
+    # operational-1 manifests could hold an inferred fee flag, no coverage start
+    # and no account declaration, and so reproduce the false F12 and F14 answers.
+    def legacy(doc: dict[str, Any]) -> None:
+        doc["adapter_version"] = "operational-1"
+        del doc["bank_data_from"], doc["all_paying_accounts_covered"]
+
+    packet = f12_with(tmp_path, legacy)
+    assert outcome(packet) == ("failed", None, "snapshot_manifest_unreadable")
+    detail = packet.limitations[0]
+    assert "operational-1" in detail and "prepare the data again" in detail
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "cutoff",
+        "bank_data_from",
+        "bank_data_through",
+        "all_paying_accounts_covered",
+        "fee_journals_recognised",
+        "adapter_version",
+    ],
+)
+def test_an_operational_manifest_missing_a_declaration_fails(
+    key: str, tmp_path: Path
+) -> None:
+    packet = f12_with(tmp_path, lambda doc: doc.pop(key))
+    if key == "adapter_version":  # then it is not identified as operational
+        assert outcome(packet) == ("answered", "F12", None)
+        return
+    assert outcome(packet) == ("failed", None, "snapshot_manifest_unreadable")
+    assert key in packet.limitations[0]
+    assert "prepare the data again" in packet.limitations[0]
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("all_paying_accounts_covered", False),
+        ("all_paying_accounts_covered", "true"),
+        ("fee_journals_recognised", "yes"),
+        ("bank_data_from", "2026-13-01"),
+    ],
+)
+def test_an_operational_manifest_with_a_bad_declaration_fails(
+    key: str, value: object, tmp_path: Path
+) -> None:
+    packet = f12_with(tmp_path, lambda doc: doc.__setitem__(key, value))
+    assert outcome(packet) == ("failed", None, "snapshot_manifest_unreadable")
+    assert key in packet.limitations[0]
+
+
+def test_a_cutoff_beyond_the_declared_bank_data_fails(tmp_path: Path) -> None:
+    packet = f12_with(
+        tmp_path, lambda doc: doc.__setitem__("bank_data_through", "2026-06-29")
+    )
+    assert outcome(packet) == ("failed", None, "snapshot_manifest_unreadable")
+    assert "cutoff 2026-06-30" in packet.limitations[0]
+    assert "bank_data_through 2026-06-29" in packet.limitations[0]
+
+
+def test_the_operational_version_is_defined_where_inference_can_read_it() -> None:
+    from reconcile.adapters.operational import ADAPTER_VERSION
+    from reconcile.diagnosis.policy import OPERATIONAL_ADAPTER_VERSION
+
+    assert ADAPTER_VERSION == OPERATIONAL_ADAPTER_VERSION == "operational-2"
+
+
+# --- F06 and the payment's own amount (review 2, A) ----------------------------
+
+
+def one_payment_allocated_twice_over(rows: Rows) -> None:
+    """Invoice 1000.00; one payment of 1000.00 with a 1000.00 debit, but allocated
+    2000.00 to the invoice. Only 1000.00 left the bank."""
+    rows["payments"] = rows["payments"][:1]
+    rows["bank_transactions"] = rows["bank_transactions"][:1]
+    rows["payment_allocations"] = [
+        {**rows["payment_allocations"][0], "allocated_amount": "2000.00"}
+    ]
+    rows["gl_entries"] = [
+        r for r in rows["gl_entries"] if r["source_transaction_id"] == "PAY_1"
+    ]
+
+
+def test_f06_does_not_count_an_allocation_larger_than_its_payment(
+    tmp_path: Path,
+) -> None:
+    rows = load("f06_double_payment")
+    one_payment_allocated_twice_over(rows)
+    manifest = prepare(rows, tmp_path)
+    packet = run(manifest, tmp_path, "invoices", "INV_1")
+    assert outcome(packet) == ("abstained", None, "payment_over_allocated")
+    calc = next(
+        c for c in packet.calculations if c.calculation_id.startswith("payment_minus")
+    )
+    assert str(calc.result) == "-1000.00 EUR"
+
+
+def test_f06_does_not_count_money_the_payment_spreads_over_other_invoices(
+    tmp_path: Path,
+) -> None:
+    # PAY_2 (1000.00) is allocated 1000.00 here and 1000.00 to another invoice.
+    rows = load("f06_double_payment")
+    other = {**rows["invoices"][0], "invoice_id": "INV_2"}
+    rows["invoices"].append(other)
+    rows["payment_allocations"].append(
+        {**rows["payment_allocations"][1], "invoice_id": "INV_2"}
+    )
+    manifest = prepare(rows, tmp_path)
+    packet = run(manifest, tmp_path, "invoices", "INV_1")
+    assert outcome(packet) == ("abstained", None, "payment_over_allocated")
+
+
+def test_f06_is_unchanged_when_each_payment_covers_its_allocations(
+    tmp_path: Path,
+) -> None:
+    manifest = prepare(load("f06_double_payment"), tmp_path)
+    packet = run(manifest, tmp_path, "invoices", "INV_1")
+    assert outcome(packet) == ("answered", "F06", None)
+    assert not any(
+        c.calculation_id.startswith("payment_minus") for c in packet.calculations
+    )
+
+
+# --- wording against constructed cases and serialisation (review 2 test gaps) ---
+
+
+def nearby_debit_rows() -> Rows:
+    """Payment 100 with unbanked payments 30 and 50 to the same account, and a
+    debit of 80 with a truncated reference: 80 equals 30 + 50, which excludes the
+    primary payment, so the search (combinations that include it) finds nothing."""
+    rows = load("real_truncated_reference_netted_fee")
+    first = rows["payments"][0]
+    first["payment_amount"] = "100.00"
+    rows["invoices"][0]["invoice_total"] = "100.00"
+    rows["payment_allocations"][0]["allocated_amount"] = "100.00"
+    for r in rows["gl_entries"]:
+        r["debit" if r["debit"] != "0.00" else "credit"] = "100.00"
+    for n, amount in ((2, "30.00"), (3, "50.00")):
+        rows["payments"].append(
+            {**first, "payment_id": f"PAY_{n}", "reference_number": f"OTHER-{n}",
+             "payment_amount": amount}
+        )  # fmt: skip
+    rows["bank_transactions"][0]["amount"] = "80.00"
+    return rows
+
+
+def test_a_nearby_debit_equal_to_other_payments_is_described_as_bounded(
+    tmp_path: Path,
+) -> None:
+    manifest = prepare(nearby_debit_rows(), tmp_path)
+    packet = run(manifest, tmp_path, "payments", "PAY_1")
+    assert outcome(packet) == ("abstained", None, "reference_unmatched_nearby_debit")
+    text = " ".join(explain(packet))
+    assert "this payment together with some of the other unbanked payments" in text
+    assert "among the combinations this tool tests" in text
+    assert "equals no combination of payments" not in text
+
+
+def test_a_fee_journal_balanced_as_a_whole_with_an_invalid_attribution(
+    tmp_path: Path,
+) -> None:
+    # The whole journal balances (20 = 20); the lines sourced to the bank row do
+    # not (only the debit is), so "not balanced" alone would misdescribe it.
+    rows = load("net_fee_accounting")
+    credit = next(
+        r
+        for r in rows["gl_entries"]
+        if r["transaction_type"] == "bank_fee" and r["credit"] != "0.00"
+    )
+    credit["source_transaction_id"] = "BT_OTHER"
+    debit_total = sum(
+        Decimal(r["debit"] or "0")
+        for r in rows["gl_entries"]
+        if r["journal_id"] == credit["journal_id"]
+    )
+    credit_total = sum(
+        Decimal(r["credit"] or "0")
+        for r in rows["gl_entries"]
+        if r["journal_id"] == credit["journal_id"]
+    )
+    assert debit_total == credit_total  # balanced as a whole
+    manifest = prepare(rows, tmp_path)
+    packet = run(manifest, tmp_path, "payments", "PAY_1")
+    assert outcome(packet) == ("abstained", None, "fee_journal_invalid")
+    text = " ".join(explain(packet))
+    assert "lines attributed to this bank row" in text
+    assert "not balanced or mixes currencies" not in text
+
+
+def test_every_packet_the_pipeline_post_processes_survives_a_json_round_trip(
+    tmp_path: Path,
+) -> None:
+    made: dict[str, EvidencePacket] = {}
+    typed_off = prepare(
+        load("f14_amount_shortfall"), tmp_path / "a", fee_journals_typed=False
+    )
+    made["fee_journals_not_recognised"] = run(
+        typed_off, tmp_path / "a", "payments", "PAY_1"
+    )
+    late = prepare(
+        load("f12_payment_missing_from_bank"), tmp_path / "b", start=date(2026, 5, 5)
+    )
+    made["payment_before_bank_coverage"] = run(
+        late, tmp_path / "b", "payments", "PAY_1"
+    )
+    made["cutoff_differs_from_snapshot"] = run(
+        late, tmp_path / "b", "payments", "PAY_1", cutoff=date(2026, 7, 1)
+    )
+    rows = load("payment_reversal")
+    for r in rows["invoices"]:
+        r["status"] = ""
+    nulled = prepare(rows, tmp_path / "c")
+    made["required_field_missing"] = run(nulled, tmp_path / "c", "payments", "PAY_1")
+    rows = load("f12_payment_missing_from_bank")
+    rows["payments"][0]["bank_account_id"] = ""
+    nocp = prepare(rows, tmp_path / "d")
+    made["counterparty_unavailable"] = run(nocp, tmp_path / "d", "payments", "PAY_1")
+    for reason, packet in made.items():
+        assert packet.diagnosis.reason == reason, reason
+        assert EvidencePacket.from_json(packet.to_json()) == packet, reason

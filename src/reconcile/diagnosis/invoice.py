@@ -8,10 +8,12 @@ never `legitimate`.
 """
 
 from dataclasses import dataclass, field
+from datetime import date
 
 from reconcile.diagnosis.guard import guarded
 from reconcile.diagnosis.ledger import Ledger, is_effective, req, val
 from reconcile.diagnosis.policy import quantum
+from reconcile.diagnosis.settled import alloc_evs_of
 from reconcile.domain.contracts import (
     Calculation,
     Diagnosis,
@@ -23,6 +25,7 @@ from reconcile.domain.contracts import (
     Recommendation,
 )
 from reconcile.domain.money import Money
+from reconcile.retrieval import payment as rt
 from reconcile.retrieval.invoice import InvoiceFacts
 from reconcile.retrieval.snapshot import Reader
 
@@ -197,6 +200,13 @@ def diagnose_invoice(
         # payment would otherwise count the whole allocation as paid out.
         for leg in committed_legs:
             assert leg.debit_ev is not None
+            if _over_allocated(led, reader, leg, request.cutoff, cur, q):
+                return _abstain(
+                    led,
+                    legs,
+                    "payment_over_allocated",
+                    "an explanation of allocations that exceed the payment amount",
+                )
             # Checked without a calculation on the answered path (the debit and
             # payment are cited records); the abstention records the difference.
             gap = led.money(leg.debit_ev, "amount") - led.money(
@@ -303,6 +313,31 @@ def diagnose_invoice(
     )
     pids = [leg.pay_ev.removeprefix("pay:") for leg in live]
     return guarded(led, reader, pids, packet)
+
+
+def _over_allocated(
+    led: Ledger, reader: Reader, leg: _Leg, cutoff: date, cur: str, q: Money
+) -> bool:
+    """True when all the payment's allocations, to every invoice, exceed its
+    amount by more than a quantum: the bank can have paid out no more than the
+    payment, so allocations beyond it are not money that left. The difference is
+    recorded (with the allocations it sums) only when this fails, so answered
+    packets are unchanged."""
+    pid = leg.pay_ev.removeprefix("pay:")
+    allocs = rt.allocations_of_payment(reader, pid, cutoff)
+    total = Money.parse("0", cur)
+    for a in allocs:
+        total = total + Money.parse(req(a, "allocated_amount"), cur)
+    if (total - led.money(leg.pay_ev, "payment_amount")).amount <= q.amount:
+        return False
+    evs = alloc_evs_of(led, pid, allocs, cur)
+    led.calc(
+        f"payment_minus_allocations:{pid}",
+        "difference",
+        [(leg.pay_ev, "payment_amount"), *[(e, "allocated_amount") for e in evs]],
+        q,
+    )
+    return True
 
 
 def _debit_minus_payment(led: Ledger, leg: _Leg, q: Money) -> Calculation:

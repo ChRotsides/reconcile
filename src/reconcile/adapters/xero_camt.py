@@ -122,7 +122,7 @@ def prepare_xero_camt(
             "another account would look missing from the bank",
         )
     matching = config.get("reference_matching")
-    if matching not in REFERENCE_RULES:
+    if not isinstance(matching, str) or matching not in REFERENCE_RULES:
         raise _fail(
             "reference_matching",
             f"is required, one of {list(REFERENCE_RULES)}: 'exact' (references "

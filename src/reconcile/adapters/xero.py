@@ -108,6 +108,17 @@ def _str(obj: Mapping[str, Any], key: str, what: str) -> str:
     return v.strip()
 
 
+def _id(obj: Mapping[str, Any], key: str, what: str) -> str:
+    """An object ID, exactly as written. One spelling is used everywhere so that
+    the same payment or invoice always compares equal; padding is refused."""
+    v = obj.get(key)
+    if not isinstance(v, str) or not v.strip():
+        raise _Bad(f"{what} is missing")
+    if v != v.strip():
+        raise _Bad(f"{what} {v!r} has surrounding whitespace")
+    return v
+
+
 def _optional_str(obj: Mapping[str, Any], key: str) -> str | None:
     v = obj.get(key)
     if v is None:
@@ -155,6 +166,12 @@ def _load(
                 problems.add(f"no {key}", f"{path.name} {kind}[{i}]")
                 continue
             ident = obj[key]
+            if kind != "Journals" and ident != ident.strip():
+                problems.add(
+                    f"{key} {ident!r} has surrounding whitespace",
+                    f"{path.name} {kind}[{i}]",
+                )
+                continue
             if ident in found:
                 first_file, first = found[ident]
                 if first == obj:
@@ -310,12 +327,9 @@ def read_xero(
     for _fname, batch in loaded["BatchPayments"][0]:
         if batch.get("Type") == "PAYBATCH" and isinstance(batch.get("Payments"), list):
             for member in batch["Payments"]:
-                if isinstance(member, dict) and isinstance(
-                    member.get("PaymentID"), str
-                ):
-                    listed.setdefault(member["PaymentID"], []).append(
-                        str(batch["BatchPaymentID"])
-                    )
+                mid = member.get("PaymentID") if isinstance(member, dict) else None
+                if isinstance(mid, str) and mid == mid.strip():
+                    listed.setdefault(mid, []).append(str(batch["BatchPaymentID"]))
     other_payments: Counter[str] = Counter()
     claimed: dict[str, tuple[str, dict[str, Any]]] = {}  # standalone batch members
     for fname, pay in loaded["Payments"][0]:
@@ -326,12 +340,14 @@ def read_xero(
             if ptype != "ACCPAYPAYMENT":
                 other_payments[str(ptype)] += 1
                 continue
-            invoice_id = _str(_sub(pay, "Invoice"), "InvoiceID", "Invoice.InvoiceID")
+            invoice_id = _id(_sub(pay, "Invoice"), "InvoiceID", "Invoice.InvoiceID")
             if invoice_id not in currency_of:
                 raise _Bad(
                     f"invoice {invoice_id} is not an ACCPAY invoice in the "
                     "Invoices files"
                 )
+            if pay.get("BatchPaymentID") is not None:
+                _id(pay, "BatchPaymentID", "BatchPaymentID")
             if pay.get("BatchPaymentID") is not None or pid in listed:
                 claimed[pid] = (where, pay)
                 continue
@@ -399,7 +415,7 @@ def read_xero(
             for k, member in enumerate(listed_members):
                 if not isinstance(member, dict):
                     raise _Bad(f"Payments[{k}] is not an object")
-                mid = _str(member, "PaymentID", f"Payments[{k}].PaymentID")
+                mid = _id(member, "PaymentID", f"Payments[{k}].PaymentID")
                 ids.append(mid)
                 times = listed.get(mid, [])
                 if len(times) > 1:
@@ -408,8 +424,8 @@ def read_xero(
                         f"batches {sorted(set(times))}; a payment belongs to "
                         "one batch, once"
                     )
-                invoice_id = _str(
-                    _sub(member, "Invoice"), "InvoiceID", f"Payments[{k}].Invoice"
+                invoice_id = _id(
+                    _sub(member, "Invoice"), "InvoiceID", f"Payments[{k}].InvoiceID"
                 )
                 if invoice_id not in currency_of:
                     raise _Bad(

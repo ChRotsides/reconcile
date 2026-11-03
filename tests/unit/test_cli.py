@@ -627,6 +627,38 @@ def test_oversized_xero_date_is_one_error_line(
     assert code == 2 and err.startswith("error: ") and "Traceback" not in err
 
 
+@pytest.mark.parametrize("value", ['["exact"]', '{ rule = "exact" }', "5"])
+@pytest.mark.parametrize("fmt", ["csv-bundle", "xero-camt"])
+def test_reference_matching_of_the_wrong_type_is_one_error_line(
+    fmt: str, value: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    if fmt == "csv-bundle":
+        src = tmp_path / "src"
+        shutil.copytree(MAPPING.parent, src)
+        config = src / "mapping.toml"
+    else:
+        src = tmp_path / "src"
+        shutil.copytree(root / "fixtures" / "xero_camt", src)
+        config = src / "config.toml"
+    text = config.read_text()
+    assert re.search(r'^reference_matching = "exact".*$', text, re.M)
+    config.write_text(
+        re.sub(
+            r'^reference_matching = "exact".*$',
+            f"reference_matching = {value}",
+            text,
+            flags=re.M,
+        )
+    )
+    code, _, err = run_cli(
+        capsys, "data", "prepare", "--format", fmt, "--source", config,
+        "--output", tmp_path / "s", "--cutoff", DEMO_CUTOFF,
+    )  # fmt: skip
+    assert code == 2 and err.startswith("error: ") and "Traceback" not in err
+    assert "reference_matching" in err
+
+
 # The request contract admits only [A-Za-z0-9_.:-] after a first alphanumeric, so
 # through the CLI the characters that need sanitising are ':' and '.'.
 ODD_REQUEST_IDS = ["a:b", "con:..", "x..y", "C:1", "z.:."]

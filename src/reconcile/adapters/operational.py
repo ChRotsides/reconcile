@@ -41,11 +41,11 @@ from reconcile.adapters.finrca import (
     _MoneyStats,
     _write_quality,
 )
-from reconcile.diagnosis.policy import CLEARING_LIMITS
+from reconcile.diagnosis.policy import CLEARING_LIMITS, OPERATIONAL_ADAPTER_VERSION
 from reconcile.domain.money import MAX_DIGITS
 from reconcile.store.snapshot import Row, write_snapshot
 
-ADAPTER_VERSION = "operational-1"
+ADAPTER_VERSION = OPERATIONAL_ADAPTER_VERSION
 
 # The investigator's checks read these (retrieval/ and diagnosis/ query nothing
 # else). approval_events is read by every all-clear, but a missing table only
@@ -228,7 +228,10 @@ def prepare_operational_snapshot(
             "account payments are made from must be supplied, or a payment paid "
             "from an account without a statement would look missing from the bank"
         )
-    if reference_matching not in REFERENCE_RULES:
+    if (
+        not isinstance(reference_matching, str)
+        or reference_matching not in REFERENCE_RULES
+    ):
         raise ValueError(f"reference_matching must be one of {list(REFERENCE_RULES)}")
     if not isinstance(fee_journals_typed, bool):
         raise ValueError("fee_journals_typed must be true or false")

@@ -171,7 +171,11 @@ def test_a_finrca_shaped_manifest_adds_no_note(tmp_path: Path) -> None:
     assert manifest["tables_not_supplied"] == []
     path = tmp_path / "snap" / MANIFEST_FILE
     bare = json.loads(path.read_text())
-    del bare["tables_not_supplied"], bare["bank_data_through"], bare["bank_data_from"]
+    # Dropping adapter_version too: only a manifest not identified as operational
+    # may lack the declarations.
+    for key in ("tables_not_supplied", "bank_data_through", "bank_data_from"):
+        del bare[key]
+    del bare["adapter_version"]
     path.chmod(0o644)
     path.write_text(json.dumps(bare))
     packet = run(manifest, tmp_path, *primary(scenario))

@@ -130,3 +130,21 @@ def test_symlinked_snapshot_manifest_copy_is_refused(tmp_path: Path) -> None:
     copy.symlink_to(target)
     with pytest.raises(record.RunRecordError, match="missing"):
         record.verify_run(out)
+
+
+def test_a_report_never_reads_an_unlisted_packets_file(tmp_path: Path) -> None:
+    # The manifest lists the snapshot copy but not packets.jsonl; a planted file
+    # (here a symlink to a file elsewhere) must not be read as verified packets.
+    from reconcile.reports.write import write_report
+
+    out = run(tmp_path)
+    manifest = json.loads((out / record.MANIFEST_FILE).read_text())
+    del manifest["files"]["packets.jsonl"]
+    (out / record.MANIFEST_FILE).write_text(json.dumps(manifest))
+    planted = tmp_path / "planted.jsonl"
+    planted.write_text("not verified\n")
+    (out / "packets.jsonl").unlink()
+    (out / "packets.jsonl").symlink_to(planted)
+    with pytest.raises(ValueError, match="no packets.jsonl"):
+        write_report(out, tmp_path / "report", "html")
+    assert not (tmp_path / "report").exists()

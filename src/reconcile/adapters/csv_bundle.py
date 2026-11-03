@@ -379,7 +379,7 @@ def prepare_csv_bundle(
             "look missing from the bank",
         )
     matching = mapping["reference_matching"]
-    if matching not in REFERENCE_RULES:
+    if not isinstance(matching, str) or matching not in REFERENCE_RULES:
         raise _fail("reference_matching", f"must be one of {list(REFERENCE_RULES)}")
     fee_typed = mapping["fee_journals_typed"]
     if not isinstance(fee_typed, bool):

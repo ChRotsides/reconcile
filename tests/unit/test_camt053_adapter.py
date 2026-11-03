@@ -127,6 +127,26 @@ def test_several_txdtls_know_the_counterparty_only_if_all_agree(tmp_path: Path) 
     assert rows[0]["counterparty_token"] is None
 
 
+def test_a_two_second_gap_between_statements_is_refused(
+    tmp_path: Path,
+) -> None:
+    a = document(
+        statement(
+            entry(svc="A"), "S1", "2026-06-01", "2026-06-15", last_time="11:59:58"
+        )
+    )
+    b = document(
+        statement(
+            entry(svc="B", book="2026-06-20"),
+            "S2",
+            "2026-06-15",
+            "2026-06-30",
+            first_time="12:00:00",
+        )
+    )
+    refused(tmp_path, a, b, match="gap")
+
+
 def test_a_booked_entry_becomes_one_row(tmp_path: Path) -> None:
     details = txd("E2E-1", "DE89370400440532013000")
     rows = read_one(tmp_path, document(statement(entry(details=details))))
@@ -492,7 +512,11 @@ def test_from_is_the_first_covered_day_and_the_latest_across_accounts(
     ("first_time", "last_time", "start", "end"),
     [
         ("00:00:00", "23:59:59", date(2026, 6, 1), date(2026, 6, 30)),
-        ("00:00:59", "23:59:00", date(2026, 6, 1), date(2026, 6, 30)),
+        ("00:00:00", "23:59:59.500", date(2026, 6, 1), date(2026, 6, 30)),
+        # No margin: a statement that starts at 00:00:59 leaves 00:00:00-00:00:58
+        # of June 1 unexplained, and one that ends at 23:59:00 leaves the last minute.
+        ("00:00:59", "23:59:59", date(2026, 6, 2), date(2026, 6, 30)),
+        ("00:00:00", "23:59:00", date(2026, 6, 1), date(2026, 6, 29)),
         ("00:01:00", "23:58:59", date(2026, 6, 2), date(2026, 6, 29)),
         ("12:00:00", "12:00:00", date(2026, 6, 2), date(2026, 6, 29)),
     ],
@@ -510,6 +534,76 @@ def test_a_partly_covered_first_or_last_day_is_not_counted(
     result = read_camt053([write(tmp_path, "a.xml", xml)])
     assert (result.bank_data_from, result.bank_data_through) == (start, end)
     assert len(result.rows) == 1  # an entry on the partial day is still read
+
+
+def test_adjacent_statements_that_split_a_day_cover_it(tmp_path: Path) -> None:
+    # S1 ends at 11:59:59 and S2 starts at 12:00:00 on June 15: no overlap, no
+    # gap, and the union covers the whole day.
+    a = document(
+        statement(
+            entry(svc="A", book="2026-06-10"),
+            "S1",
+            "2026-06-01",
+            "2026-06-15",
+            last_time="11:59:59",
+        )
+    )
+    b = document(
+        statement(
+            entry(svc="B", book="2026-06-20"),
+            "S2",
+            "2026-06-15",
+            "2026-06-30",
+            first_time="12:00:00",
+        )
+    )
+    result = read_camt053([write(tmp_path, "a.xml", a), write(tmp_path, "b.xml", b)])
+    assert (result.bank_data_from, result.bank_data_through) == (
+        date(2026, 6, 1),
+        date(2026, 6, 30),
+    )
+    assert len(result.rows) == 2
+
+
+def test_statements_that_really_overlap_in_time_are_refused(tmp_path: Path) -> None:
+    a = document(
+        statement(
+            entry(svc="A", book="2026-06-10"),
+            "S1",
+            "2026-06-01",
+            "2026-06-15",
+            last_time="12:00:00",
+        )
+    )
+    b = document(
+        statement(
+            entry(svc="B", book="2026-06-20"),
+            "S2",
+            "2026-06-15",
+            "2026-06-30",
+            first_time="06:00:00",
+        )
+    )
+    message = refused(tmp_path, a, b, match="overlaps")
+    assert "'S1'" in message and "'S2'" in message
+
+
+def test_statements_that_touch_at_one_instant_overlap(tmp_path: Path) -> None:
+    a = document(
+        statement(
+            entry(svc="A"), "S1", "2026-06-01", "2026-06-15", last_time="12:00:00"
+        )
+    )
+    b = document(
+        statement(
+            entry(svc="B", book="2026-06-20"),
+            "S2",
+            "2026-06-15",
+            "2026-06-30",
+            first_time="12:00:00",
+        )
+    )
+    refused(tmp_path, a, b, match="overlaps")
 
 
 def test_a_gap_that_a_partial_day_leaves_is_refused(tmp_path: Path) -> None:
@@ -713,3 +807,38 @@ def test_read_entries_parses_an_incomplete_statement_but_gives_no_coverage(
     bad = write(tmp_path, "b.xml", document(statement(entry(sts="<Sts>X</Sts>"))))
     with pytest.raises(ValueError, match="not one of"):
         read_entries([bad])
+
+
+# --- balances are checked one currency at a time
+
+
+def two_currency_statement(*entries: str) -> str:
+    balances = (
+        balance("OPBD", "1000.00", "CRDT")
+        + balance("CLBD", "900.00", "CRDT")
+        + balance("OPBD", "500.00", "CRDT", "USD")
+        + balance("CLBD", "400.00", "CRDT", "USD")
+    )
+    return document(statement("".join(entries), ccy=None, balances=balances))
+
+
+def test_a_complete_two_currency_statement_is_accepted(tmp_path: Path) -> None:
+    eur = entry("100.00", "DBIT", svc="E")
+    usd = entry("100.00", "DBIT", svc="U", ccy="USD")
+    assert len(read_one(tmp_path, two_currency_statement(eur, usd))) == 2
+
+
+def test_another_currency_cannot_satisfy_a_balance_equation(tmp_path: Path) -> None:
+    # The EUR debit is missing; the USD debit must not stand in for it.
+    usd = entry("100.00", "DBIT", svc="U", ccy="USD")
+    refused(
+        tmp_path,
+        two_currency_statement(usd),
+        match=r"opening 1000.00 \+ booked credits 0 - booked debits 0 = 1000.00.*(EUR)",
+    )
+
+
+def test_each_currency_is_validated_on_its_own(tmp_path: Path) -> None:
+    eur = entry("100.00", "DBIT", svc="E")
+    usd = entry("90.00", "DBIT", svc="U", ccy="USD")
+    refused(tmp_path, two_currency_statement(eur, usd), match=r"\(USD\)")
