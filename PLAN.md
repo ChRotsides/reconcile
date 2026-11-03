@@ -117,7 +117,7 @@ These are proposed choices, not installed dependencies. Pin exact versions after
 | Operational store | Indexed SQLite snapshots | Local relational retrieval without an external service |
 | Checks/features | SQL and typed Python | Explainable financial checks |
 | Classical ML | Reproduce upstream first; compatible scikit-learn tooling where applicable | Preserve faithful comparison |
-| CLI/reporting | Typer, Jinja2 with escaping | Local usability and standalone HTML |
+| CLI/reporting | argparse and an always-escaping HTML element builder (standard library; the package has no runtime dependencies) | Local usability and standalone HTML |
 | Model access | None. A provider interface was built and tested in M4, then removed at the M4 gate (tag `m4-drafting-experiment`) | The product makes no model calls |
 | Quality | pytest, targeted property tests, Ruff, type checking | Verify meaningful financial and evaluation invariants |
 | Packaging | Wheel and reproducible container | Library reuse and isolated execution |
@@ -366,6 +366,8 @@ Complete M0–M3 before investing in model orchestration or interface polish. Ea
 - [ ] Make reports self-contained, escaped and free of runtime network assets.
 - [ ] Verify a clean virtual-environment install and container execution.
 - [ ] Render a plain-language explanation of each packet from templates, with no generated prose (carried from the M4 gate).
+- [ ] Give the observable baseline report pages that show what it has and state what it lacks (carried from the M2 gate; not evidence packets, because the frozen protocol names its evidence a record-availability upper bound).
+- [ ] Declare how far the bank data reaches, and abstain where real exports lack a value or a fee journal cannot be recognised, so missing data cannot become a false alarm (added in M5 from measurements on non-FinRCA input).
 
 **Deliverables:** Runnable demo, library example, CLI guide, JSON/HTML reports and our own measured clean-install experience.
 
@@ -492,23 +494,23 @@ Once a holdout is inspected, it may become a regression fixture; do not keep cal
 
 ## 9. Intended CLI and run artifacts
 
-These commands specify the intended interface. **They do not work yet.**
+Built in M5; `docs/cli-guide.md` is the guide. Changes from the interface first proposed here: there is one mode and no configuration files, so `--mode`, `--offline` and `--config` went; the one pinned FinRCA revision is built in, so `--revision` went; `evaluate` is not a `reconcile` command, because `src/reconcile/` never imports `evaluation/`.
 
 ```bash
-reconcile data fetch --dataset finrca --revision <pinned-commit> --output data/upstream
-reconcile data prepare --source data/upstream --output data/prepared --config configs/development.yaml
-reconcile investigate --snapshot data/prepared/inputs --request fixtures/public/request.json --mode deterministic --output artifacts/demo
-reconcile batch --snapshot data/prepared/inputs --requests data/prepared/requests.jsonl --config configs/evaluation.yaml --output artifacts/run-001
-reconcile evaluate --predictions artifacts/run-001/predictions.jsonl --labels data/evaluator/test --protocol evaluation/protocol.toml --output artifacts/run-001/evaluation
+reconcile data fetch --dataset finrca --output data/upstream
+reconcile data prepare --format csv-bundle --source mapping.toml --output prepared --cutoff 2026-06-30
+reconcile investigate --snapshot prepared --payment PAY-5004 --output artifacts/case-1
+reconcile batch --snapshot prepared --records records.csv --output artifacts/run-001
 reconcile report --run artifacts/run-001 --format html
-reconcile demo --offline
+reconcile demo --output artifacts/demo
+python -m evaluation.dev_run  # scoring, from a checkout only
 ```
 
-The evaluation installation exposes `evaluate`; the restricted inference image does not. Model-assisted execution is explicit. Preparing operational data must not grant inference access to adjacent evaluator files.
+The restricted inference image holds neither the CLI nor the adapters. Preparing operational data must not grant inference access to adjacent evaluator files.
 
-Each run saves input/request/config digests, source/application versions, per-case outcomes and evidence, model/prompt identities where applicable, timing/usage/error status, finalized predictions, completion manifest and artifact hashes. Scoring outputs are produced after prediction finalization.
+Each run saves request and snapshot digests, application and Python versions, per-case outcomes and evidence, timings, a hash of every output file and a completion marker written last. Scoring outputs are produced after prediction finalization.
 
-Resume only compatible completed cases. Cache identity includes snapshot, request/cutoff, policy, retrieval configuration, prompt, model and generation settings. Do not cache provider errors as valid answers or write credentials into manifests.
+Resume (M6) reuses only compatible completed cases. Cache identity includes snapshot, request/cutoff, policy and retrieval configuration. Do not write credentials into manifests.
 
 ## 10. Effort and build order
 
