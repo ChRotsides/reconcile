@@ -152,7 +152,7 @@ OUTCOME_WORDS = {
 CSP = "default-src 'none'; style-src 'unsafe-inline'"
 
 
-def _document(title: str, body: tuple[Element, ...]) -> str:
+def document(title: str, body: tuple[Element, ...]) -> str:
     head = el(
         "head",
         None,
@@ -516,7 +516,7 @@ def render_packet(
         _unknowns(packet),
         _run_details(packet, manifest),
     )
-    return _document(f"{title(packet)} - {packet.request.request_id}", body)
+    return document(f"{title(packet)} - {packet.request.request_id}", body)
 
 
 # ------------------------------------------------------------------- index
@@ -575,4 +575,4 @@ def render_index(packets: list[EvidencePacket], links: dict[str, str]) -> str:
         ),
         el("table", None, el("thead", None, head), el("tbody", None, *rows)),
     )
-    return _document("Reconcile cases", body)
+    return document("Reconcile cases", body)
