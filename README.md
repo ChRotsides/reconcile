@@ -156,7 +156,7 @@ The full command reference, exit codes and container setup are in the [CLI guide
 
 Using Reconcile in a business, including internal use at a bank, payment company, ERP vendor or finance team, needs a commercial license. Pilots, custom mappings for your export formats, and support are available.
 
-Contact **Charalambos Rotsides** at **[lhampis@gmail.com](mailto:lhampis@gmail.com)**.
+Contact **Charalambos Rotsides** at **[charalambosrotsides@gmail.com](mailto:charalambosrotsides@gmail.com) or [charalambosrotsides@outlook.com](mailto:charalambosrotsides@outlook.com)**.
 
 ## License
 
