@@ -8,11 +8,19 @@ never `legitimate`.
 """
 
 from dataclasses import dataclass, field
+from datetime import date
 
 from reconcile.diagnosis.guard import guarded
 from reconcile.diagnosis.ledger import Ledger, is_effective, req, val
 from reconcile.diagnosis.policy import quantum
+from reconcile.diagnosis.settled import (
+    CONTRADICTED,
+    CONTRADICTED_MISSING,
+    alloc_evs_of,
+    contradicts_settlement,
+)
 from reconcile.domain.contracts import (
+    Calculation,
     Diagnosis,
     Disposition,
     EvidencePacket,
@@ -22,6 +30,7 @@ from reconcile.domain.contracts import (
     Recommendation,
 )
 from reconcile.domain.money import Money
+from reconcile.retrieval import payment as rt
 from reconcile.retrieval.invoice import InvoiceFacts
 from reconcile.retrieval.snapshot import Reader
 
@@ -38,6 +47,7 @@ class _Leg:
     debit_ev: str | None = None
     evidence: list[str] = field(default_factory=list)  # bank rows or search
     done: bool = False  # bank side fully examined
+    contradicted: bool = False  # a bank reversal, credit or return matches it
 
 
 def _missing_debit_finding(legs: list[_Leg]) -> Finding | None:
@@ -141,6 +151,8 @@ def diagnose_invoice(
             bcur = req(r, "currency")
             b_ev = led.bank_row(r, "payment_reference")
             leg.evidence.append(b_ev)
+            if contradicts_settlement(r):
+                leg.contradicted = True
             if bcur != cur:
                 return _abstain(
                     led,
@@ -191,6 +203,33 @@ def diagnose_invoice(
     # --- F06, section 4.1 ------------------------------------------------
     if -total_minus_allocated.result.amount > q.amount:
         committed_legs = [leg for leg in live if leg.debit_ev is not None]
+        # An allocation is committed only where the bank debit supports the
+        # payment amount (contract 4.1, note of 2026-11): a debit far below the
+        # payment would otherwise count the whole allocation as paid out.
+        for leg in committed_legs:
+            assert leg.debit_ev is not None
+            if leg.contradicted:
+                return _abstain(led, legs, CONTRADICTED, CONTRADICTED_MISSING)
+            if _over_allocated(led, reader, leg, request.cutoff, cur, q):
+                return _abstain(
+                    led,
+                    legs,
+                    "payment_over_allocated",
+                    "an explanation of allocations that exceed the payment amount",
+                )
+            # Checked without a calculation on the answered path (the debit and
+            # payment are cited records); the abstention records the difference.
+            gap = led.money(leg.debit_ev, "amount") - led.money(
+                leg.pay_ev, "payment_amount"
+            )
+            if abs(gap).amount > q.amount:
+                _debit_minus_payment(led, leg, q)
+                return _abstain(
+                    led,
+                    legs,
+                    "debit_differs_from_payment",
+                    "an explanation of the debit difference",
+                )
         if committed_legs:
             led.calc(
                 "committed",
@@ -230,6 +269,8 @@ def diagnose_invoice(
     if not is_split and not on_due:
         return _out_of_scope(led, "no in-scope invoice pattern applies")
 
+    if any(leg.contradicted for leg in live):
+        return _abstain(led, legs, CONTRADICTED, CONTRADICTED_MISSING)
     if any(leg.debit_ev is None for leg in live):
         return _abstain(
             led,
@@ -240,13 +281,7 @@ def diagnose_invoice(
     debit_calcs: list[str] = []
     for leg in live:
         assert leg.debit_ev is not None
-        pid = leg.pay_ev.removeprefix("pay:")
-        diff = led.calc(
-            f"debit_minus_payment:{pid}",
-            "difference",
-            [(leg.debit_ev, "amount"), (leg.pay_ev, "payment_amount")],
-            q,
-        )
+        diff = _debit_minus_payment(led, leg, q)
         if abs(diff.result).amount > q.amount:
             return _abstain(
                 led,
@@ -290,6 +325,42 @@ def diagnose_invoice(
     )
     pids = [leg.pay_ev.removeprefix("pay:") for leg in live]
     return guarded(led, reader, pids, packet)
+
+
+def _over_allocated(
+    led: Ledger, reader: Reader, leg: _Leg, cutoff: date, cur: str, q: Money
+) -> bool:
+    """True when all the payment's allocations, to every invoice, exceed its
+    amount by more than a quantum: the bank can have paid out no more than the
+    payment, so allocations beyond it are not money that left. The difference is
+    recorded (with the allocations it sums) only when this fails, so answered
+    packets are unchanged."""
+    pid = leg.pay_ev.removeprefix("pay:")
+    allocs = rt.allocations_of_payment(reader, pid, cutoff)
+    total = Money.parse("0", cur)
+    for a in allocs:
+        total = total + Money.parse(req(a, "allocated_amount"), cur)
+    if (total - led.money(leg.pay_ev, "payment_amount")).amount <= q.amount:
+        return False
+    evs = alloc_evs_of(led, pid, allocs, cur)
+    led.calc(
+        f"payment_minus_allocations:{pid}",
+        "difference",
+        [(leg.pay_ev, "payment_amount"), *[(e, "allocated_amount") for e in evs]],
+        q,
+    )
+    return True
+
+
+def _debit_minus_payment(led: Ledger, leg: _Leg, q: Money) -> Calculation:
+    assert leg.debit_ev is not None
+    pid = leg.pay_ev.removeprefix("pay:")
+    return led.calc(
+        f"debit_minus_payment:{pid}",
+        "difference",
+        [(leg.debit_ev, "amount"), (leg.pay_ev, "payment_amount")],
+        q,
+    )
 
 
 def _f06(led: Ledger, live: list[_Leg], committed: list[_Leg]) -> EvidencePacket:

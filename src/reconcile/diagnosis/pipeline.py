@@ -6,11 +6,24 @@ in an explicit disposition (PLAN.md section 4).
 
 import json
 import sqlite3
+from dataclasses import replace
+from datetime import date
 from pathlib import Path
+from typing import Any
 
 from reconcile.diagnosis.invoice import diagnose_invoice
-from reconcile.diagnosis.payment import diagnose_bank_row, diagnose_payment
-from reconcile.diagnosis.policy import declared
+from reconcile.diagnosis.ledger import FieldMissing
+from reconcile.diagnosis.payment import (
+    F12,
+    PENDING,
+    diagnose_bank_row,
+    diagnose_payment,
+)
+from reconcile.diagnosis.policy import (
+    OPERATIONAL_ADAPTER_VERSION,
+    OPERATIONAL_PREFIX,
+    declared,
+)
 from reconcile.domain.contracts import (
     Diagnosis,
     Disposition,
@@ -52,8 +65,54 @@ class _Failure(Exception):
         self.reason = reason
 
 
-def _check_snapshot(path: Path, request: InvestigationRequest) -> None:
-    """Bind the file to the request through the manifest written beside it.
+def _check_operational(manifest: dict[str, Any]) -> None:
+    """An operational manifest carries the preparer's declarations; without them
+    (an older preparation) the checks that rest on them would silently not run."""
+    again = "; prepare the data again with the current version"
+
+    def fail(why: str) -> _Failure:
+        return _Failure("snapshot_manifest_unreadable", why + again)
+
+    version = manifest.get("adapter_version")
+    if version != OPERATIONAL_ADAPTER_VERSION:
+        raise fail(
+            f"the snapshot was prepared with adapter version {version!r}, not "
+            f"{OPERATIONAL_ADAPTER_VERSION!r}"
+        )
+    days: dict[str, date] = {}
+    for key in ("cutoff", "bank_data_from", "bank_data_through"):
+        value = manifest.get(key)
+        try:
+            if not isinstance(value, str):
+                raise ValueError
+            days[key] = date.fromisoformat(value)
+        except ValueError:
+            raise fail(f"the manifest's {key} is missing or not a date") from None
+    if manifest.get("all_paying_accounts_covered") is not True:
+        raise fail("the manifest's all_paying_accounts_covered is not true")
+    if not isinstance(manifest.get("fee_journals_recognised"), bool):
+        raise fail("the manifest's fee_journals_recognised is missing or not a boolean")
+    if days["cutoff"] > days["bank_data_through"]:
+        raise fail(
+            f"the manifest's cutoff {days['cutoff']} is after its "
+            f"bank_data_through {days['bank_data_through']}"
+        )
+    if days["bank_data_from"] > days["bank_data_through"]:
+        raise fail("the manifest's bank_data_from is after its bank_data_through")
+
+
+def _check_snapshot(
+    path: Path, request: InvestigationRequest
+) -> tuple[tuple[str, ...], bool, str | None]:
+    """Bind the file to the request through the manifest written beside it and
+    return the data-coverage limitations the manifest declares (none for FinRCA),
+    whether fee journals are recognisable in this data (true unless the manifest
+    says `fee_journals_recognised: false`; FinRCA has no such key) and the first
+    day the bank data covers (`bank_data_from`, absent for FinRCA).
+
+    The request's cutoff must be the one the data was prepared with: rows after
+    it are absent, rows before it were all kept, and some queries have no date
+    bound, so a later or earlier cutoff would read a different cut of the data.
 
     Trusts the manifest; the content digest is not recomputed (assumption).
     """
@@ -64,6 +123,79 @@ def _check_snapshot(path: Path, request: InvestigationRequest) -> None:
         raise _Failure("snapshot_manifest_unreadable", f"{type(e).__name__}") from e
     if digest != request.snapshot:
         raise _Failure("snapshot_mismatch", "request names a different snapshot")
+    if str(manifest.get("adapter_version", "")).startswith(OPERATIONAL_PREFIX):
+        _check_operational(manifest)
+    prepared = manifest.get("cutoff")
+    if prepared is not None and prepared != request.cutoff.isoformat():
+        raise _Failure(
+            "cutoff_differs_from_snapshot",
+            f"the request's cutoff {request.cutoff.isoformat()} differs from the "
+            f"cutoff {prepared} the data was prepared with; prepare the data again "
+            "with the cutoff to investigate",
+        )
+    notes: list[str] = []
+    missing = manifest.get("tables_not_supplied")
+    if isinstance(missing, list) and missing:
+        notes.append(
+            "These tables were not supplied with this data, so a search of them "
+            "finding nothing says nothing about them: "
+            f"{', '.join(str(t) for t in missing)}."
+        )
+    through = manifest.get("bank_data_through")
+    start = manifest.get("bank_data_from")
+    if through and start:
+        notes.append(
+            f"Bank data was declared complete from {start} through {through}, "
+            "for every account payments are made from, by whoever prepared the data."
+        )
+    elif through:
+        notes.append(
+            f"Bank data was declared complete through {through} by whoever "
+            "prepared the data."
+        )
+    return (
+        tuple(notes),
+        manifest.get("fee_journals_recognised") is not False,
+        start if isinstance(start, str) else None,
+    )
+
+
+def _fee_not_ruled_out(packet: EvidencePacket) -> EvidencePacket:
+    """F14 means "no fee journal exists". Where no journal can be recognised as
+    a fee (a Xero export types none as `bank_fee`), that absence proves nothing,
+    so the shortfall is neither explained nor unexplained. Evidence, calculations
+    and limitations stay; the finding and recommendations are not established."""
+    diagnosis = Diagnosis(
+        Disposition.ABSTAINED,
+        None,
+        reason="fee_journals_not_recognised",
+        missing_information=(
+            "journals recognisable as bank fees, so a fee can be ruled out",
+        ),
+    )
+    return replace(packet, diagnosis=diagnosis, recommendations=())
+
+
+def _before_bank_coverage(packet: EvidencePacket, bank_from: str) -> EvidencePacket:
+    """F12 and pending settlement rest on finding no bank row. A payment dated
+    before the bank data begins could have settled where nothing was supplied, so
+    the absence proves nothing. Evidence and calculations stay; the finding and
+    recommendations are not established."""
+    early = any(
+        item.record is not None
+        and item.record.table == "payments"
+        and dict(item.timestamps).get("payment_date", bank_from)[:10] < bank_from
+        for item in packet.evidence
+    )
+    if not early:
+        return packet
+    diagnosis = Diagnosis(
+        Disposition.ABSTAINED,
+        None,
+        reason="payment_before_bank_coverage",
+        missing_information=("bank statements covering the payment date",),
+    )
+    return replace(packet, diagnosis=diagnosis, recommendations=())
 
 
 def investigate(
@@ -79,9 +211,26 @@ def investigate(
         ("requested_policy_version", request.policy_version),
         *declared(),
     )
+    try:
+        notes, fees_recognised, bank_from = _check_snapshot(snapshot_path, request)
+        packet = _investigate(snapshot_path, request, limits, prov)
+        if not fees_recognised and packet.diagnosis.category == "F14":
+            packet = _fee_not_ruled_out(packet)
+        if bank_from and packet.diagnosis.category in (F12, PENDING):
+            packet = _before_bank_coverage(packet, bank_from)
+        return replace(packet, limitations=(*packet.limitations, *notes))
+    except _Failure as e:
+        return _failed(request, prov, e.reason, str(e))
+
+
+def _investigate(
+    snapshot_path: Path,
+    request: InvestigationRequest,
+    limits: Limits,
+    prov: tuple[tuple[str, str], ...],
+) -> EvidencePacket:
     entity = request.primary_entity
     try:
-        _check_snapshot(snapshot_path, request)
         with Reader(snapshot_path, limits) as reader:
             key = KEY_COLUMNS.get(entity.table)
             if key is not None and not reader.exists(
@@ -124,10 +273,17 @@ def investigate(
             ("complete retrieval within the declared limits",),
             ("Retrieval hit a limit; the evidence is incomplete, not absent.",),
         )
-    except _Failure as e:
-        return _failed(request, prov, e.reason, str(e))
     except sqlite3.Error as e:
         return _failed(request, prov, "snapshot_unreadable", type(e).__name__)
+    except FieldMissing as e:
+        return _packet(
+            request,
+            prov,
+            Disposition.ABSTAINED,
+            "required_field_missing",
+            (f"the value of {e.column}, absent from the data",),
+            (f"The data has no value for {e.column}; the check needs it.",),
+        )
     except ValueError as e:  # malformed or non-unique row, inconsistent packet
         return _failed(request, prov, "malformed_record", str(e))
 

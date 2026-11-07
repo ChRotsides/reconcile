@@ -93,6 +93,21 @@ def test_unknown_currency_is_an_error() -> None:
         Money(Decimal("1.00"), None)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    ("code", "scale"),
+    [("NZD", 2), ("JPY", 0), ("KWD", 3), ("TND", 3), ("XOF", 0), ("CLP", 0)],
+)
+def test_scales_match_the_iso_4217_list(code: str, scale: int) -> None:
+    # Values read from SIX list-one.xml, Pblshd 2026-09-17.
+    assert CURRENCY_SCALE[code] == scale
+    assert Money.parse("1", code).scale == scale
+
+
+def test_funds_and_non_currency_codes_are_not_listed() -> None:
+    for code in ("CLF", "CHE", "UYI", "XAU", "XDR", "XXX"):
+        assert code not in CURRENCY_SCALE
+
+
 # --- construction --------------------------------------------------------
 
 

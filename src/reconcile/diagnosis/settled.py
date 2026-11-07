@@ -9,7 +9,7 @@ not define abstain with their own reason; none is called legitimate.
 from dataclasses import dataclass
 from datetime import date
 
-from reconcile.diagnosis.ledger import Ledger, is_effective, req
+from reconcile.diagnosis.ledger import FieldMissing, Ledger, is_effective, req
 from reconcile.diagnosis.policy import CLEARING_LIMITS, clearing_policy, quantum
 from reconcile.domain.calendar import business_days, spans_weekend
 from reconcile.domain.contracts import (
@@ -34,6 +34,21 @@ BATCH = "legitimate_batch_payment"
 REVERSAL = "legitimate_payment_reversal"
 NO_EXCEPTION = "no_exception"
 NO_ALLOCATION = "payment_without_invoice_allocation"
+
+
+CONTRADICTED = "settlement_contradicted_by_bank"
+CONTRADICTED_MISSING = "whether this payment's bank debit was reversed or returned"
+
+
+def contradicts_settlement(row: Row) -> bool:
+    """A reference-matched bank row that undoes or denies a debit: a payment
+    reversal, any credit, or a returned row. A payment that the ERP calls settled
+    but whose bank rows say this is contradictory, not settled."""
+    return (
+        row["transaction_type"] == "payment reversal"
+        or row["direction"] == "credit"
+        or row["status"] == "returned"
+    )
 
 
 def _supported(
@@ -88,8 +103,13 @@ def diagnose_settled(
             "bank_amount_above_payment",
             "an explanation of a bank amount above the payment",
         )
+    contradicted = any(contradicts_settlement(r) for r in rows)
     if delta.result.amount > q.amount:
-        return _shortfall(request, reader, led, pay, pay_ev, d_ev, d_id, cur)
+        return _shortfall(
+            request, reader, led, pay, pay_ev, d_ev, d_id, cur, contradicted
+        )
+    if contradicted:
+        return led.abstain(CONTRADICTED, CONTRADICTED_MISSING)
     return _matched(request, reader, led, pay, pay_ev, d, d_ev)
 
 
@@ -102,6 +122,7 @@ def _shortfall(
     d_ev: str,
     d_id: str,
     cur: str,
+    contradicted: bool,
 ) -> EvidencePacket:
     cutoff = request.cutoff
     lines = rt.journals(reader, d_id, "bank_fee", cutoff)
@@ -134,6 +155,10 @@ def _shortfall(
         return led.abstain(
             "fee_journal_invalid", "balanced single-currency fee journals"
         )
+    if any(dict(led.items[e].values)["currency"] != cur for e in evs):
+        return led.abstain(
+            "unsupported_fx", "a documented conversion path between currencies"
+        )
     q = quantum(cur)
     led.calc("explained", "sum", [(e, "amount") for e in evs])
     unexplained = led.calc(
@@ -148,6 +173,8 @@ def _shortfall(
             "fee_journal_does_not_match_difference",
             "an explanation of the part of the shortfall the fee journal leaves",
         )
+    if contradicted:  # the net-fee all-clear rests on the payment being settled
+        return led.abstain(CONTRADICTED, CONTRADICTED_MISSING)
     allocs = require_allocation(led, reader, pay, cutoff)
     if isinstance(allocs, EvidencePacket):
         return allocs
@@ -169,7 +196,7 @@ def _shortfall(
 class _Balance:
     calc_id: str | None  # None when no effective allocation exists
     evidence: list[str]
-    status: str
+    status: str | None  # None when the data has no invoice status
     others: list[str]  # effective payments other than the primary one
 
 
@@ -217,7 +244,7 @@ def _balance(
         if pid != primary:
             others.append(pid)
     cited.extend(allocs)
-    status = facts.invoice["status"] or ""
+    status = facts.invoice["status"]
     if not allocs:
         return _Balance(None, cited, status, others)
     q = quantum(cur)
@@ -440,6 +467,8 @@ def _reversal(
     if isinstance(bals, EvidencePacket):
         return bals
     for b in bals:
+        if b.status is None:  # an absent status cannot show the invoice reopened
+            raise FieldMissing("status")
         if b.status == "paid":  # the contract needs the invoice reopened
             reason = (
                 "reversal_followed_by_repayment"

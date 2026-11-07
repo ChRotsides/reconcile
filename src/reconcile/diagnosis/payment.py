@@ -161,6 +161,18 @@ def _no_bank_row(
             "an allocation and a balanced payment journal for the payment",
         )
 
+    # The A3 search needs the counterparty on both sides. Without it "found
+    # nothing" would be a search that never ran, so do not draw on it.
+    if pay["bank_account_id"] is None:
+        return led.abstain(
+            "counterparty_unavailable",
+            "the counterparty account of this payment, for the unmatched-debit search",
+        )
+    if rt.debits_without_counterparty(reader, cur, cutoff):
+        return led.abstain(
+            "counterparty_unavailable",
+            "the counterparty of every bank debit that could settle this payment",
+        )
     acct = req(pay, "bank_account_id")
     pool = rt.unreferenced_debits(reader, acct, cur, cutoff)
     equal = [r for r in pool if Money.parse(req(r, "amount"), cur) == amount]
@@ -361,6 +373,10 @@ def diagnose_bank_row(
     if len(evs) != len(lines):
         return led.abstain(
             "fee_journal_invalid", "balanced single-currency fee journals"
+        )
+    if any(dict(led.items[e].values)["currency"] != cur for e in evs):
+        return led.abstain(
+            "unsupported_fx", "a documented conversion path between currencies"
         )
     q = quantum(cur)
     diff = led.calc(

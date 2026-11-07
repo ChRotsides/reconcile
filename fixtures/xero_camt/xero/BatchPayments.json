@@ -1,0 +1,57 @@
+{
+ "Id": "00000000-0000-0000-0000-000000000000",
+ "Status": "OK",
+ "ProviderName": "Invented fixture",
+ "DateTimeUTC": "/Date(1782777600000)/",
+ "BatchPayments": [
+  {
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090",
+    "CurrencyCode": "EUR"
+   },
+   "Reference": "BATCH-0605",
+   "BatchPaymentID": "bat-1",
+   "DateString": "2026-06-05T00:00:00",
+   "Date": "/Date(1780617600000+0000)/",
+   "Payments": [
+    {
+     "Invoice": {
+      "InvoiceID": "inv-b1",
+      "CurrencyCode": "EUR"
+     },
+     "PaymentID": "pay-b1",
+     "Amount": 400.0,
+     "BankAmount": 400.0
+    },
+    {
+     "Invoice": {
+      "InvoiceID": "inv-b2",
+      "CurrencyCode": "EUR"
+     },
+     "PaymentID": "pay-b2",
+     "Amount": 600.0,
+     "BankAmount": 600.0
+    }
+   ],
+   "Type": "PAYBATCH",
+   "Status": "AUTHORISED",
+   "TotalAmount": 1000.0,
+   "UpdatedDateUTC": "/Date(1780617600000+0000)/",
+   "IsReconciled": false
+  },
+  {
+   "Account": {
+    "AccountID": "acct-090",
+    "Code": "090"
+   },
+   "Reference": "AR-RUN",
+   "BatchPaymentID": "bat-ar",
+   "Date": "/Date(1780358400000+0000)/",
+   "Payments": [],
+   "Type": "RECBATCH",
+   "Status": "AUTHORISED",
+   "TotalAmount": 99.0
+  }
+ ]
+}

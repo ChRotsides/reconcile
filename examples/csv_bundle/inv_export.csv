@@ -1,0 +1,3 @@
+Invoice No,Supplier,Ccy,Gross,Due,Doc Status
+INV-2001,SUP-A,EUR,"1,000.00",14/06/2026,Paid in full
+INV-2002,SUP-B,EUR,"2,500.00",2026-06-20,Paid in full

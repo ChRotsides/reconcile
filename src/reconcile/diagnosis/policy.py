@@ -10,6 +10,12 @@ from reconcile.domain.money import Money
 
 POLICY_VERSION = "evidence-contract-0.5"
 
+# Version of the manifest an operational preparation writes. The investigator
+# reads it to tell operational manifests (which must carry their declarations)
+# from FinRCA ones; the adapter imports it, never the reverse.
+OPERATIONAL_ADAPTER_VERSION = "operational-2"
+OPERATIONAL_PREFIX = "operational"
+
 # Stated in every answered legitimate_* and no_exception packet, so an all-clear
 # cannot be read as a general clean bill (docs/evidence-contract.md section 5.1).
 # Changing the wording or the lists needs a new POLICY_VERSION.

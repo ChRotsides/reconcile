@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+ <BkToCstmrStmt>
+  <GrpHdr><MsgId>MSG-STMT-2026-07</MsgId><CreDtTm>2026-07-31T23:59:59</CreDtTm></GrpHdr>
+  <Stmt>
+   <Id>STMT-2026-07</Id><ElctrncSeqNb>2</ElctrncSeqNb><CreDtTm>2026-07-31T23:59:59</CreDtTm>
+   <FrToDt><FrDtTm>2026-07-01T00:00:00</FrDtTm><ToDtTm>2026-07-31T23:59:59</ToDtTm></FrToDt>
+   <Acct><Id><IBAN>NL91ABNA0417164300</IBAN></Id><Ccy>EUR</Ccy></Acct>
+   <Ntry><Amt Ccy="EUR">250.00</Amt><CdtDbtInd>DBIT</CdtDbtInd><Sts>BOOK</Sts><BookgDt><Dt>2026-07-02</Dt></BookgDt><ValDt><Dt>2026-07-02</Dt></ValDt><AcctSvcrRef>SVC-JUL-1</AcctSvcrRef><BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>ICDT</Cd><SubFmlyCd>ESCT</SubFmlyCd></Fmly></Domn></BkTxCd><NtryDtls><TxDtls><Refs><EndToEndId>JUL-1</EndToEndId></Refs><RltdPties><CdtrAcct><Id><IBAN>FR1420041010050500013M02606</IBAN></Id></CdtrAcct></RltdPties></TxDtls></NtryDtls></Ntry>
+  </Stmt>
+ </BkToCstmrStmt>
+</Document>
